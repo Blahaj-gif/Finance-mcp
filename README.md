@@ -2,7 +2,7 @@
 
 A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
 
-Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 35 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 36 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
@@ -26,6 +26,9 @@ Two public sources sit alongside the broker feed, so Claude can see the events t
 | `get_economic_calendar` | Scheduled US releases — CPI, PPI, jobs, JOLTS and more — with date, time and reference period, plus the latest actual prints. |
 | `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. |
 | `get_edgar_filings` | SEC filings in three modes: one company's filings, the all-registrant live feed, or full-text search across filing bodies. |
+| `get_insider_activity` | Parsed Form 4 transactions — who traded, at what price, and **whether the sale was under a Rule 10b5-1 plan**. |
+
+**Filings are parsed, not forwarded.** Most of what an analyst wants from a filing is already a machine-readable field. "Was that sale pre-scheduled?" is `<aff10b5One>` in the Form 4 XML — a boolean. So the server extracts and answers rather than handing over a document: one Form 4 is ~6,600 tokens of raw XML, and a single 10-K is ~610,000 tokens, which is three times a 200k context window. `get_insider_activity` also separates real decisions (codes P/S) from compensation mechanics — grants, option exercises, and shares withheld for tax — which are routinely misreported as "insiders sold $X".
 
 **On latency.** EDGAR acceptance timestamps are exact to the second, so an earnings 8-K (item `2.02`) is visible as soon as it is accepted. The delay you experience is your own polling interval, not the feed.
 

@@ -430,6 +430,8 @@ def company_filings(symbol, forms=None, limit=20):
         out.append({
             "company": nz.normalize_text(payload.get("name", info["title"])),
             "cik": info["cik"],
+            "accession": accession,
+            "primary_document": doc,
             "form": form,
             "filing_date": recent["filingDate"][i],
             "report_date": recent.get("reportDate", [""] * (i + 1))[i],

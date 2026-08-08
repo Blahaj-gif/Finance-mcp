@@ -332,3 +332,85 @@ def test_draft_order_blocks_when_price_cannot_be_determined(monkeypatch, tmp_pat
     assert "ORDER DRAFTED" not in out
     assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json"), \
         "an unpriceable order must not be persisted"
+
+
+# =====================================================================
+# Freshness: a reader must be able to tell a live number from a stale one
+# =====================================================================
+
+def test_price_responses_stamp_the_bar_they_quote(monkeypatch):
+    """
+    The staleness gate refuses old bars, but refusing is only half the job — a
+    reader still cannot tell a current number from a merely acceptable one and
+    will quote both with the same confidence.
+    """
+    frame = rising_frame(60)
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (frame, "Webull OpenAPI"))
+
+    for out in (srv.get_market_analysis("AAA"),
+                srv.get_ohlcv("AAA", "D", 20),
+                srv.get_technical_indicators("AAA")):
+        assert "Latest D bar:" in out
+        assert "source: Webull OpenAPI" in out
+        assert frame["time"].iloc[-1][:10] in out
+
+
+def test_freshness_line_names_the_session_age():
+    import datetime
+    from dashboard import market_calendar as mc
+    latest = mc.previous_trading_day(datetime.date.today() + datetime.timedelta(days=1))
+    fresh = rising_frame(10)
+    fresh.loc[fresh.index[-1], "time"] = f"{latest} 21:00:00"
+    line = wc.freshness_line(fresh, "Webull OpenAPI", "D")
+    assert "current session" in line
+
+    stale = fresh.copy()
+    older = mc.previous_trading_day(mc.previous_trading_day(latest))
+    stale.loc[stale.index[-1], "time"] = f"{older} 21:00:00"
+    assert "trading session" in wc.freshness_line(stale, "Webull OpenAPI", "D")
+
+
+def test_freshness_line_flags_a_cache_hit():
+    assert "from 60s cache" in wc.freshness_line(rising_frame(5), "Webull OpenAPI (Cached)", "D")
+
+
+# =====================================================================
+# The composite verdict is opt-in
+# =====================================================================
+
+def test_no_buy_sell_score_by_default(monkeypatch):
+    """
+    An unvalidated score anchors judgment even when labelled unvalidated, so
+    the default is to report what the indicators measure and stop there.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (rising_frame(120), "Webull OpenAPI"))
+    out = srv.get_market_analysis("AAA")
+
+    assert "Composite Verdict" not in out
+    assert "STRONG BUY" not in out and "STRONG SELL" not in out
+    assert "Score:" not in out
+    assert "Indicator Readings" in out
+    assert "include_verdict=true" in out          # discoverable, not hidden
+
+
+def test_verdict_appears_only_when_requested(monkeypatch):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (rising_frame(120), "Webull OpenAPI"))
+    out = srv.get_market_analysis("AAA", include_verdict=True)
+
+    assert "Composite Verdict" in out
+    assert "Score:" in out
+    assert "heuristic" in out.lower()
+
+
+def test_indicator_readings_stay_descriptive_without_the_verdict(monkeypatch):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (rising_frame(120), "Webull OpenAPI"))
+    out = srv.get_market_analysis("AAA")
+
+    # The measured reading survives; the instruction attached to it does not.
+    assert "RSI (14)" in out
+    for directive in ("**BUY**", "**SELL**", "**NEUTRAL**"):
+        assert directive not in out

@@ -14,6 +14,7 @@ import dashboard.webull_client as webull_client
 import dashboard.indicators as indicators
 import dashboard.econ_calendar as econ_calendar
 import dashboard.iv_history as iv_history
+import dashboard.edgar_forms as edgar_forms
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -62,17 +63,26 @@ def get_account_info() -> str:
         raise ToolError(f"Error fetching account info: {e}") from e
 
 @mcp.tool()
-def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> str:
+def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
+                        include_verdict: bool = False) -> str:
     """
-    Fetches market data, calculates 50+ technical indicators, and returns a
-    structured technical analysis summary and trading verdict.
+    Price action and 50+ technical indicators for a symbol, reported as measured values
+    with each indicator's own standard reading (oversold / overbought, above / below its
+    signal line, inside / outside its band).
+
     This is the usual starting point for a single symbol. For the full picture including
     fundamentals, news and filings, call get_comprehensive_profile instead of chaining calls.
-    
+
+    No BUY/SELL score is produced unless you ask for one. The composite verdict is a
+    fixed-weight heuristic that underperformed buy-and-hold in backtest, and an
+    unvalidated score anchors judgment even when it is labelled unvalidated — so the
+    default is to hand back the evidence and leave the call to the reader.
+
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
         interval: Bar interval: D (Daily), M1 (1 min), M5 (5 min), M15 (15 min), M30 (30 min), H1 (1 hour), W (Weekly).
         count: Number of historical bars to analyze.
+        include_verdict: Set true to also compute the composite BUY/SELL score. Off by default.
     """
     try:
         df, source = webull_client.fetch_data(symbol, interval, count)
@@ -162,17 +172,28 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> s
         else:
             verdict = "NEUTRAL"
             
+        # Strip the prescriptive tail from each reading unless a verdict was
+        # asked for. "RSI (14): Oversold (25.3)" describes what the indicator
+        # says; "🟢 BUY" tells the reader what to do on the strength of a
+        # weighting nobody validated.
+        if not include_verdict:
+            import re as _re
+            signals = [_re.sub(r"\s*[🟢🔴⚪]\s*\*\*(?:STRONG )?(?:BUY|SELL|NEUTRAL)\*\*\s*$", "", s)
+                       for s in signals]
+
+        verdict_block = (
+            f"\n#### Composite Verdict *(opt-in heuristic)*\n"
+            f"**{verdict}** (Score: {verdict_score:+.1f} / +5.0)\n"
+            if include_verdict else ""
+        )
+
         # Format results as a readable markdown block
         summary = f"""### Technical Analysis for {symbol.upper()} ({interval} Interval)
-- **Source**: {source}
 - **Last Price**: ${close_val:.2f} ({'+' if price_change >= 0 else ''}{price_change:.2f} / {price_pct_change:.2f}%)
 - **Day's Range**: Low: ${latest_bar['low']:.2f} | High: ${latest_bar['high']:.2f}
 - **Volume**: {latest_bar['volume']:,.0f}
-
-#### Technical Indicators Consensus
-**Verdict**: **{verdict}** (Score: {verdict_score:+.1f} / +5.0)
-
-**Signals Breakdown**:
+{verdict_block}
+#### Indicator Readings
 {chr(10).join(signals)}
 
 #### Select Indicator Values
@@ -183,7 +204,15 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> s
 - **ADX (14)**: {latest_bar['adx']:.1f} (+DI: {latest_bar['plus_di']:.1f} | -DI: {latest_bar['minus_di']:.1f})
 - **Ichimoku Conversion/Base**: {latest_bar['ichimoku_conversion']:.2f} / {latest_bar['ichimoku_base']:.2f}
 """
-        return fallback_warning(source) + summary + HEURISTIC_NOTE
+        out = (webull_client.freshness_line(df, source, interval)
+               + fallback_warning(source) + summary)
+        if include_verdict:
+            out += HEURISTIC_NOTE
+        else:
+            out += ("\n*Indicator readings only — no composite score. Pass "
+                    "`include_verdict=true` for the heuristic BUY/SELL score, "
+                    "noting it underperformed buy-and-hold in backtest.*")
+        return out
     except DataIntegrityError as e:
         # Untrustworthy data must reach the caller as an error, not as content.
         raise ToolError(str(e)) from e
@@ -228,7 +257,9 @@ def get_technical_indicators(symbol: str, interval: str = "D", count: int = 5) -
         except Exception:
             table_str = display_df.to_string(index=False)
             
-        return f"Data source: {source}\n\n" + fallback_warning(source) + table_str
+        return (f"### Technical Indicators for {symbol.upper()} ({interval})\n"
+                + webull_client.freshness_line(df, source, interval)
+                + fallback_warning(source) + table_str)
     except DataIntegrityError as e:
         # Untrustworthy data must reach the caller as an error, not as content.
         raise ToolError(str(e)) from e
@@ -345,7 +376,8 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
         except Exception:
             table_str = latest.to_string(index=False)
             
-        return (f"### OHLCV Bars for {symbol.upper()} ({interval})\nData Source: {source}\n\n"
+        return (f"### OHLCV Bars for {symbol.upper()} ({interval})\n"
+                + webull_client.freshness_line(df, source, interval)
                 + fallback_warning(source) + table_str)
     except DataIntegrityError as e:
         # Untrustworthy data must reach the caller as an error, not as content.
@@ -353,42 +385,113 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
     except Exception as e:
         raise ToolError(f"Error fetching OHLCV: {e}") from e
 
-@mcp.tool()
-def get_options_chain(symbol: str) -> str:
+def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
     """
-    Fetches option chain summary (calls & puts with IV, strike, volume, open interest) for nearest expiration.
-    Use for the raw strike ladder. For IV rank, implied move, skew and greeks call
-    get_options_analytics; to hunt unusual flow call get_unusual_options.
-    
+    IV rank and the implied expected move, as a compact header.
+
+    Shared by the chain and the analytics tool so both report the same numbers
+    from the same basis — the rank comes from this server's own recorded IV
+    history once a symbol has enough of it, and says so when it does not.
+    """
+    try:
+        c = calls.copy(); p = puts.copy()
+        c["d"] = (c["strike"] - spot).abs(); p["d"] = (p["strike"] - spot).abs()
+        atm_c, atm_p = c.nsmallest(1, "d").iloc[0], p.nsmallest(1, "d").iloc[0]
+        atm_iv = (float(atm_c["impliedVolatility"]) + float(atm_p["impliedVolatility"])) / 2
+        straddle = float(atm_c["lastPrice"]) + float(atm_p["lastPrice"])
+        move_pct = straddle / spot * 100 if spot else 0.0
+
+        try:
+            iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
+            real = iv_history.iv_rank(symbol.upper(), atm_iv)
+        except Exception:
+            real = None
+
+        block = f"* **ATM implied volatility**: `{atm_iv * 100:.1f}%`\n"
+        if real:
+            block += (f"* **IV rank**: `{real['rank']:.0f}/100` (percentile "
+                      f"`{real['percentile']:.0f}%`) — from {real['observations']} recorded days\n")
+        else:
+            rv = price_df["close"].pct_change().dropna().rolling(20).std() * (252 ** 0.5)
+            rv = rv.dropna()
+            if len(rv) > 30:
+                lo, hi = float(rv.min()), float(rv.max())
+                proxy = (atm_iv - lo) / (hi - lo) * 100 if hi > lo else 50.0
+                need = max(0, iv_history.MIN_OBSERVATIONS - iv_history.observation_count(symbol.upper()))
+                block += (f"* **IV rank (proxy)**: `{max(0, min(100, proxy)):.0f}/100` "
+                          f"— against realised volatility; {need} more daily observations "
+                          "needed for a true IV rank\n")
+        block += (f"* **Expected move by expiry**: **±{move_pct:.2f}%** "
+                  f"(`${spot * (1 - move_pct / 100):,.2f}` – `${spot * (1 + move_pct / 100):,.2f}`) "
+                  f"from the `${straddle:,.2f}` ATM straddle\n")
+        return block
+    except Exception as e:
+        return f"* *IV context unavailable: {str(e)[:70]}*\n"
+
+
+@mcp.tool()
+def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> str:
+    """
+    Option chain around the money, with IV rank and the market-implied expected move
+    at the top — the two numbers that tell you whether the board is cheap or dear and
+    how far it is priced to travel.
+
+    Strikes are selected to bracket spot, not taken from one end of the ladder.
+    For greeks and put/call skew as well, call get_options_analytics; to hunt
+    unusual flow call get_unusual_options.
+
     Args:
         symbol: The stock symbol (e.g. AAPL, SPY, NVDA).
+        expiration: Expiry as YYYY-MM-DD. Defaults to the nearest.
+        strikes: How many strikes either side of spot to show (default 6).
     """
     import yfinance as yf
+    import datetime as _dt
     try:
         ticker = yf.Ticker(symbol.upper())
         options_dates = ticker.options
         if not options_dates:
             return f"No options data available for {symbol}."
-            
-        near_date = options_dates[0]
+
+        near_date = expiration or options_dates[0]
+        if near_date not in options_dates:
+            raise ToolError(f"{near_date} is not a listed expiry. Available: "
+                            f"{', '.join(options_dates[:8])}")
         chain = ticker.option_chain(near_date)
-        
-        calls = chain.calls[["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]].head(5).copy()
-        puts = chain.puts[["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]].head(5).copy()
-        
-        for df_opt in [calls, puts]:
-            df_opt["impliedVolatility"] = (df_opt["impliedVolatility"] * 100).round(1).astype(str) + "%"
-            for col in ["lastPrice", "bid", "ask"]:
-                df_opt[col] = df_opt[col].round(2)
-                
-        try:
-            calls_str = calls.to_markdown(index=False)
-            puts_str = puts.to_markdown(index=False)
-        except Exception:
-            calls_str = calls.to_string(index=False)
-            puts_str = puts.to_string(index=False)
-            
-        return f"### Options Chain for {symbol.upper()} (Expiration: {near_date})\n\n**Calls (Top Strikes)**:\n{calls_str}\n\n**Puts (Top Strikes)**:\n{puts_str}"
+
+        # Spot from the validated price feed, not from the chain's own quotes.
+        df, source = webull_client.fetch_data(symbol, "D", 260)
+        spot = float(df["close"].iloc[-1])
+        days = max((_dt.date.fromisoformat(near_date) - _dt.date.today()).days, 0)
+
+        header = (f"### Options Chain — {symbol.upper()} @ {near_date} ({days}d)\n"
+                  + webull_client.freshness_line(df, source, "D")
+                  + f"* **Spot**: `${spot:,.2f}`\n")
+        header += _iv_context_block(symbol, chain.calls, chain.puts, spot, days, df)
+
+        # Strikes bracketing the money. Previously this took .head(strikes),
+        # which is the *lowest* strikes on the ladder -- deep in-the-money calls
+        # and far out-of-the-money puts, i.e. the least useful rows on the board.
+        cols = ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"]
+        out_tables = []
+        for label, frame in (("Calls", chain.calls), ("Puts", chain.puts)):
+            f = frame.copy()
+            f["dist"] = (f["strike"] - spot).abs()
+            f = f.nsmallest(max(1, strikes), "dist").sort_values("strike")[cols].copy()
+            f["moneyness"] = f["strike"].apply(
+                lambda k: "ATM" if abs(k - spot) / spot < 0.005
+                else ("ITM" if (k < spot) == (label == "Calls") else "OTM"))
+            f["impliedVolatility"] = (f["impliedVolatility"] * 100).round(1).astype(str) + "%"
+            for c in ("lastPrice", "bid", "ask"):
+                f[c] = f[c].round(2)
+            try:
+                out_tables.append(f"**{label}** (bracketing spot)\n\n" + f.to_markdown(index=False))
+            except Exception:
+                out_tables.append(f"**{label}** (bracketing spot)\n\n" + f.to_string(index=False))
+
+        return header + "\n" + "\n\n".join(out_tables)
+    except (DataIntegrityError, ToolError):
+        raise
     except Exception as e:
         raise ToolError(f"Error fetching options chain for {symbol}: {e}") from e
 
@@ -1838,6 +1941,93 @@ def get_company_financials(symbol: str) -> str:
         raise
     except Exception as e:
         raise ToolError(f"Error fetching filed financials for {symbol}: {e}") from e
+
+
+@mcp.tool()
+def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
+                         since: str = None) -> str:
+    """
+    Parsed SEC Form 4 insider transactions — who traded, when, at what price, and
+    crucially **whether the sale was made under a Rule 10b5-1 plan**.
+
+    That distinction is the whole point: a pre-scheduled 10b5-1 sale carries almost no
+    information about an insider's view, while a discretionary open-market sale does.
+    The tool also separates real decisions (codes P/S) from compensation mechanics —
+    option exercises, grants, and shares withheld to pay tax on vesting — which are
+    routinely and wrongly reported as "insiders sold $X".
+
+    Args:
+        symbol: Ticker symbol (e.g. MU, AAPL).
+        limit: How many Form 4 filings to parse (default 10).
+        person: Filter to one insider by name, case- and accent-insensitive (e.g. "Mehrotra").
+        since: ISO date (YYYY-MM-DD); drop transactions before it.
+    """
+    try:
+        res = edgar_forms.insider_transactions(symbol, limit=limit, person=person, since=since)
+        reports = res["filings"]
+
+        if not reports:
+            scope = f" matching '{person}'" if person else ""
+            scope += f" since {since}" if since else ""
+            return (f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
+                    f"*No Form 4 filings found{scope}.*")
+
+        out = f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
+
+        flow = edgar_forms.summarise_insider_flow(reports)
+        out += (f"**Open-market decisions across {len(reports)} filing(s)**\n"
+                f"* Bought: `${flow['open_market_bought_value']:,.0f}` "
+                f"({flow['open_market_bought_shares']:,.0f} sh)\n"
+                f"* Sold: `${flow['open_market_sold_value']:,.0f}` "
+                f"({flow['open_market_sold_shares']:,.0f} sh)\n"
+                f"* **Net: `${flow['net_value']:,.0f}`**\n"
+                f"* Of those sales — under a 10b5-1 plan: **{flow['sales_under_10b5_1']}**, "
+                f"not under a plan: **{flow['sales_not_under_10b5_1']}**\n")
+        if flow["non_discretionary_value"]:
+            out += (f"* Excluded as compensation mechanics (grants, exercises, tax withholding): "
+                    f"`${flow['non_discretionary_value']:,.0f}` — not a view on the stock\n")
+        out += "\n"
+
+        rows = []
+        for r in reports:
+            plan = {True: "Yes", False: "No", None: "not disclosed"}[r["plan_10b5_1"]]
+            for t in r["transactions"]:
+                rows.append({
+                    "Date": t["date"],
+                    "Insider": r["owner"][:26],
+                    "Role": ", ".join(r["roles"])[:24] or "—",
+                    "Action": f"{t['code']} · {t['code_label']}",
+                    "Shares": f"{t['shares']:,.0f}" if t["shares"] else "—",
+                    "Price": f"${t['price']:,.2f}" if t["price"] else "—",
+                    "Value": f"${t['value']:,.0f}" if t["value"] else "—",
+                    "10b5-1": plan,
+                    "Discretionary": "yes" if t["is_open_market_decision"] else "no",
+                })
+
+        table = pd.DataFrame(rows)
+        try:
+            out += table.to_markdown(index=False)
+        except Exception:
+            out += table.to_string(index=False)
+
+        notes = [fn for r in reports for fn in r["footnotes"]]
+        if notes:
+            out += "\n\n**Footnotes from the filings**\n"
+            for n in dict.fromkeys(notes[:5]):
+                out += f"* {n[:240]}\n"
+
+        if res["errors"]:
+            out += f"\n**⚠️ {len(res['errors'])} filing(s) could not be parsed:** " + \
+                   "; ".join(res["errors"][:3]) + "\n"
+
+        out += ("\n*Source: SEC Form 4 XML as filed. The 10b5-1 column reads the form's own "
+                "`aff10b5One` checkbox — 'not disclosed' means the filer left it blank, which "
+                "is not the same as 'no plan'.*")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error reading insider activity for {symbol}: {e}") from e
 
 
 @mcp.tool()

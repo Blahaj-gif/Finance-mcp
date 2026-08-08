@@ -802,6 +802,35 @@ def get_provenance(symbol: str, interval: str = "D") -> dict:
         }
 
 
+def freshness_line(df: pd.DataFrame, source: str, interval: str = "D") -> str:
+    """
+    A one-line provenance stamp for any response carrying prices.
+
+    The staleness gate already refuses to serve old bars, but refusing is only
+    half the job: a reader still cannot tell a live number from a merely
+    acceptable one, and will quote both with the same confidence. So every
+    price-bearing answer states which bar it is quoting and how old that bar is.
+    """
+    try:
+        newest = pd.to_datetime(df["time"].iloc[-1])
+    except Exception:
+        return f"`Source: {base_source(source)} · bar timestamp unavailable`\n\n"
+
+    iv = interval.upper()
+    if iv in STALENESS_TOLERANCE_SESSIONS:
+        behind = market_calendar.sessions_stale(newest.date())
+        age = ("current session" if behind == 0
+               else f"{behind} trading session{'s' if behind != 1 else ''} old")
+    else:
+        hours = (datetime.datetime.utcnow() - newest.to_pydatetime()).total_seconds() / 3600
+        age = f"{hours:.1f}h old" if hours < 48 else f"{hours / 24:.1f} days old"
+
+    cached = " · from 60s cache" if "(Cached)" in source else ""
+    return (f"`Latest {iv} bar: {newest:%Y-%m-%d %H:%M} ({age}) · "
+            f"source: {base_source(source)}{cached} · "
+            f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
+
+
 def base_source(source: str) -> str:
     """Source label without the cache marker, so banners dedupe across cached/live hits."""
     return source.replace(" (Cached)", "")
