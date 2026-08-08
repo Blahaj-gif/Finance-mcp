@@ -34,6 +34,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 
 import dashboard.webull_client as webull_client
+from dashboard import theme as fm_theme
 import indicators
 import backtester
 import forecaster
@@ -46,118 +47,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Premium Sleek Dark Mode Look
-render_html("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Outfit', sans-serif;
-    }
-    
-    .stApp {
-        background: radial-gradient(circle at 10% 20%, rgb(15, 23, 42) 0%, rgb(9, 15, 29) 90%);
-        color: #E2E8F0;
-    }
-    
-    /* Elegant Header */
-    .dashboard-title {
-        background: linear-gradient(135deg, #38BDF8 0%, #34D399 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 800;
-        font-size: 2.8rem;
-        margin-bottom: 0.2rem;
-    }
-    .dashboard-subtitle {
-        color: #94A3B8;
-        font-size: 1.1rem;
-        font-weight: 300;
-        margin-bottom: 2rem;
-    }
-    
-    /* Card Glassmorphism */
-    .metric-card {
-        background: rgba(30, 41, 59, 0.45);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 16px;
-        padding: 20px;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
-        margin-bottom: 1rem;
-        transition: transform 0.2s ease, border-color 0.2s ease;
-    }
-    .metric-card:hover {
-        transform: translateY(-2px);
-        border-color: rgba(56, 189, 248, 0.3);
-    }
-    
-    /* Styling Streamlit widgets to match dark mode */
-    div[data-testid="stMetricValue"] {
-        font-size: 1.8rem !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Status pills */
-    .verdict-pill {
-        display: inline-block;
-        padding: 6px 16px;
-        border-radius: 9999px;
-        font-weight: 600;
-        font-size: 0.9rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    .pill-strong-buy { background: rgba(16, 185, 129, 0.2); color: #34D399; border: 1px solid #10B981; }
-    .pill-buy { background: rgba(52, 211, 153, 0.1); color: #6EE7B7; border: 1px solid #34D399; }
-    .pill-neutral { background: rgba(148, 163, 184, 0.2); color: #CBD5E1; border: 1px solid #94A3B8; }
-    .pill-sell { background: rgba(239, 68, 68, 0.2); color: #FCA5A5; border: 1px solid #EF4444; }
-    .pill-strong-sell { background: rgba(220, 38, 38, 0.3); color: #F87171; border: 1px solid #DC2626; }
-    
-    /* Tab strip: wrap rather than scroll. Short labels fit on one row at any
-       sensible width, but a wrap is the failure mode that stays discoverable --
-       a horizontal scroll arrow hides tabs with no indication they exist. */
-    [data-testid="stTabs"] div:has(> [data-testid="stTab"]) {
-        flex-wrap: wrap;
-        row-gap: 0.15rem;
-        overflow-x: visible !important;
-    }
-    [data-testid="stTab"] { white-space: nowrap; }
+# ------------------------------------------------------------------
+# Appearance
+# ------------------------------------------------------------------
+# Read before anything renders: the stylesheet has to be injected at the top of
+# the script, but the control that changes it lives in the masthead further
+# down. Streamlit reruns the whole script on a widget change, so the widget
+# writes its key into session_state and the next run picks it up here.
+st.session_state.setdefault("ui_theme", fm_theme.DEFAULT)
+st.session_state.setdefault("ui_density", "compact")
+st.session_state.setdefault("ui_overlays", "neutral")
 
-    /* Digits in a column must share a width, or the eye cannot compare them. */
-    div[data-testid="stMetricValue"],
-    div[data-testid="stMetricDelta"],
-    [data-testid="stDataFrame"] {
-        font-variant-numeric: tabular-nums;
-        font-feature-settings: "tnum" 1;
-    }
+ACTIVE_THEME = fm_theme.resolve(st.session_state["ui_theme"])
+PALETTE = fm_theme.chart(ACTIVE_THEME, st.session_state["ui_overlays"])
+st.markdown(fm_theme.css(ACTIVE_THEME, st.session_state["ui_density"]),
+            unsafe_allow_html=True)
 
-    /* Journal layout styling */
-    .journal-entry {
-        background: rgba(30, 41, 59, 0.3);
-        border: 1px solid rgba(255, 255, 255, 0.03);
-        border-left: 4px solid #38BDF8;
-        border-radius: 8px;
-        padding: 15px;
-        margin-bottom: 12px;
-    }
-    .journal-header {
-        display: flex;
-        justify-content: space-between;
-        font-size: 0.85rem;
-        color: #94A3B8;
-        margin-bottom: 8px;
-    }
-    .journal-title {
-        font-weight: 600;
-        font-size: 1.05rem;
-        color: #F8FAFC;
-    }
-</style>
-""")
+# The stylesheet lives in dashboard/theme.py -- one token block per theme
+# feeding one shared sheet, injected above before anything renders.
 
 # App Sidebar
-st.sidebar.markdown("<h2 style='font-weight:800; color:#38BDF8; margin-bottom: 0px;'>Controls</h2>", unsafe_allow_html=True)
+render_html('<div class="fm-brand" style="border-bottom:1px solid var(--fm-rule); '
+            'padding-bottom:0.3rem;">Controls</div>', target=st.sidebar)
 
 # 1. Market Settings
 st.sidebar.markdown("### 1. Market Settings")
@@ -221,19 +132,9 @@ with st.sidebar.expander("SuperTrend & Ichimoku"):
     ich_base = st.number_input("Ichimoku Base Period", min_value=1, max_value=100, value=26)
     ich_span_b = st.number_input("Ichimoku Span B Period", min_value=1, max_value=200, value=52)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    """
-    <div style='background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px; padding: 15px; text-align: center; margin-top: 15px;'>
-        <h4 style='color: #38BDF8; margin-top:0; margin-bottom: 8px;'>☕ Support Open Source</h4>
-        <p style='font-size: 0.85rem; color: #94A3B8; margin-bottom: 12px;'>Enjoying this AI Financial Intelligence package? Support future quantitative updates!</p>
-        <a href='https://github.com/sponsors' target='_blank' style='background: linear-gradient(135deg, #38BDF8 0%, #34D399 100%); color: #0F172A; font-weight: bold; padding: 8px 16px; border-radius: 8px; text-decoration: none; display: inline-block; font-size: 0.9rem;'>
-            ☕ Buy Me a Coffee / Sponsor
-        </a>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+# A sponsor card used to sit here -- directly beneath the controls that size a
+# position. Removed: on a live trading surface it reads as a hobby build, and
+# nothing that solicits is worth putting next to an order ticket.
 
 
 # Load Data
@@ -249,15 +150,61 @@ with st.spinner("Calculating technical indicators..."):
     # Calculate indicators using updated indicators library
     res = indicators.calculate_all_indicators(df)
 
-# Header Section
-st.markdown("<div class='dashboard-title'>📈 Finance MCP</div>", unsafe_allow_html=True)
-st.markdown(f"<div class='dashboard-subtitle'>Analyzing {symbol} • Source: {source} • Interval: {interval}</div>", unsafe_allow_html=True)
-
 # ------------------------------------------------------------------
-# Market Snapshot Metrics Cards
+# Masthead
 # ------------------------------------------------------------------
 latest_bar = res.iloc[-1]
 prev_bar = res.iloc[-2]
+
+INTERVAL_LABELS = {"D": "Daily", "M1": "1 Min", "M5": "5 Min", "M15": "15 Min",
+                   "M30": "30 Min", "H1": "1 Hour", "W": "Weekly", "M": "Monthly"}
+
+col_head, col_set = st.columns([9, 1])
+with col_head:
+    render_html(f"""
+    <div class="fm-head">
+        <span class="fm-brand">Finance MCP</span>
+        <span class="fm-sym">{as_html_text(symbol)}</span>
+        <span class="fm-meta">{as_html_text(source)} · {INTERVAL_LABELS.get(interval, interval)}
+            · bar {as_html_text(latest_bar['time'])} · {count} bars</span>
+    </div>
+    """)
+
+with col_set:
+    with st.popover("⚙ DISPLAY", use_container_width=True):
+        render_html('<div class="fm-set-head">Display settings</div>')
+
+        st.radio(
+            "Theme",
+            options=list(fm_theme.THEMES),
+            format_func=lambda k: fm_theme.THEMES[k]["label"],
+            key="ui_theme",
+        )
+        render_html(f'<div class="fm-set-note">{fm_theme.THEMES[ACTIVE_THEME]["blurb"]}</div>')
+
+        st.radio(
+            "Chart overlays",
+            options=list(fm_theme.OVERLAY_STYLES),
+            format_func=lambda k: k.capitalize(),
+            key="ui_overlays",
+            horizontal=True,
+        )
+        render_html(f'<div class="fm-set-note">'
+                    f'{fm_theme.OVERLAY_STYLES[st.session_state["ui_overlays"]]}</div>')
+
+        st.radio(
+            "Row density",
+            options=list(fm_theme.DENSITIES),
+            format_func=lambda k: fm_theme.DENSITIES[k]["label"],
+            key="ui_density",
+            horizontal=True,
+        )
+        render_html('<div class="fm-set-note">Applies to every table and the metric '
+                    'strip. Compact is the terminal default.</div>')
+
+# ------------------------------------------------------------------
+# Market Snapshot Strip
+# ------------------------------------------------------------------
 
 close_val = latest_bar["close"]
 open_val = latest_bar["open"]
@@ -270,89 +217,51 @@ consensus_score = latest_bar["consensus_score"]
 price_change = close_val - prev_bar["close"]
 price_pct_change = (price_change / prev_bar["close"]) * 100
 
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    render_html(f"""
-    <div class="metric-card">
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Last Price</div>
-        <div style="font-size:1.8rem; font-weight:700; color:{'#10B981' if price_change >= 0 else '#EF4444'}; margin-top:5px;">
-            ${close_val:.2f}
-        </div>
-        <div style="font-size:0.85rem; color:{'#34D399' if price_change >= 0 else '#FCA5A5'}; font-weight:600; margin-top:2px;">
-            {'+' if price_change >= 0 else ''}{price_change:.2f} ({price_pct_change:.2f}%)
-        </div>
-    </div>
-    """)
-
-with col2:
-    render_html(f"""
-    <div class="metric-card">
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Volume</div>
-        <div style="font-size:1.8rem; font-weight:700; color:#E2E8F0; margin-top:5px;">
-            {vol_val:,.0f}
-        </div>
-        <div style="font-size:0.85rem; color:#64748B; font-weight:600; margin-top:2px;">
-            Shares Traded
-        </div>
-    </div>
-    """)
-
-with col3:
-    render_html(f"""
-    <div class="metric-card">
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Market Regime</div>
-        <div style="font-size:1.4rem; font-weight:700; color:#F59E0B; margin-top:10px; line-height: 1.2;">
-            {current_regime}
-        </div>
-        <div style="font-size:0.85rem; color:#64748B; font-weight:600; margin-top:5px;">
-            Regime Classifier
-        </div>
-    </div>
-    """)
-
 # Determine Consensus Verdict
 if consensus_score >= 3:
-    verdict_text = "Strong Buy"
-    verdict_class = "pill-strong-buy"
+    verdict_text, verdict_tone = "Strong Buy", "fm-up"
 elif consensus_score >= 1:
-    verdict_text = "Buy"
-    verdict_class = "pill-buy"
+    verdict_text, verdict_tone = "Buy", "fm-up"
 elif consensus_score <= -3:
-    verdict_text = "Strong Sell"
-    verdict_class = "pill-strong-sell"
+    verdict_text, verdict_tone = "Strong Sell", "fm-dn"
 elif consensus_score <= -1:
-    verdict_text = "Sell"
-    verdict_class = "pill-sell"
+    verdict_text, verdict_tone = "Sell", "fm-dn"
 else:
-    verdict_text = "Neutral"
-    verdict_class = "pill-neutral"
+    verdict_text, verdict_tone = "Neutral", "fm-neu"
 
-with col4:
-    render_html(f"""
-    <div class="metric-card">
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Adaptive Consensus</div>
-        <div style="margin-top:10px;">
-            <span class="verdict-pill {verdict_class}">{verdict_text}</span>
-        </div>
-        <div style="font-size:0.85rem; color:#64748B; font-weight:600; margin-top:12px;">
-            Score: {consensus_score:+.1f} / +5.0
-        </div>
+# One ruled strip rather than five floating cards. The cards spent ~180px of
+# vertical on five numbers; this reads in a single scan and leaves the fold for
+# the chart.
+price_tone = "fm-up" if price_change >= 0 else "fm-dn"
+render_html(f"""
+<div class="fm-strip">
+    <div class="fm-cell">
+        <div class="fm-k">Last</div>
+        <div class="fm-v {price_tone}">{close_val:,.2f}</div>
+        <div class="fm-d {price_tone}">{price_change:+,.2f} · {price_pct_change:+.2f}%</div>
     </div>
-    """)
-
-with col5:
-    render_html(f"""
-    <div class="metric-card">
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Volatility (ATR)</div>
-        <div style="font-size:1.8rem; font-weight:700; color:#E2E8F0; margin-top:5px;">
-            {latest_bar["atr_14"]:.2f}
-        </div>
-        <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; margin-top:2px;">
-            NATR: {latest_bar["natr_14"]:.2f}%
-        </div>
+    <div class="fm-cell">
+        <div class="fm-k">Volume</div>
+        <div class="fm-v">{vol_val:,.0f}</div>
+        <div class="fm-d">shares traded</div>
     </div>
-    """)
+    <div class="fm-cell">
+        <div class="fm-k">Regime</div>
+        <div class="fm-v word fm-am">{as_html_text(current_regime)}</div>
+        <div class="fm-d">classifier</div>
+    </div>
+    <div class="fm-cell">
+        <div class="fm-k">Consensus</div>
+        <div class="fm-v word {verdict_tone}">{verdict_text}</div>
+        <div class="fm-d">{consensus_score:+.1f} of ±5.0</div>
+    </div>
+    <div class="fm-cell">
+        <div class="fm-k">Volatility</div>
+        <div class="fm-v">{latest_bar["atr_14"]:,.2f}</div>
+        <div class="fm-d">{latest_bar["natr_14"]:.2f}% NATR</div>
+    </div>
+</div>
+""")
 
 
 # Initialize Background Alert Watcher Thread in Streamlit if not running
@@ -375,14 +284,14 @@ if "watcher_thread_started" not in st.session_state:
 # 1600px and four at 1280px -- half the app reachable only by finding an arrow.
 # Every tab already states its full name in the heading inside it.
 tab_charts, tab_backtest, tab_journal, tab_signals, tab_execution, tab_portfolio, tab_alerts, tab_data = st.tabs([
-    "📊 Charts",
-    "📈 Backtest",
-    "📝 Journal",
-    "⚡ Signals",
-    "🛒 Execution",
-    "💼 Portfolio",
-    "🚨 Alerts",
-    "📋 Data"
+    "Charts",
+    "Backtest",
+    "Journal",
+    "Signals",
+    "Execution",
+    "Portfolio",
+    "Alerts",
+    "Data"
 ])
 
 # Tab 1: Charts
@@ -424,59 +333,59 @@ with tab_charts:
             low=res["low"],
             close=res["close"],
             name="Price",
-            increasing_line_color="#10B981", increasing_fillcolor="rgba(16,185,129,0.3)",
-            decreasing_line_color="#EF4444", decreasing_fillcolor="rgba(239,68,68,0.3)"
+            increasing_line_color=PALETTE["up"], increasing_fillcolor=PALETTE["up_fill"],
+            decreasing_line_color=PALETTE["down"], decreasing_fillcolor=PALETTE["down_fill"]
         ),
         row=1, col=1
     )
     
     # Overlays
     if "SMA Fast" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_fast_len}"], mode="lines", name=f"SMA {sma_fast_len}", line=dict(color="#38BDF8", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_fast_len}"], mode="lines", name=f"SMA {sma_fast_len}", line=dict(color=PALETTE["overlay"](0), width=1.2)), row=1, col=1)
     if "SMA Medium" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_mid_len}"], mode="lines", name=f"SMA {sma_mid_len}", line=dict(color="#60A5FA", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_mid_len}"], mode="lines", name=f"SMA {sma_mid_len}", line=dict(color=PALETTE["overlay"](1), width=1.2)), row=1, col=1)
     if "SMA Slow" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_slow_len}"], mode="lines", name=f"SMA {sma_slow_len}", line=dict(color="#818CF8", width=2.0)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_slow_len}"], mode="lines", name=f"SMA {sma_slow_len}", line=dict(color=PALETTE["overlay"](2), width=1.6)), row=1, col=1)
     if "EMA Fast" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_fast_len}"], mode="lines", name=f"EMA {ema_fast_len}", line=dict(color="#F472B6", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_fast_len}"], mode="lines", name=f"EMA {ema_fast_len}", line=dict(color=PALETTE["overlay"](3), width=1.2, dash="dot")), row=1, col=1)
     if "EMA Slow" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_slow_len}"], mode="lines", name=f"EMA {ema_slow_len}", line=dict(color="#EC4899", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_slow_len}"], mode="lines", name=f"EMA {ema_slow_len}", line=dict(color=PALETTE["overlay"](4), width=1.2, dash="dot")), row=1, col=1)
         
     if "Bollinger Bands" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_upper"], mode="lines", name="BB Upper", line=dict(color="rgba(148, 163, 184, 0.4)", width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_lower"], mode="lines", name="BB Lower", line=dict(color="rgba(148, 163, 184, 0.4)", width=1, dash="dash"), fill="tonexty", fillcolor="rgba(148, 163, 184, 0.05)"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_middle"], mode="lines", name="BB Middle", line=dict(color="rgba(148, 163, 184, 0.6)", width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_upper"], mode="lines", name="BB Upper", line=dict(color=PALETTE["band"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_lower"], mode="lines", name="BB Lower", line=dict(color=PALETTE["band"], width=1, dash="dash"), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_middle"], mode="lines", name="BB Middle", line=dict(color=PALETTE["overlay"](1), width=1)), row=1, col=1)
         
     if "Keltner Channels" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_upper"], mode="lines", name="KC Upper", line=dict(color="rgba(245, 158, 11, 0.4)", width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_lower"], mode="lines", name="KC Lower", line=dict(color="rgba(245, 158, 11, 0.4)", width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_middle"], mode="lines", name="KC Middle", line=dict(color="rgba(245, 158, 11, 0.6)", width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_upper"], mode="lines", name="KC Upper", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_lower"], mode="lines", name="KC Lower", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_middle"], mode="lines", name="KC Middle", line=dict(color=PALETTE["overlay"](2), width=1)), row=1, col=1)
         
     if "Donchian Channels" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_upper"], mode="lines", name="DC Upper", line=dict(color="rgba(34, 197, 94, 0.3)", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_lower"], mode="lines", name="DC Lower", line=dict(color="rgba(34, 197, 94, 0.3)", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_middle"], mode="lines", name="DC Middle", line=dict(color="rgba(34, 197, 94, 0.5)", width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_upper"], mode="lines", name="DC Upper", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_lower"], mode="lines", name="DC Lower", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_middle"], mode="lines", name="DC Middle", line=dict(color=PALETTE["overlay"](3), width=1, dash="dash")), row=1, col=1)
         
     if "VWAP" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap"], mode="lines", name="VWAP", line=dict(color="#FBBF24", width=2.0)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap"], mode="lines", name="VWAP", line=dict(color=PALETTE["accent"], width=1.6)), row=1, col=1)
         
     if "VWAP Bands" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_upper"], mode="lines", name="VWAP Upper", line=dict(color="rgba(251, 191, 36, 0.3)", width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_lower"], mode="lines", name="VWAP Lower", line=dict(color="rgba(251, 191, 36, 0.3)", width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_upper"], mode="lines", name="VWAP Upper", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_lower"], mode="lines", name="VWAP Lower", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
         
     if "SuperTrend" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["supertrend"], mode="lines", name="SuperTrend", line=dict(color="#10B981", width=2.0)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["supertrend"], mode="lines", name="SuperTrend", line=dict(color=PALETTE["overlay"](1), width=1.6)), row=1, col=1)
         
     if "Ichimoku Cloud" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_conversion"], mode="lines", name="Tenkan-sen (Conversion)", line=dict(color="#60A5FA", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_base"], mode="lines", name="Kijun-sen (Base)", line=dict(color="#F472B6", width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_a"], mode="lines", name="Senkou Span A", line=dict(color="rgba(16, 185, 129, 0.3)", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_b"], mode="lines", name="Senkou Span B", line=dict(color="rgba(239, 68, 68, 0.3)", width=1), fill="tonexty", fillcolor="rgba(16, 185, 129, 0.05)"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_conversion"], mode="lines", name="Tenkan-sen (Conversion)", line=dict(color=PALETTE["overlay"](0), width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_base"], mode="lines", name="Kijun-sen (Base)", line=dict(color=PALETTE["overlay"](2), width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_a"], mode="lines", name="Senkou Span A", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_b"], mode="lines", name="Senkou Span B", line=dict(color=PALETTE["band"], width=1), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
         
     if "Pivot Points" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_pp"], mode="lines", name="PP", line=dict(color="#94A3B8", width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_r1"], mode="lines", name="R1", line=dict(color="#EF4444", width=0.8, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_s1"], mode="lines", name="S1", line=dict(color="#10B981", width=0.8, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_pp"], mode="lines", name="PP", line=dict(color=PALETTE["dim"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_r1"], mode="lines", name="R1", line=dict(color=PALETTE["down"], width=0.8, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_s1"], mode="lines", name="S1", line=dict(color=PALETTE["up"], width=0.8, dash="dot")), row=1, col=1)
 
     # Forecast Overlay
     if show_forecast:
@@ -484,15 +393,15 @@ with tab_charts:
             fc = forecaster.run_ar_forecast(res)
             
             # Forecast line
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["forecast_price"], mode="lines", name="Forecast Median", line=dict(color="#38BDF8", width=2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=fc["time"], y=fc["forecast_price"], mode="lines", name="Forecast Median", line=dict(color=PALETTE["ink"], width=1.6, dash="dash")), row=1, col=1)
             
             # 68% Confidence interval
             fig.add_trace(go.Scatter(x=fc["time"], y=fc["upper_68"], mode="lines", name="68% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_68"], mode="lines", name="68% CI Lower", line=dict(width=0), fill="tonexty", fillcolor="rgba(56, 189, 248, 0.15)", showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_68"], mode="lines", name="68% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faint"], showlegend=False), row=1, col=1)
             
             # 95% Confidence interval
             fig.add_trace(go.Scatter(x=fc["time"], y=fc["upper_95"], mode="lines", name="95% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_95"], mode="lines", name="95% CI Lower", line=dict(width=0), fill="tonexty", fillcolor="rgba(56, 189, 248, 0.05)", showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_95"], mode="lines", name="95% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faintest"], showlegend=False), row=1, col=1)
         except Exception as fe:
             st.warning(f"Could not calculate forecast: {str(fe)}")
 
@@ -501,54 +410,54 @@ with tab_charts:
         row_num = idx + 2
         
         if sub == "RSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res[f"rsi_{rsi_len}"], mode="lines", name="RSI", line=dict(color="#C084FC", width=1.5)), row=row_num, col=1)
-            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=70, x1=res["time"].iloc[-1], y1=70, line=dict(color="rgba(239, 68, 68, 0.4)", width=1, dash="dash"), row=row_num, col=1)
-            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=30, x1=res["time"].iloc[-1], y1=30, line=dict(color="rgba(16, 185, 129, 0.4)", width=1, dash="dash"), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res[f"rsi_{rsi_len}"], mode="lines", name="RSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=70, x1=res["time"].iloc[-1], y1=70, line=dict(color=PALETTE["down"], width=1, dash="dash"), row=row_num, col=1)
+            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=30, x1=res["time"].iloc[-1], y1=30, line=dict(color=PALETTE["up"], width=1, dash="dash"), row=row_num, col=1)
             
         elif sub == "MACD":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["macd"], mode="lines", name="MACD", line=dict(color="#60A5FA", width=1.5)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["macd_signal"], mode="lines", name="Signal", line=dict(color="#F59E0B", width=1.2)), row=row_num, col=1)
-            hist_colors = ["#10B981" if val >= 0 else "#EF4444" for val in res["macd_hist"]]
+            fig.add_trace(go.Scatter(x=res["time"], y=res["macd"], mode="lines", name="MACD", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["macd_signal"], mode="lines", name="Signal", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
+            hist_colors = [PALETTE["up"] if val >= 0 else PALETTE["down"] for val in res["macd_hist"]]
             fig.add_trace(go.Bar(x=res["time"], y=res["macd_hist"], name="Histogram", marker_color=hist_colors, opacity=0.6), row=row_num, col=1)
             
         elif sub == "Stochastic":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_k"], mode="lines", name="Stoch %K", line=dict(color="#22C55E", width=1.2)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_d"], mode="lines", name="Stoch %D", line=dict(color="#EF4444", width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_k"], mode="lines", name="Stoch %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_d"], mode="lines", name="Stoch %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
             
         elif sub == "Stoch RSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_k"], mode="lines", name="Stoch RSI %K", line=dict(color="#38BDF8", width=1.2)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_d"], mode="lines", name="Stoch RSI %D", line=dict(color="#FB7185", width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_k"], mode="lines", name="Stoch RSI %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_d"], mode="lines", name="Stoch RSI %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
             
         elif sub == "MFI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["mfi"], mode="lines", name="MFI", line=dict(color="#14B8A6", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["mfi"], mode="lines", name="MFI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "OBV":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["obv"], mode="lines", name="OBV", line=dict(color="#6366F1", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["obv"], mode="lines", name="OBV", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "CMF":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["cmf"], mode="lines", name="CMF", line=dict(color="#E11D48", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["cmf"], mode="lines", name="CMF", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "ATR":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["atr"], mode="lines", name="ATR", line=dict(color="#F59E0B", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["atr"], mode="lines", name="ATR", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "ADX":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["adx"], mode="lines", name="ADX", line=dict(color="#F43F5E", width=1.5)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["plus_di"], mode="lines", name="+DI", line=dict(color="#10B981", width=1.0, dash="dot")), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["minus_di"], mode="lines", name="-DI", line=dict(color="#EF4444", width=1.0, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["adx"], mode="lines", name="ADX", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["plus_di"], mode="lines", name="+DI", line=dict(color=PALETTE["up"], width=1.0, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["minus_di"], mode="lines", name="-DI", line=dict(color=PALETTE["down"], width=1.0, dash="dot")), row=row_num, col=1)
             
         elif sub == "Ultimate Oscillator":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["ultimate_osc"], mode="lines", name="UO", line=dict(color="#EC4899", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["ultimate_osc"], mode="lines", name="UO", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "Awesome Oscillator":
-            ao_colors = ["#10B981" if val >= 0 else "#EF4444" for val in res["ao"]]
+            ao_colors = [PALETTE["up"] if val >= 0 else PALETTE["down"] for val in res["ao"]]
             fig.add_trace(go.Bar(x=res["time"], y=res["ao"], name="AO", marker_color=ao_colors), row=row_num, col=1)
             
         elif sub == "CCI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["cci"], mode="lines", name="CCI", line=dict(color="#84CC16", width=1.5)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["cci"], mode="lines", name="CCI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "TSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi"], mode="lines", name="TSI", line=dict(color="#D946EF", width=1.5)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi_signal"], mode="lines", name="TSI Signal", line=dict(color="#F43F5E", width=1.0, dash="dash")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi"], mode="lines", name="TSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi_signal"], mode="lines", name="TSI Signal", line=dict(color=PALETTE["overlay"](1), width=1.0, dash="dash")), row=row_num, col=1)
 
     fig.update_layout(
         template="plotly_dark",
@@ -556,12 +465,13 @@ with tab_charts:
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)"
+        paper_bgcolor=PALETTE["paper"],
+        plot_bgcolor=PALETTE["plot"],
+        font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11)
     )
     
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.03)", linecolor="rgba(255,255,255,0.1)")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.03)", linecolor="rgba(255,255,255,0.1)")
+    fig.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"], zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"], zeroline=False)
     
     st.plotly_chart(fig, use_container_width=True)
 
@@ -620,8 +530,8 @@ with tab_backtest:
         bt_df = bt_results["df"]
         fig_bt = go.Figure()
         
-        fig_bt.add_trace(go.Scatter(x=bt_df["time"], y=bt_df["cum_strategy_returns"] * 100, mode="lines", name="Consensus Strategy", line=dict(color="#34D399", width=2.5)))
-        fig_bt.add_trace(go.Scatter(x=bt_df["time"], y=bt_df["cum_asset_returns"] * 100, mode="lines", name="Buy & Hold (Market)", line=dict(color="#94A3B8", width=1.5, dash="dash")))
+        fig_bt.add_trace(go.Scatter(x=bt_df["time"], y=bt_df["cum_strategy_returns"] * 100, mode="lines", name="Consensus Strategy", line=dict(color=PALETTE["accent"], width=2.0)))
+        fig_bt.add_trace(go.Scatter(x=bt_df["time"], y=bt_df["cum_asset_returns"] * 100, mode="lines", name="Buy & Hold (Market)", line=dict(color=PALETTE["dim"], width=1.2, dash="dash")))
         
         fig_bt.update_layout(
             template="plotly_dark",
@@ -629,12 +539,13 @@ with tab_backtest:
             height=500,
             xaxis_title="Timeline",
             yaxis_title="Return (%)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)"
+            paper_bgcolor=PALETTE["paper"],
+            plot_bgcolor=PALETTE["plot"],
+            font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11)
         )
         
-        fig_bt.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.03)")
-        fig_bt.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.03)")
+        fig_bt.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"], zeroline=False)
+        fig_bt.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], zeroline=False)
         
         st.plotly_chart(fig_bt, use_container_width=True)
 
@@ -712,21 +623,23 @@ with tab_journal:
             # Log List
             st.markdown("#### Journal Entries Timeline")
             for e in reversed(entries):
-                action_color = "#34D399" if e["action"] == "BUY" else "#F87171" if e["action"] == "SELL" else "#94A3B8"
+                action_tone = ("fm-up" if e["action"] == "BUY"
+                               else "fm-dn" if e["action"] == "SELL" else "fm-neu")
                 # Rationale is free text. Interpolated raw it broke the layout on
                 # any '<', and a blank line in it ended the HTML block outright --
                 # dumping the rest of the card as visible markup.
                 rationale = as_html_text(e["rationale"])
                 render_html(f"""
-                <div class="journal-entry">
-                    <div class="journal-header">
-                        <span>📅 {as_html_text(e['timestamp'])}</span>
-                        <span>Confidence: <b>{as_html_text(e['confidence'])}/10</b></span>
+                <div class="fm-card">
+                    <div class="fm-card-head">
+                        <span>{as_html_text(e['timestamp'])}</span>
+                        <span>Confidence {as_html_text(e['confidence'])}/10</span>
                     </div>
-                    <div class="journal-title">
-                        {as_html_text(e['symbol'])} • <span style="color:{action_color}; font-weight:700;">{as_html_text(e['action'])}</span> @ ${e['price']:.2f} (Size: {e['size']:.0f})
+                    <div class="fm-card-title">
+                        {as_html_text(e['symbol'])} · <span class="{action_tone}">{as_html_text(e['action'])}</span>
+                        @ {e['price']:,.2f} × {e['size']:,.0f}
                     </div>
-                    <p style="color:#CBD5E1; font-size:0.95rem; margin-top:8px; line-height:1.4;">{rationale}</p>
+                    <div class="fm-card-body">{rationale}</div>
                 </div>
                 """)
     else:
@@ -740,51 +653,41 @@ with tab_signals:
     # Simple table outlining signals
     st.markdown("#### Live Indicators Signal Status")
     
-    # We will build the signals manually for display
+    # Verdict tone is a class, not a hex literal, so it follows the active theme.
+    def tone(verdict):
+        return {"BUY": "fm-up", "SELL": "fm-dn"}.get(verdict, "fm-neu")
+
     signals = []
     # RSI
     rsi_val = latest_bar["rsi_14"]
     rsi_verdict = "BUY" if rsi_val < 30 else "SELL" if rsi_val > 70 else "NEUTRAL"
-    rsi_color = "#10B981" if rsi_verdict == "BUY" else "#EF4444" if rsi_verdict == "SELL" else "#94A3B8"
-    signals.append(("Momentum (RSI)", f"Value: {rsi_val:.2f}", rsi_verdict, rsi_color))
-    
+    signals.append(("Momentum · RSI", f"{rsi_val:.2f}", rsi_verdict))
+
     # MACD
     macd_val = latest_bar["macd"]
     macd_sig = latest_bar["macd_signal"]
     macd_verdict = "BUY" if macd_val > macd_sig else "SELL"
-    macd_color = "#10B981" if macd_verdict == "BUY" else "#EF4444"
-    signals.append(("Trend (MACD Crossover)", f"MACD: {macd_val:.3f} | Signal: {macd_sig:.3f}", macd_verdict, macd_color))
-    
+    signals.append(("Trend · MACD crossover", f"{macd_val:.3f} / {macd_sig:.3f}", macd_verdict))
+
     # SuperTrend
     st_dir = latest_bar["supertrend_dir"]
     st_verdict = "BUY" if st_dir == 1 else "SELL"
-    st_color = "#10B981" if st_verdict == "BUY" else "#EF4444"
-    signals.append(("Trend (SuperTrend)", f"Line: ${latest_bar['supertrend']:.2f}", st_verdict, st_color))
-    
+    signals.append(("Trend · SuperTrend", f"{latest_bar['supertrend']:,.2f}", st_verdict))
+
     # Bollinger
     bb_u = latest_bar["bb_upper"]
     bb_l = latest_bar["bb_lower"]
     bb_verdict = "BUY" if close_val <= bb_l else "SELL" if close_val >= bb_u else "NEUTRAL"
-    bb_color = "#10B981" if bb_verdict == "BUY" else "#EF4444" if bb_verdict == "SELL" else "#94A3B8"
-    signals.append(("Volatility (Bollinger Bands)", f"Bands: ${bb_l:.2f} - ${bb_u:.2f}", bb_verdict, bb_color))
-    
+    signals.append(("Volatility · Bollinger", f"{bb_l:,.2f} – {bb_u:,.2f}", bb_verdict))
+
     rows = "".join(
-        f'<tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">'
-        f'<td style="padding: 14px 20px; font-weight:600; color:#E2E8F0;">{category}</td>'
-        f'<td style="padding: 14px 20px; color:#94A3B8; font-variant-numeric: tabular-nums;">{details}</td>'
-        f'<td style="padding: 14px 20px; font-weight:700; color:{color}; text-align:right;">{verdict}</td>'
-        f'</tr>'
-        for category, details, verdict, color in signals
+        f'<tr><td class="label">{category}</td><td>{details}</td>'
+        f'<td class="{tone(verdict)}">{verdict}</td></tr>'
+        for category, details, verdict in signals
     )
     render_html(f"""
-    <table style="width:100%; border-collapse:collapse; background: rgba(30, 41, 59, 0.2); border-radius:12px; overflow:hidden;">
-        <thead>
-            <tr style="background: rgba(30, 41, 59, 0.6); text-align:left; border-bottom: 2px solid rgba(255,255,255,0.05);">
-                <th style="padding: 14px 20px; font-weight:600; color:#38BDF8;">Indicator Category</th>
-                <th style="padding: 14px 20px; font-weight:600; color:#38BDF8;">Calculated Condition</th>
-                <th style="padding: 14px 20px; font-weight:600; color:#38BDF8; text-align:right;">Verdict</th>
-            </tr>
-        </thead>
+    <table class="fm-table">
+        <thead><tr><th>Indicator</th><th>Condition</th><th>Verdict</th></tr></thead>
         <tbody>{rows}</tbody>
     </table>
     """)
@@ -830,19 +733,22 @@ with tab_execution:
             st.info("✅ No pending order drafts. Ask Claude to draft a trade!")
         else:
             for draft in pending_drafts:
-                limit_label = f"${draft['limit_price']}" if draft["limit_price"] else "MKT"
+                limit_label = f"{draft['limit_price']}" if draft["limit_price"] else "MKT"
+                # Direction is the one thing that must be unmissable on an order
+                # ticket, so it takes the border as well as the text colour.
+                side_tone = "fm-up" if draft["action"] == "BUY" else "fm-dn"
                 render_html(f"""
-                <div style="background: rgba(30, 41, 59, 0.6); border: 2px solid {'#10B981' if draft['action'] == 'BUY' else '#EF4444'}; border-radius: 12px; padding: 20px; margin-bottom: 15px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; margin-bottom: 15px;">
-                        <span style="font-size: 1.2rem; font-weight: bold;">Order Draft ID: {as_html_text(draft['draft_id'])}</span>
-                        <span style="color: #94A3B8; font-size: 0.9rem;">{as_html_text(draft['timestamp'])}</span>
+                <div class="fm-card" style="border-left-color: var(--fm-{'up' if draft['action'] == 'BUY' else 'down'});">
+                    <div class="fm-card-head">
+                        <span>Draft {as_html_text(draft['draft_id'])}</span>
+                        <span>{as_html_text(draft['timestamp'])}</span>
                     </div>
-                    <div style="display: flex; gap: 30px; font-size: 1.1rem; margin-bottom: 20px; font-variant-numeric: tabular-nums;">
-                        <div><span style="color:#94A3B8;">Action:</span> <strong style="color: {'#10B981' if draft['action'] == 'BUY' else '#EF4444'};">{as_html_text(draft['action'])}</strong></div>
-                        <div><span style="color:#94A3B8;">Symbol:</span> <strong>{as_html_text(draft['symbol'])}</strong></div>
-                        <div><span style="color:#94A3B8;">Quantity:</span> <strong>{as_html_text(draft['quantity'])}</strong></div>
-                        <div><span style="color:#94A3B8;">Type:</span> <strong>{as_html_text(draft['order_type'])}</strong></div>
-                        <div><span style="color:#94A3B8;">Limit Price:</span> <strong>{as_html_text(limit_label)}</strong></div>
+                    <div class="fm-fields">
+                        <div><span class="k">Action</span><strong class="{side_tone}">{as_html_text(draft['action'])}</strong></div>
+                        <div><span class="k">Symbol</span><strong>{as_html_text(draft['symbol'])}</strong></div>
+                        <div><span class="k">Quantity</span><strong>{as_html_text(draft['quantity'])}</strong></div>
+                        <div><span class="k">Type</span><strong>{as_html_text(draft['order_type'])}</strong></div>
+                        <div><span class="k">Limit</span><strong>{as_html_text(limit_label)}</strong></div>
                     </div>
                 </div>
                 """)
