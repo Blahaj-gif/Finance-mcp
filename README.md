@@ -2,17 +2,32 @@
 
 An **institutional-grade, Human-In-The-Loop (HITL) AI Quantitative Trading System** built natively for Claude Desktop. 
 
-Replicant Quant bridges the gap between massive LLM reasoning capabilities (Claude 3.5 Sonnet) and physical market execution (Webull OpenAPI). It provides Claude with 25 deep market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 28 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
 ## ✨ Features
-* **🧠 Comprehensive AI Market Brain:** Endpoints for live OHLCV data, Technical Indicators, Short Interest, Unusual Options Activity, Live News, and Analyst Consensus.
-* **⚡ Master Payload Endpoint:** The `get_comprehensive_profile` tool fetches technicals, fundamentals, news, and consensus in a single round-trip, drastically cutting LLM latency.
-* **🛡️ Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades autonomously. All AI trade suggestions are written to a localized Draft JSON, which you must manually approve via the visual dashboard.
-* **📉 Naked Short-Selling Firewall:** Deep mathematical safeguards. The system physically inspects your Webull account inventory to block naked shorts and verifies your Buying Power before allowing the AI to even draft a limit order.
-* **📊 Streamlit Visual Analytics:** A beautiful, responsive dashboard featuring Plotly interactive charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
-* **🚨 Background Alert Daemon:** Native Windows balloon notifications trigger when background volatility or price alerts are met.
+* **🧠 Comprehensive AI Market Brain:** Live OHLCV, 50+ technical indicators, short interest, unusual options activity, news, earnings, insider trades, and SEC filings.
+* **⚡ Master Payload Endpoint:** `get_comprehensive_profile` fetches technicals, fundamentals, news and consensus in a single round-trip, cutting LLM latency.
+* **📐 Risk Tooling:** `calculate_position_size` sizes trades from an account risk budget and an ATR-aware stop; `get_portfolio_risk` reports concentration, portfolio volatility, beta and correlated clusters; `get_options_analytics` adds IV rank, implied move, skew and Black-Scholes greeks.
+* **🛡️ Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
+* **📉 Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
+* **📊 Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
+* **🚨 Background Alert Daemon:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
+
+---
+
+## 🔒 Data Integrity
+
+Market data is the foundation everything else rests on, so it is checked rather than trusted. Every price frame — from either source — passes a single gate before any tool sees it:
+
+* **Bar ordering is enforced.** The Webull API returns bars newest-first. Frames are sorted ascending and the invariant is asserted, so `.iloc[-1]` is always the most recent bar. *(Without this, tools reported the oldest bar of the window as the current price and computed every indicator on a time-reversed series.)*
+* **Staleness is measured in trading sessions**, using a built-in NYSE calendar — not calendar days, which cannot tell a holiday weekend from an outage.
+* **Sanity checks** reject NaN prices and impossible OHLC bars.
+* **Failures are errors, not text.** Tools raise real MCP errors rather than returning `"Error: ..."` as content, so a failure can never be mistaken for a finding.
+* **Source substitution is announced.** When the Webull feed fails and Yahoo serves the request, every affected tool says so.
+
+Run the suite with `pytest`. It is entirely offline — no credentials, no network, no orders.
 
 ---
 
@@ -34,7 +49,17 @@ You do **not** need to install Python, SDKs, or manually configure Claude. The i
 2. Paste your Webull `WEBULL_APP_KEY` and `WEBULL_APP_SECRET`.
 3. Save the file.
 
-*(Note: Never commit your `.env` file to version control. Keep your keys safe!)*
+`.env` and `conf/token.txt` are gitignored, and SDK logs are credential-redacted at write time — the Webull SDK dumps the full signed request (key, HMAC signature, access token) at ERROR level, which routine rate-limit responses would otherwise write straight to disk.
+
+### Optional settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEBULL_ACCOUNT_ID` | *(unset)* | Pin a specific account. **Required if your login has more than one** — the server refuses to guess rather than silently trading the wrong account. |
+| `WEBULL_MIN_REQUEST_INTERVAL` | `0.25` | Seconds between Webull API calls. Pacing keeps list-sweeping tools (sector heatmap, watchlist scans) off the rate limiter. |
+| `WEBULL_MAX_RETRIES` | `3` | Attempts before a rate-limited call gives up and falls back. |
+| `WEBULL_RETRY_BACKOFF` | `0.75` | Base seconds for exponential backoff on HTTP 429. |
+| `WEBULL_REGION_ID` | `th` | Webull region. Also gates the Yahoo `.BK` ticker fallback. |
 
 ---
 
@@ -47,7 +72,7 @@ Restart your Claude Desktop application. Ask Claude to analyze a ticker (e.g., *
 Double-click the **MCP Dashboard** shortcut on your desktop. This is your visual interface.
 - **Charts:** Review the AI's technical analysis overlays visually.
 - **Portfolio:** Check your live P&L and Net Liquidation.
-- **Execution Desk:** Review Claude's drafted trades and click **"Execute"** to send them to Webull.
+- **Execution Desk:** Review Claude's drafted trades. Submission is two-step by design: **① Preview with Webull** asks the broker to price and validate the order (non-binding), and only then does **② Approve & Submit** unlock. An order the broker will not preview is never sent, and a failed submission leaves the draft pending rather than marking it executed.
 
 ---
 *Disclaimer: This is an open-source project for educational and experimental quantitative research. Algorithmic trading carries significant financial risk.*
