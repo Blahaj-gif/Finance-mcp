@@ -12,12 +12,18 @@ sys.path.append(BASE_DIR)
 
 import dashboard.webull_client as webull_client
 import dashboard.indicators as indicators
+import dashboard.econ_calendar as econ_calendar
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
 # string. A tool that returns "Error: ..." as ordinary text is indistinguishable
 # from content, which is how untrustworthy prices get read as authoritative.
 from dashboard.webull_client import DataIntegrityError, StaleDataError, fallback_warning
+
+# Every tool that prints a consensus verdict carries this. The score is a
+# hand-tuned weighting, and presenting a number between -5 and +5 without that
+# context invites it to be read as a measured probability.
+HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over five indicators, not a validated edge — backtested over 250 daily bars it underperformed buy & hold on MU, SPY and NVDA. Read it as a summary of what the indicators currently say.*')
 
 # Initialize FastMCP Server
 mcp = FastMCP("Webull Enriched Market Intelligence")
@@ -176,7 +182,7 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> s
 - **ADX (14)**: {latest_bar['adx']:.1f} (+DI: {latest_bar['plus_di']:.1f} | -DI: {latest_bar['minus_di']:.1f})
 - **Ichimoku Conversion/Base**: {latest_bar['ichimoku_conversion']:.2f} / {latest_bar['ichimoku_base']:.2f}
 """
-        return fallback_warning(source) + summary
+        return fallback_warning(source) + summary + HEURISTIC_NOTE
     except DataIntegrityError as e:
         # Untrustworthy data must reach the caller as an error, not as content.
         raise ToolError(str(e)) from e
@@ -468,7 +474,7 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
     out = f"### Watchlist Technical Scan ({interval} Interval)\n\n"
     for src in sorted(sources):
         out += fallback_warning(src)
-    out += table_str
+    out += table_str + HEURISTIC_NOTE
     if failures:
         out += (f"\n\n**⚠️ {len(failures)} of {len(ticker_list)} symbols could not be evaluated "
                 "and are excluded from the ranking:**\n"
@@ -557,6 +563,7 @@ def get_multi_timeframe(symbol: str) -> str:
     if covered_weight < 0.999:
         out += (f"\n\n**⚠️ Partial coverage: only {covered_weight:.0%} of the timeframe weight was "
                 "available. The score is renormalised over the timeframes that resolved.**")
+    out += HEURISTIC_NOTE
     return out
 
 @mcp.tool()
@@ -1302,6 +1309,8 @@ PROFILE_SECTIONS = {
     "filings":   ("SEC Filings",                     lambda s: get_sec_filings(s)),
     "options":   ("Options Analytics",               lambda s: get_options_analytics(s)),
     "risk":      ("Portfolio Risk",                  lambda s: get_portfolio_risk()),
+    "edgar":     ("Live SEC Filings",                lambda s: get_edgar_filings(symbol=s, form_type="8-K,10-Q,10-K", limit=8)),
+    "macro":     ("Economic Calendar & Macro",       lambda s: get_economic_calendar(21, 7)),
 }
 
 DEFAULT_PROFILE_SECTIONS = ["profile", "technicals", "consensus", "short",
@@ -1320,7 +1329,8 @@ def get_comprehensive_profile(symbol: str, sections: str | list[str] = None) -> 
         sections: Which sections to include, as a comma-separated string or list.
             Defaults to the 8 core sections. Available:
             profile, technicals, consensus, short, news, earnings, insiders,
-            filings, options (IV rank/greeks), risk (live account exposure).
+            filings, options (IV rank/greeks), risk (live account exposure),
+            edgar (real-time SEC filings), macro (economic calendar).
     """
     if sections is None:
         wanted = list(DEFAULT_PROFILE_SECTIONS)
@@ -1696,6 +1706,220 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         raise
     except Exception as e:
         raise ToolError(f"Error computing options analytics for {symbol}: {e}") from e
+
+
+# =====================================================================
+# PUBLIC MACRO & FILINGS (BLS + SEC EDGAR)
+# =====================================================================
+
+@mcp.tool()
+def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
+                          include_latest_data: bool = True) -> str:
+    """
+    Upcoming US macroeconomic releases (CPI, PPI, jobs, JOLTS and more) with their
+    scheduled date and time, plus the most recent actual readings. Sourced live from
+    the Bureau of Labor Statistics — free, no key required.
+
+    Use this to know what is due before sizing risk into an event, or to check where
+    inflation and employment actually stand.
+
+    Args:
+        days_ahead: How far forward to look for scheduled releases (default 30).
+        days_back: How far back to include recently published releases (default 7).
+        include_latest_data: Also report the latest CPI/core CPI/unemployment/payroll prints.
+    """
+    import datetime as _dt
+    try:
+        upcoming, failed = econ_calendar.upcoming_releases(days_ahead=days_ahead, days_back=days_back)
+        today = _dt.date.today()
+
+        out = f"### US Economic Calendar — {today} ({days_back}d back, {days_ahead}d ahead)\n\n"
+
+        if upcoming:
+            rows = []
+            for e in upcoming:
+                delta = (e["date"] - today).days
+                when = "TODAY" if delta == 0 else (f"in {delta}d" if delta > 0 else f"{-delta}d ago")
+                rows.append({
+                    "Date": str(e["date"]),
+                    "Time (ET)": e["time_et"],
+                    "When": when,
+                    "Release": e["release"],
+                    "Covers": e["reference_period"],
+                })
+            table = pd.DataFrame(rows)
+            try:
+                out += table.to_markdown(index=False) + "\n"
+            except Exception:
+                out += table.to_string(index=False) + "\n"
+        else:
+            out += "*No scheduled releases in this window.*\n"
+
+        if include_latest_data:
+            data = econ_calendar.fetch_bls_series(
+                ["cpi", "core_cpi", "unemployment", "payrolls", "ppi"])
+            out += "\n**Latest prints**\n\n"
+            drows = []
+            for key, series in data.items():
+                if not series["observations"]:
+                    continue
+                o = series["observations"][0]
+                u = o.get("change_unit", "%")
+                drows.append({
+                    "Indicator": series["label"],
+                    "Period": f"{o['period']} {o['year']}",
+                    "Value": f"{o['value']:,.2f}",
+                    "MoM": f"{o['mom_pct']:+.2f}{u}" if o["mom_pct"] is not None else "n/a",
+                    "YoY": f"{o['yoy_pct']:+.2f}{u}" if o["yoy_pct"] is not None else "n/a",
+                })
+            dtable = pd.DataFrame(drows)
+            try:
+                out += dtable.to_markdown(index=False) + "\n"
+            except Exception:
+                out += dtable.to_string(index=False) + "\n"
+
+        if failed:
+            out += f"\n**⚠️ {len(failed)} schedule(s) unavailable:** " + "; ".join(failed) + "\n"
+
+        status = econ_calendar.source_status()["bls"]
+        out += (f"\n*Source: BLS {status['tier']}"
+                + (f" · {status['remaining_today']} of {status['daily_cap']} queries left today"
+                   if status["remaining_today"] is not None else "")
+                + (f" · {status['note']}" if status["note"] else "") + "*")
+        return out
+    except Exception as e:
+        raise ToolError(f"Error building economic calendar: {e}") from e
+
+
+@mcp.tool()
+def get_macro_data(series: str | list[str] = "cpi,core_cpi,unemployment",
+                   months: int = 13) -> str:
+    """
+    Historical macroeconomic series from the BLS with month-over-month and
+    year-over-year changes — the numbers behind the inflation and labour narrative.
+
+    Args:
+        series: Comma-separated keys or a list. Available: cpi, cpi_sa, core_cpi,
+            unemployment, payrolls, ppi, avg_hourly_pay, labor_force.
+        months: How many months of history to show per series (default 13, giving a full YoY view).
+    """
+    try:
+        keys = series.split(",") if isinstance(series, str) else list(series)
+        keys = [str(k).strip().lower() for k in keys if str(k).strip()]
+
+        unknown = [k for k in keys if k not in econ_calendar.BLS_SERIES]
+        if unknown:
+            raise ToolError(f"Unknown series {unknown}. Available: "
+                            f"{', '.join(econ_calendar.BLS_SERIES)}")
+
+        data = econ_calendar.fetch_bls_series(keys)
+        out = "### US Macroeconomic Data (BLS)\n\n"
+
+        for key in keys:
+            s = data.get(key)
+            if not s or not s["observations"]:
+                out += f"**{key}** — no observations returned.\n\n"
+                continue
+            obs = s["observations"][:max(1, months)]
+            unit_sym = obs[0].get("change_unit", "%")
+            rows = [{
+                "Period": f"{o['period'][:3]} {o['year']}",
+                "Value": f"{o['value']:,.2f}",
+                f"MoM {unit_sym}": f"{o['mom_pct']:+.2f}" if o["mom_pct"] is not None else "n/a",
+                f"YoY {unit_sym}": f"{o['yoy_pct']:+.2f}" if o["yoy_pct"] is not None else "n/a",
+            } for o in obs]
+            table = pd.DataFrame(rows)
+            latest = obs[0]
+            out += (f"**{s['label']}** (`{s['series_id']}`, {s['unit']}) — latest "
+                    f"{latest['period']} {latest['year']}: **{latest['value']:,.2f}**"
+                    + (f", YoY **{latest['yoy_pct']:+.2f}{unit_sym}**" if latest["yoy_pct"] is not None else "")
+                    + "\n\n")
+            try:
+                out += table.to_markdown(index=False) + "\n\n"
+            except Exception:
+                out += table.to_string(index=False) + "\n\n"
+
+        status = econ_calendar.source_status()["bls"]
+        out += f"*Source: BLS {status['tier']}. {status['note']}*"
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error fetching macro data: {e}") from e
+
+
+@mcp.tool()
+def get_edgar_filings(symbol: str = None, form_type: str = "8-K",
+                      query: str = None, limit: int = 15) -> str:
+    """
+    SEC EDGAR filings, as close to real time as a public feed allows — timestamps
+    carry the second the SEC accepted the document.
+
+    Three modes, chosen by what you pass:
+      * `symbol` set        → that company's recent filings (earnings 8-Ks, 10-Q, 10-K, Form 4).
+      * `query` set         → full-text search across filing bodies, 2001-present.
+      * neither             → the live firehose of `form_type` filings from every registrant.
+
+    Args:
+        symbol: Ticker to scope to (e.g. MU, AAPL).
+        form_type: Filing type — 8-K, 10-Q, 10-K, 4, S-1, 13F-HR. Comma-separate for several.
+        query: Full-text phrase to search for (e.g. "going concern", "tariff").
+        limit: Maximum rows to return (default 15).
+    """
+    try:
+        forms = [f.strip().upper() for f in str(form_type).split(",") if f.strip()]
+
+        if query:
+            res = econ_calendar.full_text_search(query, forms=forms, limit=limit)
+            out = (f"### EDGAR Full-Text Search — \"{query}\"\n"
+                   f"*{res['total']:,} total matches; showing {len(res['results'])}.*\n\n")
+            if not res["results"]:
+                return out + "*No filings matched.*"
+            table = pd.DataFrame([{
+                "Filed": r["filed"], "Form": r["form"],
+                "Company": r["company"][:44], "Link": r["url"],
+            } for r in res["results"]])
+
+        elif symbol:
+            rows = econ_calendar.company_filings(symbol, forms=forms, limit=limit)
+            if not rows:
+                return (f"### EDGAR Filings — {symbol.upper()}\n\n"
+                        f"*No {', '.join(forms)} filings found.*")
+            out = f"### EDGAR Filings — {rows[0]['company']} ({symbol.upper()})\n\n"
+            table = pd.DataFrame([{
+                "Accepted (ET)": r["acceptance"][:19].replace("T", " "),
+                "Form": r["form"],
+                "Period": r["report_date"] or "—",
+                "Items": (r["items"][:26] or "—"),
+                "Link": r["url"],
+            } for r in rows])
+
+        else:
+            rows = econ_calendar.live_filings(forms[0] if forms else "8-K", count=limit)
+            out = (f"### EDGAR Live Feed — {forms[0] if forms else '8-K'} "
+                   f"(all registrants, newest first)\n\n")
+            if not rows:
+                return out + "*No filings returned.*"
+            table = pd.DataFrame([{
+                "Accepted (ET)": r["accepted"][:19].replace("T", " "),
+                "Form": r["form"],
+                "Company": r["company"][:42],
+                "CIK": r["cik"],
+                "Link": r["url"],
+            } for r in rows[:limit]])
+
+        try:
+            out += table.to_markdown(index=False)
+        except Exception:
+            out += table.to_string(index=False)
+
+        out += ("\n\n*Source: SEC EDGAR. Latency is your polling interval, not the feed — "
+                "acceptance timestamps are exact to the second.*")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error fetching EDGAR filings: {e}") from e
 
 
 if __name__ == "__main__":

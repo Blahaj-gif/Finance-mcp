@@ -2,7 +2,7 @@
 
 An **institutional-grade, Human-In-The-Loop (HITL) AI Quantitative Trading System** built natively for Claude Desktop. 
 
-Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 28 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 32 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
@@ -14,6 +14,24 @@ Replicant Quant bridges the gap between LLM reasoning (Claude) and market execut
 * **📉 Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
 * **📊 Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
 * **🚨 Background Alert Daemon:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
+
+---
+
+## 📅 Macro Calendar & Real-Time Filings
+
+Two public sources sit alongside the broker feed, so Claude can see the events that move price as well as the price itself.
+
+| Tool | What it gives you |
+|---|---|
+| `get_economic_calendar` | Scheduled US releases — CPI, PPI, jobs, JOLTS and more — with date, time and reference period, plus the latest actual prints. |
+| `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. |
+| `get_edgar_filings` | SEC filings in three modes: one company's filings, the all-registrant live feed, or full-text search across filing bodies. |
+
+**On latency.** EDGAR acceptance timestamps are exact to the second, so an earnings 8-K (item `2.02`) is visible as soon as it is accepted. The delay you experience is your own polling interval, not the feed.
+
+**Rate and quota handling.** BLS allows 25 API queries a day unregistered; the release-schedule pages are ordinary web fetches and deliberately do *not* draw on that budget. Results are cached (6h for macro series, 24h for schedules, 2min for filings), so a repeated calendar call costs nothing. The SEC's 10 req/s ceiling is enforced at the client.
+
+**Normalization.** Filer names and release text arrive in mixed scripts and number conventions. A dedicated layer folds Unicode to a canonical form, expands atomic Latin letters that have no decomposition (`Ærø` → `AEro`, not `r`), converts non-ASCII digits, and parses numbers written US, European, Swiss or Indian style — including accounting negatives like `(1,234.56)`.
 
 ---
 
@@ -60,6 +78,8 @@ You do **not** need to install Python, SDKs, or manually configure Claude. The i
 | `WEBULL_MAX_RETRIES` | `3` | Attempts before a rate-limited call gives up and falls back. |
 | `WEBULL_RETRY_BACKOFF` | `0.75` | Base seconds for exponential backoff on HTTP 429. |
 | `WEBULL_REGION_ID` | `th` | Webull region. Also gates the Yahoo `.BK` ticker fallback. |
+| `SEC_USER_AGENT` | *(unset)* | **Required for the EDGAR tools.** The SEC's fair-access policy demands a descriptive User-Agent with a real contact address, e.g. `Your Name (you@example.com)`. Requests are refused locally without one rather than sent anonymously, which risks an IP ban. |
+| `BLS_API_KEY` | *(unset)* | Optional. BLS works with no key at 25 queries/day; a [free key](https://data.bls.gov/registrationEngine/) raises it to 500/day and unlocks longer history. |
 
 ---
 
