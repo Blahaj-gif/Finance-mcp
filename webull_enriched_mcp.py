@@ -13,6 +13,7 @@ sys.path.append(BASE_DIR)
 import dashboard.webull_client as webull_client
 import dashboard.indicators as indicators
 import dashboard.econ_calendar as econ_calendar
+import dashboard.iv_history as iv_history
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -936,7 +937,7 @@ def get_short_interest(symbol: str) -> str:
         inst_str = f"{round(held_inst * 100, 2)}%" if held_inst is not None else "N/A"
         
         squeeze_risk = "HIGH SQUEEZE POTENTIAL 🔥" if (short_pct and short_pct > 0.15) else "LOW / MODERATE SQUEEZE RISK"
-        
+
         out = (
             f"### Short Interest & Float Analysis: {symbol.upper()}\n"
             f"* **Short % of Float**: `{short_pct_str}`\n"
@@ -945,6 +946,12 @@ def get_short_interest(symbol: str) -> str:
             f"* **Institutional Ownership**: `{inst_str}`\n"
             f"* **Squeeze Assessment**: **{squeeze_risk}**\n"
         )
+
+        # Short % of float is a ratio against the share count. If that
+        # denominator is wrong, so is every number above it -- so check it
+        # against the figure the company actually filed.
+        out += _fundamentals_check_note(
+            symbol, {"shares_outstanding": info.get("sharesOutstanding")})
         return out
     except Exception as e:
         raise ToolError(f"Error fetching short interest for {symbol}: {e}") from e
@@ -1639,12 +1646,34 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         # needs a paid feed, so state the proxy rather than implying otherwise.
         rv = df["close"].pct_change().dropna().rolling(20).std() * (252 ** 0.5)
         rv = rv.dropna()
-        iv_rank = iv_pct = None
-        if len(rv) > 30:
-            lo, hi = float(rv.min()), float(rv.max())
-            if hi > lo:
-                iv_rank = (atm_iv - lo) / (hi - lo) * 100
-            iv_pct = float((rv < atm_iv).mean() * 100)
+        # Record today's reading so a genuine IV history accumulates, then use it
+        # if there is enough. IV rank is defined against implied-volatility
+        # history; realised volatility is a different quantity and only ever a
+        # stand-in until the real series exists.
+        try:
+            observations = iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
+            real_rank = iv_history.iv_rank(symbol.upper(), atm_iv)
+        except Exception:
+            observations, real_rank = 0, None
+
+        if real_rank:
+            iv_rank, iv_pct = real_rank["rank"], real_rank["percentile"]
+            rank_basis = (f"true IV rank over {real_rank['observations']} recorded days "
+                          f"({real_rank['first_date']} → {real_rank['last_date']}, "
+                          f"range {real_rank['low'] * 100:.1f}%–{real_rank['high'] * 100:.1f}%)")
+            rank_is_proxy = False
+        else:
+            iv_rank = iv_pct = None
+            if len(rv) > 30:
+                lo, hi = float(rv.min()), float(rv.max())
+                if hi > lo:
+                    iv_rank = (atm_iv - lo) / (hi - lo) * 100
+                iv_pct = float((rv < atm_iv).mean() * 100)
+            still_needed = max(0, iv_history.MIN_OBSERVATIONS - observations)
+            rank_basis = (f"proxy against 1y realised volatility — "
+                          f"{observations} IV observation(s) recorded so far, "
+                          f"{still_needed} more needed for a true IV rank")
+            rank_is_proxy = True
 
         out = (
             f"### Options Analytics — {symbol.upper()} @ {expiry} ({days}d)\n"
@@ -1653,10 +1682,17 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             f"* **ATM implied volatility**: `{atm_iv * 100:.1f}%`\n"
         )
         if iv_rank is not None:
-            out += (f"* **IV rank vs 1y realised**: `{iv_rank:.0f}/100`"
-                    f"  |  **percentile**: `{iv_pct:.0f}%`\n")
-            out += (f"  *{'Options look expensive — favours selling premium.' if iv_rank > 65 else ''}"
-                    f"{'Options look cheap — favours buying premium.' if iv_rank < 35 else ''}*\n")
+            label = "IV rank (proxy)" if rank_is_proxy else "IV rank"
+            out += (f"* **{label}**: `{iv_rank:.0f}/100`"
+                    f"  |  **percentile**: `{iv_pct:.0f}%`\n"
+                    f"  <br>*Basis: {rank_basis}.*\n")
+            verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
+                       else "Options look cheap — favours buying premium." if iv_rank < 35
+                       else "")
+            if verdict:
+                out += f"  *{verdict}*\n"
+        else:
+            out += f"* **IV rank**: not yet available — {rank_basis}.\n"
         out += (f"* **ATM straddle**: `${straddle:,.2f}`  →  market implies a "
                 f"**±{implied_move_pct:.2f}%** move by expiry "
                 f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)\n")
@@ -1699,8 +1735,13 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             out += ("\n**Greeks near the money** (Black-Scholes, r=4%, per share)\n\n"
                     + gtable + "\n")
 
-        out += ("\n*IV rank is measured against trailing realised volatility, not an "
-                "implied-volatility history — treat it as a proxy.*")
+        if rank_is_proxy:
+            out += ("\n*No free feed publishes implied-volatility history, so this server records "
+                    "one observation per symbol per day as options are queried. Until a symbol has "
+                    f"{iv_history.MIN_OBSERVATIONS} days of its own, the rank falls back to "
+                    "realised volatility — a different quantity, labelled as a proxy.*")
+        else:
+            out += "\n*IV rank is computed from this server's own recorded implied-volatility history.*"
         return out
     except (DataIntegrityError, ToolError):
         raise
@@ -1711,6 +1752,168 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
 # =====================================================================
 # PUBLIC MACRO & FILINGS (BLS + SEC EDGAR)
 # =====================================================================
+
+def _fundamentals_check_note(symbol: str, external_values: dict) -> str:
+    """
+    Verify externally sourced figures against the company's own XBRL filing.
+
+    Yahoo's fundamentals were the one part of this system with no validation
+    behind them. This closes that: where a figure can be compared to the filed
+    value, it is, and any disagreement is stated rather than left to be
+    discovered later.
+    """
+    try:
+        findings = econ_calendar.cross_check_fundamentals(symbol, external_values)
+    except Exception as e:
+        return f"\n*Filing cross-check unavailable: {str(e)[:90]}*\n"
+
+    if not findings:
+        return "\n*No comparable figure was tagged in this filer's XBRL, so nothing was cross-checked.*\n"
+
+    disagreements = [f for f in findings if not f["agrees"]]
+    if not disagreements:
+        f = findings[0]
+        return (f"\n*✅ Verified against the filed {f['form']} "
+                f"({f['filed_date']}): {f['field'].replace('_', ' ')} matches to "
+                f"{f['divergence_pct']:.2f}%.*\n")
+
+    note = "\n**⚠️ Disagrees with the company's own filing:**\n"
+    for f in disagreements:
+        note += (f"* `{f['field']}` — source says `{f['external']:,.0f}`, "
+                 f"{f['form']} filed {f['filed_date']} says `{f['filed']:,.0f}` "
+                 f"({f['divergence_pct']:.1f}% apart). Prefer the filing.\n")
+    return note
+
+
+@mcp.tool()
+def get_company_financials(symbol: str) -> str:
+    """
+    Headline financials taken straight from the company's filed XBRL on SEC EDGAR —
+    revenue, net income, diluted EPS, assets, liabilities, cash, equity and shares
+    outstanding. Every figure carries the form and filing date it came from.
+
+    Prefer this over get_company_profile when a number has to be right: this is the
+    filing itself, not a third-party summary of it.
+
+    Args:
+        symbol: Ticker symbol (e.g. MU, AAPL).
+    """
+    try:
+        data = econ_calendar.company_financials(symbol)
+        if not data["facts"]:
+            raise ToolError(
+                f"No XBRL facts found for {symbol.upper()} (CIK {data['cik']}). "
+                "Foreign private issuers and pre-2009 filers may not tag financials.")
+
+        rows = []
+        for name, fact in data["facts"].items():
+            value = fact["value"]
+            if fact["unit"] == "USD":
+                shown = f"${value:,.0f}"
+            elif fact["unit"] in ("shares", "pure"):
+                shown = f"{value:,.0f}"
+            else:
+                shown = f"{value:,.2f} {fact['unit']}"
+            period = (f"{fact['start']} → {fact['end']}" if fact.get("start") else fact.get("end", "—"))
+            rows.append({
+                "Metric": name.replace("_", " ").title(),
+                "Value": shown,
+                "Period": period,
+                "Form": fact.get("form", "—"),
+                "Filed": fact.get("filed", "—"),
+            })
+
+        table = pd.DataFrame(rows)
+        try:
+            table_str = table.to_markdown(index=False)
+        except Exception:
+            table_str = table.to_string(index=False)
+
+        return (f"### Filed Financials — {data['company']} ({data['symbol']})\n"
+                f"*CIK {data['cik']} · source: SEC EDGAR XBRL, as filed*\n\n"
+                + table_str
+                + "\n\n*These are the company's own reported figures. Where a third-party "
+                  "feed disagrees with this, the filing is authoritative.*")
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error fetching filed financials for {symbol}: {e}") from e
+
+
+@mcp.tool()
+def get_data_sources() -> str:
+    """
+    Configuration and remaining quota for every external data source, plus how to
+    raise the limits. Use this when a data tool fails or seems rate-limited.
+    """
+    try:
+        status = econ_calendar.source_status()
+        bls, sec = status["bls"], status["sec"]
+
+        out = "### Data Source Status\n\n"
+
+        out += "**Webull OpenAPI** — primary price feed\n"
+        out += (f"* Credentials configured: {'✅' if webull_client.WEBULL_APP_KEY else '❌ set WEBULL_APP_KEY/SECRET in .env'}\n"
+                f"* Region: `{webull_client.WEBULL_REGION_ID}`\n"
+                f"* Pacing: {webull_client.WEBULL_MIN_REQUEST_INTERVAL}s between calls, "
+                f"{webull_client.WEBULL_MAX_RETRIES} retries on HTTP 429\n\n")
+
+        out += "**Yahoo Finance** — fallback prices, options, fundamentals\n"
+        out += "* No key required. Fundamentals are cross-checked against SEC filings where possible.\n\n"
+
+        out += f"**BLS** — macroeconomic data — `{bls['tier']}`\n"
+        out += f"* Daily cap: {bls['daily_cap']} API queries"
+        if bls["remaining_today"] is not None:
+            out += f" · **{bls['remaining_today']} remaining today**"
+        out += "\n* Release-schedule pages are ordinary web fetches and do not use this quota.\n"
+        if bls["note"]:
+            out += f"* {bls['note']}\n"
+            out += (f"* To register: visit {econ_calendar.BLS_REGISTRATION_URL}, confirm by email, "
+                    "then put the key in `.env` as `BLS_API_KEY=...` and restart. "
+                    "Re-run this tool to confirm it was accepted.\n")
+        out += "\n"
+
+        out += "**SEC EDGAR** — filings and filed financials\n"
+        out += f"* Contact header configured: {'✅' if sec['user_agent_configured'] else '❌'}\n"
+        out += f"* Rate limit: {sec['rate_limit']}\n"
+        if sec["note"]:
+            out += f"* {sec['note']}\n"
+
+        return out
+    except Exception as e:
+        raise ToolError(f"Error reading data source status: {e}") from e
+
+
+@mcp.tool()
+def validate_bls_key(key: str = None) -> str:
+    """
+    Test a BLS registration key against the live API and report which tier it unlocks.
+
+    A mistyped key does not raise an error — it silently drops you to the 25/day
+    unregistered limit, which only surfaces days later as an exhausted quota. Run this
+    once after setting BLS_API_KEY.
+
+    Args:
+        key: Key to test. Omit to test whatever BLS_API_KEY is currently set to.
+    """
+    try:
+        result = econ_calendar.validate_bls_key(key)
+        icon = "✅" if result["valid"] else "❌"
+        out = (f"### BLS Key Check\n\n"
+               f"{icon} **{result['tier']}** — {result['daily_cap'] or '?'} queries/day\n\n"
+               f"{result['detail']}\n")
+        if not result["valid"] and not (key or econ_calendar.BLS_API_KEY):
+            out += ("\n**To register (free, ~2 minutes):**\n"
+                    f"1. Go to {econ_calendar.BLS_REGISTRATION_URL}\n"
+                    "2. Enter your email; the key arrives by return mail.\n"
+                    "3. Add `BLS_API_KEY=<your key>` to `.env`.\n"
+                    "4. Restart the MCP server and run this tool again.\n\n"
+                    "Registered access raises the cap from 25 to 500 queries/day, extends "
+                    "history from 10 to 20 years, and enables BLS-computed percentage "
+                    "changes that this server checks its own arithmetic against.\n")
+        return out
+    except Exception as e:
+        raise ToolError(f"Error validating BLS key: {e}") from e
 
 @mcp.tool()
 def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,

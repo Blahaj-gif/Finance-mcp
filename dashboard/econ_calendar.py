@@ -206,7 +206,11 @@ def fetch_bls_series(keys, start_year=None, end_year=None):
         "endyear": str(end_year),
     }
     if BLS_API_KEY:
+        # v2 only: ask BLS to compute its own percent changes. We still compute
+        # ours, and compare -- an independent second opinion on the arithmetic
+        # costs nothing here and catches a period-alignment mistake.
         payload["registrationkey"] = BLS_API_KEY
+        payload["calculations"] = True
 
     BLS_LIMITER.acquire()
     raw = _http(BLS_V2 if BLS_API_KEY else BLS_V1,
@@ -232,11 +236,19 @@ def fetch_bls_series(keys, start_year=None, end_year=None):
             value = nz.parse_number(row.get("value"))
             if value is None:
                 continue
+            # v2 returns its own pct_changes when `calculations` is requested.
+            bls_calc = None
+            calcs = (row.get("calculations") or {}).get("pct_changes") or {}
+            if calcs:
+                bls_calc = {"mom": nz.parse_number(calcs.get("1")),
+                            "yoy": nz.parse_number(calcs.get("12"))}
+
             obs.append({
                 "year": int(row["year"]),
                 "month": int(period[1:]),
                 "period": nz.normalize_text(row.get("periodName", "")),
                 "value": value,
+                "bls_calc": bls_calc,
                 "footnotes": [nz.normalize_text(f.get("text", ""))
                               for f in row.get("footnotes", []) if f.get("text")],
             })
@@ -260,6 +272,14 @@ def fetch_bls_series(keys, start_year=None, end_year=None):
                 o["mom_pct"] = ((o["value"] / prev - 1) * 100) if prev else None
                 o["yoy_pct"] = ((o["value"] / year_ago - 1) * 100) if year_ago else None
                 o["change_unit"] = "%"
+
+                # Where BLS supplied its own figure (v2), check ours against it.
+                calc = o.get("bls_calc") or {}
+                for ours, theirs in (("mom_pct", "mom"), ("yoy_pct", "yoy")):
+                    a, b = o.get(ours), calc.get(theirs)
+                    if a is not None and b is not None and abs(a - b) > 0.15:
+                        o.setdefault("warnings", []).append(
+                            f"{ours} {a:+.2f}% disagrees with the BLS-computed {b:+.2f}%")
 
         out[key] = {"series_id": sid, "label": label, "unit": unit, "observations": obs}
 
@@ -515,6 +535,174 @@ def full_text_search(query, forms=None, date_from=None, date_to=None, limit=20):
                    f"{h.get('_id','').split(':')[0].replace('-','')}",
         })
     return {"total": body.get("hits", {}).get("total", {}).get("value", 0), "results": out}
+
+
+# =====================================================================
+# EDGAR XBRL — AUTHORITATIVE FUNDAMENTALS
+# =====================================================================
+# Yahoo's fundamentals are convenient but second-hand. These come straight out
+# of the filed XBRL, so every figure carries the form and filing date it came
+# from and can be checked against the document itself.
+
+# Several tags express the same concept depending on filer and era; try in order.
+XBRL_CONCEPTS = {
+    "shares_outstanding": [("dei", "EntityCommonStockSharesOutstanding")],
+    "revenue": [("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+                ("us-gaap", "Revenues"),
+                ("us-gaap", "SalesRevenueNet")],
+    "net_income": [("us-gaap", "NetIncomeLoss")],
+    "eps_diluted": [("us-gaap", "EarningsPerShareDiluted")],
+    "assets": [("us-gaap", "Assets")],
+    "liabilities": [("us-gaap", "Liabilities")],
+    "cash": [("us-gaap", "CashAndCashEquivalentsAtCarryingValue")],
+    "stockholders_equity": [("us-gaap", "StockholdersEquity")],
+}
+
+
+def xbrl_concept(cik: str, taxonomy: str, tag: str):
+    """One XBRL concept's full history, or None if the filer never tagged it."""
+    cache_key = ("xbrl", cik, taxonomy, tag)
+    cached = CACHE.get(cache_key, TTL_MACRO)
+    if cached is not None:
+        return cached
+    try:
+        SEC_LIMITER.acquire()
+        data = json.loads(_http(
+            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/{tag}.json",
+            headers=_sec_headers()))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            CACHE.put(cache_key, False)
+            return None
+        raise
+    CACHE.put(cache_key, data)
+    return data
+
+
+def company_financials(symbol: str) -> dict:
+    """
+    Latest reported value for each headline concept, with provenance.
+
+    Each entry carries the value, the period it covers, and the form and filing
+    date it was reported in -- so a number can always be traced to a document.
+    """
+    info = ticker_to_cik(symbol)
+    out = {"company": info["title"], "cik": info["cik"], "symbol": symbol.upper(), "facts": {}}
+
+    for name, candidates in XBRL_CONCEPTS.items():
+        for taxonomy, tag in candidates:
+            data = xbrl_concept(info["cik"], taxonomy, tag)
+            if not data:
+                continue
+
+            best = None
+            for unit, rows in (data.get("units") or {}).items():
+                for row in rows:
+                    if row.get("val") is None:
+                        continue
+                    # Prefer the most recently *filed* figure, not the newest period.
+                    key = (row.get("filed", ""), row.get("end", ""))
+                    if best is None or key > best[0]:
+                        best = (key, {
+                            "value": float(row["val"]),
+                            "unit": unit,
+                            "start": row.get("start"),
+                            "end": row.get("end"),
+                            "form": row.get("form"),
+                            "filed": row.get("filed"),
+                            "fiscal_period": row.get("fp"),
+                            "concept": f"{taxonomy}:{tag}",
+                        })
+            if best:
+                out["facts"][name] = best[1]
+                break
+
+    return out
+
+
+def cross_check_fundamentals(symbol: str, yahoo_values: dict, tolerance_pct: float = 1.0) -> list:
+    """
+    Compare externally sourced figures against the filed XBRL.
+
+    Returns a list of {field, external, filed, divergence_pct, form, filed_date,
+    agrees}. An empty list means nothing comparable was found, not that
+    everything agreed -- callers should say which.
+    """
+    filings = company_financials(symbol)
+    findings = []
+
+    for field, external in yahoo_values.items():
+        fact = filings["facts"].get(field)
+        if fact is None or external in (None, 0):
+            continue
+        filed_value = fact["value"]
+        if filed_value == 0:
+            continue
+        divergence = abs(float(external) - filed_value) / abs(filed_value) * 100
+        findings.append({
+            "field": field,
+            "external": float(external),
+            "filed": filed_value,
+            "divergence_pct": divergence,
+            "agrees": divergence <= tolerance_pct,
+            "form": fact.get("form"),
+            "filed_date": fact.get("filed"),
+            "period_end": fact.get("end"),
+            "concept": fact.get("concept"),
+        })
+    return findings
+
+
+BLS_REGISTRATION_URL = "https://data.bls.gov/registrationEngine/"
+
+
+def validate_bls_key(key: str = None) -> dict:
+    """
+    Check a BLS registration key against the live v2 endpoint.
+
+    Returns {"valid", "tier", "daily_cap", "detail"}. A key is only worth
+    trusting once it has actually been accepted -- a typo'd key does not error,
+    it silently degrades you to the v1 limits, which is the kind of failure that
+    only shows up as an exhausted quota days later.
+    """
+    candidate = (key or BLS_API_KEY or "").strip()
+    if not candidate:
+        return {
+            "valid": False,
+            "tier": "v1 (unregistered)",
+            "daily_cap": 25,
+            "detail": f"No key set. Register free at {BLS_REGISTRATION_URL} then set "
+                      "BLS_API_KEY in .env.",
+        }
+
+    payload = {
+        "seriesid": ["CUUR0000SA0"],
+        "startyear": str(datetime.date.today().year),
+        "endyear": str(datetime.date.today().year),
+        "registrationkey": candidate,
+    }
+
+    try:
+        BLS_LIMITER.acquire()
+        body = json.loads(_http(BLS_V2, data=json.dumps(payload).encode("utf-8"),
+                                headers={"Content-Type": "application/json"}))
+    except Exception as e:
+        return {"valid": False, "tier": "unknown", "daily_cap": None,
+                "detail": f"Could not reach the BLS v2 endpoint: {e}"}
+
+    status = body.get("status", "")
+    messages = [nz.normalize_text(m) for m in body.get("message", []) if m]
+
+    if status == "REQUEST_SUCCEEDED":
+        return {"valid": True, "tier": "v2 (registered)", "daily_cap": 500,
+                "detail": "Key accepted. 500 queries/day, 20 years of history, "
+                          "and server-side calculations available."
+                          + (f" Notes: {'; '.join(messages)}" if messages else "")}
+
+    return {"valid": False, "tier": "v1 (unregistered)", "daily_cap": 25,
+            "detail": f"BLS rejected the key ({status}): "
+                      + ("; ".join(messages) or "no detail given")
+                      + f". Re-register at {BLS_REGISTRATION_URL} if this persists."}
 
 
 def source_status():

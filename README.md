@@ -2,7 +2,7 @@
 
 An **institutional-grade, Human-In-The-Loop (HITL) AI Quantitative Trading System** built natively for Claude Desktop. 
 
-Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 32 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 35 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
@@ -32,6 +32,36 @@ Two public sources sit alongside the broker feed, so Claude can see the events t
 **Rate and quota handling.** BLS allows 25 API queries a day unregistered; the release-schedule pages are ordinary web fetches and deliberately do *not* draw on that budget. Results are cached (6h for macro series, 24h for schedules, 2min for filings), so a repeated calendar call costs nothing. The SEC's 10 req/s ceiling is enforced at the client.
 
 **Normalization.** Filer names and release text arrive in mixed scripts and number conventions. A dedicated layer folds Unicode to a canonical form, expands atomic Latin letters that have no decomposition (`Ærø` → `AEro`, not `r`), converts non-ASCII digits, and parses numbers written US, European, Swiss or Indian style — including accounting negatives like `(1,234.56)`.
+
+### Getting a BLS key (optional, free, ~2 minutes)
+
+Unregistered access is capped at 25 API queries a day. To lift it to 500:
+
+1. Register at [data.bls.gov/registrationEngine](https://data.bls.gov/registrationEngine/) — the key arrives by return email.
+2. Add `BLS_API_KEY=<your key>` to `.env` and restart the server.
+3. Run the `validate_bls_key` tool to confirm it was accepted.
+
+That last step matters: a mistyped key does not raise an error, it silently drops you back to the 25/day tier, which only shows up days later as an exhausted quota. Registered access also extends history from 10 to 20 years and returns BLS's own computed percentage changes, which the server checks its own arithmetic against.
+
+Use `get_data_sources` at any time to see every source's configuration and remaining quota.
+
+---
+
+## ✅ Where the numbers come from
+
+Not all data carries the same weight, and the tools say which is which.
+
+| Class | Source | Validation |
+|---|---|---|
+| **Prices & bars** | Webull OpenAPI, Yahoo fallback | Full integrity gate: ordering, session-based staleness, OHLC sanity |
+| **Filed financials** | SEC EDGAR XBRL | Authoritative — the filing itself, stamped with form and filing date |
+| **Macro** | BLS | Official series; our MoM/YoY cross-checked against BLS's own figures on the registered tier |
+| **Third-party fundamentals** | Yahoo | Cross-checked against the XBRL filing where a comparable figure exists; disagreements are reported |
+| **Consensus score** | Computed here | A fixed-weight heuristic, labelled as such — it underperformed buy & hold in backtest |
+
+`get_company_financials` returns the filed figures directly. Where Yahoo and the filing disagree, the filing wins and the tool says so.
+
+**IV rank** is the one measure that cannot be sourced authoritatively for free: no public feed publishes implied-volatility history. Rather than pretend otherwise, the server records one ATM IV observation per symbol per day as options are queried, and reports a true IV rank once a symbol has 30 days of its own history. Until then it shows a realised-volatility proxy, explicitly labelled, with a count of how many more observations are needed.
 
 ---
 

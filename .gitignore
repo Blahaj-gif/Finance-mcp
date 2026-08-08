@@ -24,3 +24,4 @@ venv/
 # Windows folder metadata
 desktop.ini
 Thumbs.db
+iv_history.json

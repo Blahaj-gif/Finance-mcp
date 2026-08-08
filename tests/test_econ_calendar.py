@@ -325,3 +325,129 @@ def test_source_status_reports_configuration():
     status = ec.source_status()
     assert status["bls"]["daily_cap"] in (25, 500)
     assert "rate_limit" in status["sec"]
+
+
+# =====================================================================
+# BLS key port
+# =====================================================================
+
+def test_key_validation_reports_the_unregistered_tier_when_no_key(monkeypatch):
+    monkeypatch.setattr(ec, "BLS_API_KEY", "")
+    r = ec.validate_bls_key(None)
+    assert r["valid"] is False
+    assert r["daily_cap"] == 25
+    assert ec.BLS_REGISTRATION_URL in r["detail"]
+
+
+def test_key_validation_accepts_a_working_key(monkeypatch):
+    monkeypatch.setattr(ec, "_http", lambda *a, **k: json.dumps(
+        {"status": "REQUEST_SUCCEEDED", "message": [], "Results": {"series": []}}))
+    r = ec.validate_bls_key("a-real-looking-key")
+    assert r["valid"] is True
+    assert r["daily_cap"] == 500
+    assert "v2" in r["tier"]
+
+
+def test_key_validation_reports_a_rejected_key(monkeypatch):
+    """A bad key does not error at the API -- it silently degrades. Catch it here."""
+    monkeypatch.setattr(ec, "_http", lambda *a, **k: json.dumps(
+        {"status": "REQUEST_NOT_PROCESSED", "message": ["invalid registration key"]}))
+    r = ec.validate_bls_key("typo")
+    assert r["valid"] is False
+    assert "invalid registration key" in r["detail"]
+
+
+def test_key_validation_survives_an_unreachable_endpoint(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("network down")
+    monkeypatch.setattr(ec, "_http", boom)
+    r = ec.validate_bls_key("k")
+    assert r["valid"] is False and "network down" in r["detail"]
+
+
+def test_registered_tier_requests_bls_side_calculations(monkeypatch):
+    """v2 can compute its own percent changes; we ask for them as a cross-check."""
+    captured = {}
+
+    def capture(url, data=None, **k):
+        captured["url"] = url
+        captured["payload"] = json.loads(data.decode())
+        return json.dumps(BLS_RESPONSE)
+
+    monkeypatch.setattr(ec, "BLS_API_KEY", "key123")
+    monkeypatch.setattr(ec, "_http", capture)
+    ec.fetch_bls_series(["cpi"])
+
+    assert captured["url"] == ec.BLS_V2
+    assert captured["payload"]["registrationkey"] == "key123"
+    assert captured["payload"]["calculations"] is True
+
+
+def test_our_arithmetic_is_checked_against_the_bls_figure(monkeypatch):
+    """When BLS supplies its own change and it disagrees with ours, say so."""
+    payload = json.loads(json.dumps(BLS_RESPONSE))
+    payload["Results"]["series"][0]["data"][0]["calculations"] = {
+        "pct_changes": {"1": "99.0", "12": "99.0"}}
+    monkeypatch.setattr(ec, "BLS_API_KEY", "key123")
+    monkeypatch.setattr(ec, "_http", lambda *a, **k: json.dumps(payload))
+
+    latest = ec.fetch_bls_series(["cpi"])["cpi"]["observations"][0]
+    assert latest.get("warnings"), "a disagreement with the BLS figure must be reported"
+    assert "disagrees with the BLS-computed" in latest["warnings"][0]
+
+
+# =====================================================================
+# XBRL fundamentals cross-check
+# =====================================================================
+
+CONCEPT = {
+    "units": {"shares": [
+        {"val": 1000000, "end": "2025-06-17", "form": "10-Q", "filed": "2025-06-25"},
+        {"val": 1129393151, "end": "2026-06-17", "form": "10-Q", "filed": "2026-06-25"},
+    ]}
+}
+
+
+def _stub_xbrl(monkeypatch, concept=CONCEPT):
+    monkeypatch.setattr(ec, "SEC_USER_AGENT", "Test (t@e.com)")
+
+    def router(url, *a, **k):
+        if "company_tickers" in url:
+            return json.dumps(TICKER_MAP)
+        if "companyconcept" in url:
+            if "EntityCommonStockSharesOutstanding" in url:
+                return json.dumps(concept)
+            raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
+                url, 404, "Not Found", None, None)
+        raise AssertionError(f"unexpected {url}")
+
+    monkeypatch.setattr(ec, "_http", router)
+
+
+def test_financials_prefer_the_most_recently_filed_figure(monkeypatch):
+    _stub_xbrl(monkeypatch)
+    fact = ec.company_financials("MU")["facts"]["shares_outstanding"]
+    assert fact["value"] == 1129393151
+    assert fact["form"] == "10-Q" and fact["filed"] == "2026-06-25"
+
+
+def test_cross_check_confirms_an_agreeing_source(monkeypatch):
+    _stub_xbrl(monkeypatch)
+    found = ec.cross_check_fundamentals("MU", {"shares_outstanding": 1129393151})
+    assert len(found) == 1
+    assert found[0]["agrees"] is True
+    assert found[0]["divergence_pct"] == pytest.approx(0.0)
+
+
+def test_cross_check_flags_a_disagreeing_source(monkeypatch):
+    _stub_xbrl(monkeypatch)
+    found = ec.cross_check_fundamentals("MU", {"shares_outstanding": 900_000_000})
+    assert found[0]["agrees"] is False
+    assert found[0]["divergence_pct"] > 15
+    assert found[0]["form"] == "10-Q"
+
+
+def test_cross_check_ignores_fields_with_nothing_to_compare(monkeypatch):
+    _stub_xbrl(monkeypatch)
+    assert ec.cross_check_fundamentals("MU", {"revenue": 123}) == []
+    assert ec.cross_check_fundamentals("MU", {"shares_outstanding": None}) == []
