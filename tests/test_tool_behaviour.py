@@ -179,7 +179,7 @@ def test_fallback_banner_is_not_duplicated_by_cache_hits(monkeypatch):
 
     monkeypatch.setattr(srv.webull_client, "fetch_data", alternating)
     out = srv.get_multi_timeframe("AAA")
-    assert out.count("the primary Webull feed did not serve") == 1
+    assert out.lower().count("the primary webull feed did not serve") == 1
 
 
 # =====================================================================

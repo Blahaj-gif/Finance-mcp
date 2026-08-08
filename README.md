@@ -1,4 +1,4 @@
-# 📈 Finance MCP
+# Finance MCP
 
 A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
 
@@ -6,18 +6,18 @@ Finance MCP bridges the gap between LLM reasoning (Claude) and market execution 
 
 ---
 
-## ✨ Features
-* **🧠 Comprehensive AI Market Brain:** Live OHLCV, 50+ technical indicators, short interest, unusual options activity, news, earnings, insider trades, and SEC filings.
-* **⚡ One-Call Company Profile:** `get_company_profile` fetches the business, filed financials, SEC filings, insider activity, short interest, price and news **concurrently** (2.3x faster than sequential), each section labelled with how much weight its numbers carry.
-* **📐 Risk Tooling:** `calculate_position_size` sizes trades from an account risk budget and an ATR-aware stop; `get_portfolio_risk` reports concentration, portfolio volatility, beta and correlated clusters; `get_options_analytics` adds IV rank, implied move, skew and Black-Scholes greeks.
-* **🛡️ Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
-* **📉 Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
-* **📊 Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
-* **🚨 Background Alert Daemon:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
+## Features
+* **Comprehensive AI Market Brain:** Live OHLCV, 50+ technical indicators, short interest, unusual options activity, news, earnings, insider trades, and SEC filings.
+* **One-Call Company Profile:** `get_company_profile` fetches the business, filed financials, SEC filings, insider activity, short interest, price and news **concurrently** (2.3x faster than sequential), each section labelled with how much weight its numbers carry.
+* **Risk Tooling:** `calculate_position_size` sizes trades from an account risk budget and an ATR-aware stop; `get_portfolio_risk` reports concentration, portfolio volatility, beta and correlated clusters; `get_options_analytics` adds IV rank, implied move, skew and Black-Scholes greeks.
+* **Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
+* **Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
+* **Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
+* **Background Alert Daemon:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
 
 ---
 
-## 📅 Macro Calendar & Real-Time Filings
+## Macro Calendar & Real-Time Filings
 
 Two public sources sit alongside the broker feed, so Claude can see the events that move price as well as the price itself.
 
@@ -52,7 +52,7 @@ Use `get_data_sources` at any time to see every source's configuration and remai
 
 ---
 
-## ✅ Where the numbers come from
+## Where the numbers come from
 
 Not all data carries the same weight, and the tools say which is which.
 
@@ -70,7 +70,7 @@ Not all data carries the same weight, and the tools say which is which.
 
 ---
 
-## 🔒 Data Integrity
+## Data Integrity
 
 Market data is the foundation everything else rests on, so it is checked rather than trusted. Every price frame — from either source — passes a single gate before any tool sees it:
 
@@ -84,20 +84,94 @@ Run the suite with `pytest`. It is entirely offline — no credentials, no netwo
 
 ---
 
-## 📥 1-Click Installation
-You do **not** need to install Python, SDKs, or manually configure Claude. The installer dynamically downloads and wires everything for you.
+## Installation
 
-1. Unzip this package anywhere on your computer (e.g. your Desktop).
-2. Double-click the **`install.bat`** file.
-3. The automated installer will:
-   - Install the `uv` python engine globally if missing.
-   - Inject the MCP server configuration dynamically into your `claude_desktop_config.json`.
-   - Drop an **"MCP Dashboard"** shortcut on your Desktop.
-   - Generate a clean `.env` template in the folder for your API keys.
+### Path A — the installer (Windows, no Python required)
+
+1. Unzip this package anywhere (e.g. your Desktop).
+2. Double-click **`install.bat`**.
+3. It installs the `uv` Python engine if missing, registers the server in
+   `%APPDATA%\Claude\claude_desktop_config.json` under the name `finance`,
+   writes a `.env` template, and drops a **Finance MCP Dashboard** shortcut on
+   your Desktop.
+4. Fill in `.env` (see [Authentication](#authentication)).
+5. **Restart Claude Desktop.** The server is only read at startup.
+
+The installer prints an `ACTION NEEDED` block if `WEBULL_APP_KEY` or
+`SEC_USER_AGENT` are still at their placeholder values, so a half-configured
+install does not look like a finished one.
+
+Nothing is installed system-wide beyond `uv`; dependencies are resolved into a
+cache the first time the server or dashboard runs, so the first launch is
+slower than the rest.
+
+### Path B — clone the repo
+
+No installer, no shortcut. You wire up the two entry points yourself.
+
+```bash
+git clone <repo> && cd finance-mcp
+uv venv && uv pip install -e ".[dev,dashboard]"
+cp .env.example .env      # then edit it — see Authentication below
+```
+
+**The MCP server** (what Claude talks to). Add this to
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows, or
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, and
+restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "finance": {
+      "command": "uv",
+      "args": ["run", "--with", "pandas", "--with", "numpy", "--with", "fastmcp",
+               "--with", "yfinance", "--with", "tabulate", "--with", "lxml",
+               "--with", "html5lib", "--with", "webull-openapi-python-sdk",
+               "/absolute/path/to/finance_mcp.py"]
+    }
+  }
+}
+```
+
+Use an **absolute** path, and forward slashes even on Windows. Claude Code users
+can instead run `claude mcp add finance -- uv run /absolute/path/to/finance_mcp.py`.
+
+**The dashboard** (what you look at). Run it from the **repo root**, not from
+`dashboard/` — `app.py` resolves its sibling modules and `.streamlit/config.toml`
+relative to the working directory, and launching from elsewhere loses the theme:
+
+```bash
+streamlit run dashboard/app.py            # inside the venv
+# or, without activating anything:
+uv run --with streamlit --with plotly --with pandas --with numpy \
+       --with yfinance --with lxml --with html5lib --with tabulate \
+       --with webull-openapi-python-sdk streamlit run dashboard/app.py
+```
+
+It opens on <http://localhost:8501>. Add `--server.port 8899` to move it.
+
+**The alert daemon** (optional, Windows toast notifications). The dashboard
+starts it automatically in a background thread; to run it standalone:
+
+```bash
+python -m dashboard.alert_watcher
+```
+
+**Verify the install** — `pytest` runs the whole suite offline, with no
+credentials and no network:
+
+```bash
+pytest -q
+```
+
+Then ask Claude to run **`get_data_sources`** — it reports which credentials are
+configured, which feeds are reachable and what quota is left, without touching
+your account. **`check_connection`** confirms the Webull session specifically.
 
 ---
 
-## 🔑 Authentication
+## Authentication
 1. Open the newly generated `.env` file located in this folder.
 2. Paste your Webull `WEBULL_APP_KEY` and `WEBULL_APP_SECRET`.
 3. Save the file.
@@ -118,16 +192,45 @@ You do **not** need to install Python, SDKs, or manually configure Claude. The i
 
 ---
 
-## 🧠 Usage Architecture
+## Usage Architecture
 
 ### 1. The Brain (Claude Desktop)
 Restart your Claude Desktop application. Ask Claude to analyze a ticker (e.g., *"Run a comprehensive scan on NVDA and draft a trade if the MACD is crossing over"*). Claude will dynamically ingest the live Webull data and reason through the logic.
 
 ### 2. The Command Center (Streamlit)
-Double-click the **MCP Dashboard** shortcut on your desktop. This is your visual interface.
-- **Charts:** Review the AI's technical analysis overlays visually.
-- **Portfolio:** Check your live P&L and Net Liquidation.
-- **Execution Desk:** Review Claude's drafted trades. Submission is two-step by design: **① Preview with Webull** asks the broker to price and validate the order (non-binding), and only then does **② Approve & Submit** unlock. An order the broker will not preview is never sent, and a failed submission leaves the draft pending rather than marking it executed.
+Double-click the **Finance MCP Dashboard** shortcut, or run
+`streamlit run dashboard/app.py` from the repo root. Eight tabs:
+
+| Tab | What it is for |
+|---|---|
+| **Charts** | Candles with overlays, a volume pane and the forecast cone. Drag to pan, scroll to zoom, double-click to reset; drag a single axis to scale it alone. Weekends and market holidays are collapsed, so there are no blank stretches. |
+| **Backtest** | Runs the adaptive consensus rules over the loaded window and reports CAGR, Sharpe, max drawdown, profit factor and exposure. |
+| **Journal** | Theses Claude logged via `log_journal_entry`, with a drift warning when the logged price has moved away from the market. |
+| **Signals** | The four indicator verdicts behind the consensus score, and the regime weighting matrix that produced them. |
+| **Execution** | The approval desk. See below. |
+| **Portfolio** | Live balance, buying power and open positions with P&L, straight from the broker. |
+| **Alerts** | Price, RSI and MACD-cross alerts; the daemon fires Windows notifications and stamps which bar triggered. |
+| **Data** | Every computed indicator column for the loaded window, newest first. |
+
+**DISPLAY** in the top right switches the visual theme (**Terminal**, the
+default; **Research**; **Slate**), the chart overlay palette and row density.
+
+**The Execution tab is the only place an order can be submitted.** Submission is
+two-step by design: **1 — Preview with Webull** asks the broker to price and
+validate the order (non-binding), and only then does **2 — Approve and submit**
+unlock. An order the broker will not preview is never sent, and a failed
+submission leaves the draft pending rather than marking it executed.
+
+### 3. What Claude can and cannot do
+
+| | |
+|---|---|
+| Read prices, filings, macro series, your balance and your positions | **yes** |
+| Draft an order to a local JSON file, and preview it with the broker | **yes** |
+| Submit an order | **no** — the submit button exists only in the dashboard, and only after a broker preview |
+
+There is no configuration flag that grants Claude submission rights. Removing
+the human from that step would require editing the source.
 
 ---
 *Disclaimer: This is an open-source project for educational and experimental quantitative research. Algorithmic trading carries significant financial risk.*

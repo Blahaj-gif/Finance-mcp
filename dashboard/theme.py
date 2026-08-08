@@ -178,6 +178,9 @@ _SHARED_CSS = """
     font-size: var(--fm-base);
 }
 [data-testid="stHeader"], [data-testid="stToolbar"] { background: var(--fm-bg) !important; }
+/* "Deploy" pushes the app to Streamlit Community Cloud — a public host — from
+   a dashboard holding live account balances and an order-approval control. */
+[data-testid="stAppDeployButton"] { display: none !important; }
 [data-testid="stMainBlockContainer"] { padding-top: 2.2rem; padding-bottom: 3rem; }
 
 /* ---- sidebar ---- */

@@ -35,6 +35,7 @@ sys.path.append(BASE_DIR)
 
 import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
+from dashboard import market_calendar
 import indicators
 import backtester
 import forecaster
@@ -42,7 +43,6 @@ import forecaster
 # Set Page Config
 st.set_page_config(
     page_title="Finance MCP — Market Intelligence Dashboard",
-    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -62,6 +62,17 @@ ACTIVE_THEME = fm_theme.resolve(st.session_state["ui_theme"])
 PALETTE = fm_theme.chart(ACTIVE_THEME, st.session_state["ui_overlays"])
 st.markdown(fm_theme.css(ACTIVE_THEME, st.session_state["ui_density"]),
             unsafe_allow_html=True)
+
+# Plotly defaults to box-select on drag and no wheel zoom, which makes a price
+# chart a static image. Selection tools are dropped -- there is nothing on this
+# chart to select -- and the wheel zooms instead.
+CHART_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "doubleClick": "reset",
+    "modeBarButtonsToRemove": ["select2d", "lasso2d", "toggleSpikelines"],
+    "displayModeBar": True,
+}
 
 # The stylesheet lives in dashboard/theme.py -- one token block per theme
 # feeding one shared sheet, injected above before anything renders.
@@ -171,7 +182,7 @@ with col_head:
     """)
 
 with col_set:
-    with st.popover("⚙ DISPLAY", use_container_width=True):
+    with st.popover("DISPLAY", use_container_width=True):
         render_html('<div class="fm-set-head">Display settings</div>')
 
         st.radio(
@@ -310,24 +321,58 @@ with tab_charts:
             default=["RSI", "MACD"]
         )
         
-    show_forecast = st.checkbox("Overlay Autoregressive Statistical Forecast (Next 15 Periods)", value=True)
-    
+    col_fc, col_vol = st.columns([3, 1])
+    with col_fc:
+        show_forecast = st.checkbox("Overlay autoregressive statistical forecast (next 15 periods)", value=True)
+    with col_vol:
+        show_volume = st.checkbox("Volume pane", value=True)
+
+    # ------------------------------------------------------------------
+    # Real time axis
+    # ------------------------------------------------------------------
+    # `time` is a formatted string, so Plotly treated the axis as *categorical*:
+    # every bar equally spaced regardless of the gap before it, a three-day
+    # weekend indistinguishable from an overnight, and no way to zoom or pan by
+    # date. Real timestamps fix the positioning; rangebreaks then remove the
+    # weekend and holiday voids a real axis would otherwise open up.
+    XT = pd.to_datetime(res["time"])
+
+    def _rangebreaks(iv, times):
+        """Non-trading spans to collapse, so the axis has no empty stretches."""
+        if iv in ("W", "M"):
+            return []                       # a weekly bar spans the weekend itself
+        breaks = [dict(bounds=["sat", "mon"])]
+        years = range(int(times.dt.year.min()), int(times.dt.year.max()) + 1)
+        holidays = sorted({h.isoformat() for y in years
+                           for h in market_calendar.market_holidays(y)})
+        if holidays:
+            breaks.append(dict(values=holidays))
+        if iv in ("M1", "M5", "M15", "M30", "H1"):
+            breaks.append(dict(bounds=[16, 9.5], pattern="hour"))   # US cash session
+        return breaks
+
     # Generate Subplots Plotly Chart
-    num_subplots = 1 + len(selected_subplots)
-    row_heights = [0.55] + [0.45 / len(selected_subplots)] * len(selected_subplots) if selected_subplots else [1.0]
-    
+    price_h, vol_h = 0.55, 0.12 if show_volume else 0.0
+    sub_rows = len(selected_subplots)
+    if show_volume:
+        row_heights = [price_h, vol_h] + [(1 - price_h - vol_h) / sub_rows] * sub_rows \
+            if sub_rows else [0.85, 0.15]
+    else:
+        row_heights = [price_h] + [(1 - price_h) / sub_rows] * sub_rows if sub_rows else [1.0]
+    num_subplots = 1 + (1 if show_volume else 0) + sub_rows
+
     fig = make_subplots(
         rows=num_subplots,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
+        vertical_spacing=0.02,
         row_heights=row_heights
     )
-    
+
     # Main Candlestick Chart
     fig.add_trace(
         go.Candlestick(
-            x=res["time"],
+            x=XT,
             open=res["open"],
             high=res["high"],
             low=res["low"],
@@ -341,139 +386,187 @@ with tab_charts:
     
     # Overlays
     if "SMA Fast" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_fast_len}"], mode="lines", name=f"SMA {sma_fast_len}", line=dict(color=PALETTE["overlay"](0), width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res[f"sma_{sma_fast_len}"], mode="lines", name=f"SMA {sma_fast_len}", line=dict(color=PALETTE["overlay"](0), width=1.2)), row=1, col=1)
     if "SMA Medium" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_mid_len}"], mode="lines", name=f"SMA {sma_mid_len}", line=dict(color=PALETTE["overlay"](1), width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res[f"sma_{sma_mid_len}"], mode="lines", name=f"SMA {sma_mid_len}", line=dict(color=PALETTE["overlay"](1), width=1.2)), row=1, col=1)
     if "SMA Slow" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"sma_{sma_slow_len}"], mode="lines", name=f"SMA {sma_slow_len}", line=dict(color=PALETTE["overlay"](2), width=1.6)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res[f"sma_{sma_slow_len}"], mode="lines", name=f"SMA {sma_slow_len}", line=dict(color=PALETTE["overlay"](2), width=1.6)), row=1, col=1)
     if "EMA Fast" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_fast_len}"], mode="lines", name=f"EMA {ema_fast_len}", line=dict(color=PALETTE["overlay"](3), width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res[f"ema_{ema_fast_len}"], mode="lines", name=f"EMA {ema_fast_len}", line=dict(color=PALETTE["overlay"](3), width=1.2, dash="dot")), row=1, col=1)
     if "EMA Slow" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res[f"ema_{ema_slow_len}"], mode="lines", name=f"EMA {ema_slow_len}", line=dict(color=PALETTE["overlay"](4), width=1.2, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res[f"ema_{ema_slow_len}"], mode="lines", name=f"EMA {ema_slow_len}", line=dict(color=PALETTE["overlay"](4), width=1.2, dash="dot")), row=1, col=1)
         
     if "Bollinger Bands" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_upper"], mode="lines", name="BB Upper", line=dict(color=PALETTE["band"], width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_lower"], mode="lines", name="BB Lower", line=dict(color=PALETTE["band"], width=1, dash="dash"), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["bb_middle"], mode="lines", name="BB Middle", line=dict(color=PALETTE["overlay"](1), width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["bb_upper"], mode="lines", name="BB Upper", line=dict(color=PALETTE["band"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["bb_lower"], mode="lines", name="BB Lower", line=dict(color=PALETTE["band"], width=1, dash="dash"), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["bb_middle"], mode="lines", name="BB Middle", line=dict(color=PALETTE["overlay"](1), width=1)), row=1, col=1)
         
     if "Keltner Channels" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_upper"], mode="lines", name="KC Upper", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_lower"], mode="lines", name="KC Lower", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["kc_middle"], mode="lines", name="KC Middle", line=dict(color=PALETTE["overlay"](2), width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["kc_upper"], mode="lines", name="KC Upper", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["kc_lower"], mode="lines", name="KC Lower", line=dict(color=PALETTE["band"], width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["kc_middle"], mode="lines", name="KC Middle", line=dict(color=PALETTE["overlay"](2), width=1)), row=1, col=1)
         
     if "Donchian Channels" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_upper"], mode="lines", name="DC Upper", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_lower"], mode="lines", name="DC Lower", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["dc_middle"], mode="lines", name="DC Middle", line=dict(color=PALETTE["overlay"](3), width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["dc_upper"], mode="lines", name="DC Upper", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["dc_lower"], mode="lines", name="DC Lower", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["dc_middle"], mode="lines", name="DC Middle", line=dict(color=PALETTE["overlay"](3), width=1, dash="dash")), row=1, col=1)
         
     if "VWAP" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap"], mode="lines", name="VWAP", line=dict(color=PALETTE["accent"], width=1.6)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["vwap"], mode="lines", name="VWAP", line=dict(color=PALETTE["accent"], width=1.6)), row=1, col=1)
         
     if "VWAP Bands" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_upper"], mode="lines", name="VWAP Upper", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["vwap_lower"], mode="lines", name="VWAP Lower", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["vwap_upper"], mode="lines", name="VWAP Upper", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["vwap_lower"], mode="lines", name="VWAP Lower", line=dict(color=PALETTE["accent_band"], width=1, dash="dash")), row=1, col=1)
         
     if "SuperTrend" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["supertrend"], mode="lines", name="SuperTrend", line=dict(color=PALETTE["overlay"](1), width=1.6)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["supertrend"], mode="lines", name="SuperTrend", line=dict(color=PALETTE["overlay"](1), width=1.6)), row=1, col=1)
         
     if "Ichimoku Cloud" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_conversion"], mode="lines", name="Tenkan-sen (Conversion)", line=dict(color=PALETTE["overlay"](0), width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_base"], mode="lines", name="Kijun-sen (Base)", line=dict(color=PALETTE["overlay"](2), width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_a"], mode="lines", name="Senkou Span A", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["ichimoku_span_b"], mode="lines", name="Senkou Span B", line=dict(color=PALETTE["band"], width=1), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["ichimoku_conversion"], mode="lines", name="Tenkan-sen (Conversion)", line=dict(color=PALETTE["overlay"](0), width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["ichimoku_base"], mode="lines", name="Kijun-sen (Base)", line=dict(color=PALETTE["overlay"](2), width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["ichimoku_span_a"], mode="lines", name="Senkou Span A", line=dict(color=PALETTE["band"], width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["ichimoku_span_b"], mode="lines", name="Senkou Span B", line=dict(color=PALETTE["band"], width=1), fill="tonexty", fillcolor=PALETTE["band_faint"]), row=1, col=1)
         
     if "Pivot Points" in selected_overlays:
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_pp"], mode="lines", name="PP", line=dict(color=PALETTE["dim"], width=1, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_r1"], mode="lines", name="R1", line=dict(color=PALETTE["down"], width=0.8, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=res["time"], y=res["pivot_s1"], mode="lines", name="S1", line=dict(color=PALETTE["up"], width=0.8, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["pivot_pp"], mode="lines", name="PP", line=dict(color=PALETTE["dim"], width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["pivot_r1"], mode="lines", name="R1", line=dict(color=PALETTE["down"], width=0.8, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=XT, y=res["pivot_s1"], mode="lines", name="S1", line=dict(color=PALETTE["up"], width=0.8, dash="dot")), row=1, col=1)
 
     # Forecast Overlay
     if show_forecast:
         try:
             fc = forecaster.run_ar_forecast(res)
+            FXT = pd.to_datetime(fc["time"])
             
             # Forecast line
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["forecast_price"], mode="lines", name="Forecast Median", line=dict(color=PALETTE["ink"], width=1.6, dash="dash")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=FXT, y=fc["forecast_price"], mode="lines", name="Forecast Median", line=dict(color=PALETTE["ink"], width=1.6, dash="dash")), row=1, col=1)
             
             # 68% Confidence interval
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["upper_68"], mode="lines", name="68% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_68"], mode="lines", name="68% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faint"], showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=FXT, y=fc["upper_68"], mode="lines", name="68% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=FXT, y=fc["lower_68"], mode="lines", name="68% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faint"], showlegend=False), row=1, col=1)
             
             # 95% Confidence interval
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["upper_95"], mode="lines", name="95% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=fc["time"], y=fc["lower_95"], mode="lines", name="95% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faintest"], showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=FXT, y=fc["upper_95"], mode="lines", name="95% CI Upper", line=dict(width=0), showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=FXT, y=fc["lower_95"], mode="lines", name="95% CI Lower", line=dict(width=0), fill="tonexty", fillcolor=PALETTE["accent_band_faintest"], showlegend=False), row=1, col=1)
         except Exception as fe:
             st.warning(f"Could not calculate forecast: {str(fe)}")
 
+    # ------------------------------------------------------------------
+    # Volume pane
+    # ------------------------------------------------------------------
+    # The chart carried no volume at all -- the strip quoted a number the chart
+    # never drew. Bars are the real traded size on their own axis, coloured by
+    # the direction of the bar that produced them, so a move on conviction is
+    # distinguishable from a move on nothing.
+    VOLUME_ROW = 2 if show_volume else None
+    if show_volume:
+        vol_colors = [PALETTE["up"] if c >= o else PALETTE["down"]
+                      for c, o in zip(res["close"], res["open"])]
+        fig.add_trace(
+            go.Bar(x=XT, y=res["volume"], name="Volume", marker_color=vol_colors,
+                   marker_line_width=0, opacity=0.55, showlegend=False,
+                   hovertemplate="%{y:,.0f}<extra>Volume</extra>"),
+            row=VOLUME_ROW, col=1)
+        fig.update_yaxes(title_text=None, tickformat=".2s", row=VOLUME_ROW, col=1)
+
     # Add Subplots
+    first_sub_row = 3 if show_volume else 2
     for idx, sub in enumerate(selected_subplots):
-        row_num = idx + 2
-        
+        row_num = idx + first_sub_row
+
         if sub == "RSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res[f"rsi_{rsi_len}"], mode="lines", name="RSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
-            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=70, x1=res["time"].iloc[-1], y1=70, line=dict(color=PALETTE["down"], width=1, dash="dash"), row=row_num, col=1)
-            fig.add_shape(type="line", x0=res["time"].iloc[0], y0=30, x1=res["time"].iloc[-1], y1=30, line=dict(color=PALETTE["up"], width=1, dash="dash"), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res[f"rsi_{rsi_len}"], mode="lines", name="RSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_shape(type="line", x0=XT.iloc[0], y0=70, x1=XT.iloc[-1], y1=70, line=dict(color=PALETTE["down"], width=1, dash="dash"), row=row_num, col=1)
+            fig.add_shape(type="line", x0=XT.iloc[0], y0=30, x1=XT.iloc[-1], y1=30, line=dict(color=PALETTE["up"], width=1, dash="dash"), row=row_num, col=1)
             
         elif sub == "MACD":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["macd"], mode="lines", name="MACD", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["macd_signal"], mode="lines", name="Signal", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["macd"], mode="lines", name="MACD", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["macd_signal"], mode="lines", name="Signal", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
             hist_colors = [PALETTE["up"] if val >= 0 else PALETTE["down"] for val in res["macd_hist"]]
-            fig.add_trace(go.Bar(x=res["time"], y=res["macd_hist"], name="Histogram", marker_color=hist_colors, opacity=0.6), row=row_num, col=1)
+            fig.add_trace(go.Bar(x=XT, y=res["macd_hist"], name="Histogram", marker_color=hist_colors, opacity=0.6), row=row_num, col=1)
             
         elif sub == "Stochastic":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_k"], mode="lines", name="Stoch %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_d"], mode="lines", name="Stoch %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["stoch_k"], mode="lines", name="Stoch %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["stoch_d"], mode="lines", name="Stoch %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
             
         elif sub == "Stoch RSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_k"], mode="lines", name="Stoch RSI %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["stoch_rsi_d"], mode="lines", name="Stoch RSI %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["stoch_rsi_k"], mode="lines", name="Stoch RSI %K", line=dict(color=PALETTE["accent"], width=1.2)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["stoch_rsi_d"], mode="lines", name="Stoch RSI %D", line=dict(color=PALETTE["overlay"](1), width=1.1, dash="dot")), row=row_num, col=1)
             
         elif sub == "MFI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["mfi"], mode="lines", name="MFI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["mfi"], mode="lines", name="MFI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "OBV":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["obv"], mode="lines", name="OBV", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["obv"], mode="lines", name="OBV", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "CMF":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["cmf"], mode="lines", name="CMF", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["cmf"], mode="lines", name="CMF", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "ATR":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["atr"], mode="lines", name="ATR", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["atr"], mode="lines", name="ATR", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "ADX":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["adx"], mode="lines", name="ADX", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["plus_di"], mode="lines", name="+DI", line=dict(color=PALETTE["up"], width=1.0, dash="dot")), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["minus_di"], mode="lines", name="-DI", line=dict(color=PALETTE["down"], width=1.0, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["adx"], mode="lines", name="ADX", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["plus_di"], mode="lines", name="+DI", line=dict(color=PALETTE["up"], width=1.0, dash="dot")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["minus_di"], mode="lines", name="-DI", line=dict(color=PALETTE["down"], width=1.0, dash="dot")), row=row_num, col=1)
             
         elif sub == "Ultimate Oscillator":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["ultimate_osc"], mode="lines", name="UO", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["ultimate_osc"], mode="lines", name="UO", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "Awesome Oscillator":
             ao_colors = [PALETTE["up"] if val >= 0 else PALETTE["down"] for val in res["ao"]]
-            fig.add_trace(go.Bar(x=res["time"], y=res["ao"], name="AO", marker_color=ao_colors), row=row_num, col=1)
+            fig.add_trace(go.Bar(x=XT, y=res["ao"], name="AO", marker_color=ao_colors), row=row_num, col=1)
             
         elif sub == "CCI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["cci"], mode="lines", name="CCI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["cci"], mode="lines", name="CCI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
             
         elif sub == "TSI":
-            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi"], mode="lines", name="TSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
-            fig.add_trace(go.Scatter(x=res["time"], y=res["tsi_signal"], mode="lines", name="TSI Signal", line=dict(color=PALETTE["overlay"](1), width=1.0, dash="dash")), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["tsi"], mode="lines", name="TSI", line=dict(color=PALETTE["accent"], width=1.4)), row=row_num, col=1)
+            fig.add_trace(go.Scatter(x=XT, y=res["tsi_signal"], mode="lines", name="TSI Signal", line=dict(color=PALETTE["overlay"](1), width=1.0, dash="dash")), row=row_num, col=1)
 
     fig.update_layout(
         template="plotly_dark",
-        height=400 + (200 * len(selected_subplots)),
+        height=430 + (140 * sub_rows) + (90 if show_volume else 0),
         xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        # The legend ran the full width under Plotly's floating modebar, so the
+        # zoom and pan icons landed on top of the last three series names. The
+        # modebar goes vertical down the right edge; the legend is left-anchored
+        # and reserves that column in the right margin.
+        margin=dict(l=10, r=56, t=34, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                    font=dict(size=10)),
+        modebar=dict(orientation="v", bgcolor=PALETTE["paper"],
+                     color=PALETTE["faint"], activecolor=PALETTE["accent"]),
         paper_bgcolor=PALETTE["paper"],
         plot_bgcolor=PALETTE["plot"],
-        font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11)
+        font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11),
+        bargap=0.1,
+        # Drag pans instead of box-zooming. A chart you cannot move across is a
+        # picture of a window, not a chart.
+        dragmode="pan",
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=PALETTE["plot"], font_size=11, font_family=PALETTE["font"]),
+        # Streamlit reruns the whole script on any widget change. Without a
+        # uirevision the view snapped back to full range every time -- pan
+        # somewhere interesting, change any setting, lose your place. Keyed on
+        # symbol and interval so it *does* reset when the subject changes.
+        # (Adding or removing a pane changes the axis set, which Plotly resets
+        # regardless; that is the right answer there.)
+        uirevision=f"{symbol}-{interval}",
     )
-    
-    fig.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"], zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"], zeroline=False)
-    
-    st.plotly_chart(fig, use_container_width=True)
+
+    # Weekends and holidays are collapsed rather than drawn as blank stretches.
+    fig.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"],
+                     zeroline=False, rangebreaks=_rangebreaks(interval.upper(), XT),
+                     showspikes=True, spikemode="across", spikethickness=1,
+                     spikecolor=PALETTE["axis"], spikedash="dot")
+    # fixedrange=False on every axis so vertical drag works in each pane too.
+    fig.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"],
+                     zeroline=False, fixedrange=False)
+
+    st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+    st.caption("Drag to pan · scroll to zoom · double-click to reset · "
+               "drag an axis to scale that axis alone")
 
 # Tab 2: Strategy Backtester
 with tab_backtest:
@@ -551,13 +644,13 @@ with tab_backtest:
 
 # Tab 3: Local Trading Journal
 with tab_journal:
-    st.markdown("### 📝 Local Trading Journal & Theorem Auditor")
+    st.markdown("### Local Trading Journal & Theorem Auditor")
     st.markdown("Inspect and audit trading decisions, hypotheses, and market theorems logged locally by the AI or user.")
     
     journal_file = BASE_DIR + "/dashboard/trading_journal.json"
     
     # Form for manual journal entry
-    with st.expander("➕ Log a New Journal Entry / Thesis"):
+    with st.expander("Log a New Journal Entry / Thesis"):
         j_col1, j_col2 = st.columns(2)
         with j_col1:
             j_symbol = st.text_input("Asset Symbol", value=symbol).upper()
@@ -706,7 +799,7 @@ with tab_signals:
 
 # Tab 5: Order Execution Desk
 with tab_execution:
-    st.markdown("### 🛒 Human-In-The-Loop (HITL) Execution Desk")
+    st.markdown("### Human-In-The-Loop (HITL) Execution Desk")
     st.markdown("Review and approve orders drafted by the AI. **Claude cannot trade without your explicit physical approval here.**")
     
     drafts_path = BASE_DIR + "/dashboard/order_drafts.json"
@@ -716,7 +809,7 @@ with tab_execution:
     
     col_ref1, col_ref2 = st.columns([4, 1])
     with col_ref2:
-        if st.button("🔄 Refresh Drafts"):
+        if st.button("Refresh Drafts"):
             st.rerun()
             
     try:
@@ -730,7 +823,7 @@ with tab_execution:
         pending_drafts = [d for d in drafts if d.get("status") == "PENDING_APPROVAL"]
         
         if not pending_drafts:
-            st.info("✅ No pending order drafts. Ask Claude to draft a trade!")
+            st.info("No pending order drafts. Ask Claude to draft a trade.")
         else:
             for draft in pending_drafts:
                 limit_label = f"{draft['limit_price']}" if draft["limit_price"] else "MKT"
@@ -758,7 +851,7 @@ with tab_execution:
 
                 # --- Step 1: price the order with the broker (non-binding) ---
                 with col_prev:
-                    if st.button(f"① Preview with Webull", key=f"btn_{preview_key}", use_container_width=True):
+                    if st.button("1 — Preview with Webull", key=f"btn_{preview_key}", use_container_width=True):
                         with st.spinner("Asking Webull to price this order..."):
                             try:
                                 from webull.trade.trade_client import TradeClient
@@ -790,10 +883,10 @@ with tab_execution:
                 # --- Step 2: submit, only ever after a successful preview ---
                 with col_exec:
                     if not preview:
-                        st.button("② Approve & Submit", key=f"exec_{draft['draft_id']}",
+                        st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
                                   use_container_width=True, disabled=True,
                                   help="Preview the order first — we never submit an order the broker has not validated.")
-                    elif st.button(f"② 🔴 APPROVE & SUBMIT {draft['action']} {draft['quantity']} {draft['symbol']}",
+                    elif st.button(f"2 — APPROVE AND SUBMIT {draft['action']} {draft['quantity']} {draft['symbol']}",
                                    key=f"exec_{draft['draft_id']}", use_container_width=True):
                         with st.spinner("Submitting order to Webull..."):
                             try:
@@ -826,12 +919,12 @@ with tab_execution:
 
 # Tab 6: Portfolio Analytics
 with tab_portfolio:
-    st.markdown("### 💼 Portfolio & Analytics")
+    st.markdown("### Portfolio & Analytics")
     st.markdown("Live account balance and open positions straight from Webull.")
     
     col_port1, col_port2 = st.columns([4, 1])
     with col_port2:
-        if st.button("🔄 Refresh Portfolio"):
+        if st.button("Refresh Portfolio"):
             st.rerun()
             
     try:
@@ -866,15 +959,22 @@ with tab_portfolio:
             buying_power = 0.0
         currency = balances.get("total_asset_currency", "")
         
+        # The P&L card printed the same number as both value and delta, so the
+        # figure appeared twice with an arrow between them. The delta now says
+        # what it is a change *against*: the cost basis.
+        cost_basis = net_liq - day_pnl
+        pnl_pct = (day_pnl / cost_basis * 100) if cost_basis else 0.0
         mcol1, mcol2, mcol3 = st.columns(3)
         with mcol1:
-            st.metric(f"Net Liquidation ({currency})", f"{net_liq:,.2f}")
+            st.metric(f"Net Liquidation ({currency or 'base'})", f"{net_liq:,.2f}")
         with mcol2:
             st.metric("Unrealised P&L", f"{day_pnl:,.2f}",
-                      delta=f"{day_pnl:,.2f}", delta_color="normal")
+                      delta=f"{pnl_pct:+.2f}% on cost", delta_color="normal")
         with mcol3:
-            st.metric("Buying Power (USD)", f"${buying_power:,.2f}",
-                      help="Buying power is reported per currency; this is the USD line.")
+            st.metric("Buying Power (USD)", f"{buying_power:,.2f}",
+                      help="Buying power is reported per currency; this is the USD line. "
+                           "Net liquidation above is in the account's base currency, "
+                           "which may differ.")
 
         st.markdown("#### Open Positions")
         if not positions:
@@ -895,7 +995,19 @@ with tab_portfolio:
                     "P&L": (last - cost) * qty,
                     "P&L %": ((last - cost) / cost * 100) if cost else 0.0,
                 })
-            st.dataframe(pd.DataFrame(prows), use_container_width=True, hide_index=True)
+            # Explicit column formats: raw floats rendered as 0.3 / 908.69 / 880
+            # / -3.1573 in the same table, so nothing lined up and the percent
+            # column read as a price.
+            st.dataframe(
+                pd.DataFrame(prows), use_container_width=True, hide_index=True,
+                column_config={
+                    "Quantity": st.column_config.NumberColumn(format="%.4f"),
+                    "Cost":     st.column_config.NumberColumn(format="%.2f"),
+                    "Last":     st.column_config.NumberColumn(format="%.2f"),
+                    "Value":    st.column_config.NumberColumn(format="%.2f"),
+                    "P&L":      st.column_config.NumberColumn(format="%+.2f"),
+                    "P&L %":    st.column_config.NumberColumn(format="%+.2f%%"),
+                })
             with st.expander("Raw broker payload"):
                 st.json(positions)
             
@@ -904,11 +1016,11 @@ with tab_portfolio:
 
 # Tab 7: Live Alerts & Daemon
 with tab_alerts:
-    st.markdown("### 🚨 Live Alerts & Watcher Daemon")
+    st.markdown("### Live Alerts & Watcher Daemon")
     st.markdown("The alert daemon monitors live price and indicator conditions in the background, firing native Windows desktop balloon notifications.")
     
     # Form to add new alert
-    with st.expander("➕ Set New Technical Alert", expanded=False):
+    with st.expander("Set New Technical Alert", expanded=False):
         with st.form("alert_form"):
             col_a1, col_a2, col_a3 = st.columns([1, 1, 1])
             with col_a1:

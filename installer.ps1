@@ -7,7 +7,7 @@ Write-Host "==================================================================="
 Write-Host ""
 
 # 1. Check for UV Package Manager
-Write-Host "[1/3] Checking UV Python Package Manager..." -ForegroundColor Yellow
+Write-Host "[1/5] Checking UV Python Package Manager..." -ForegroundColor Yellow
 $uvPath = Get-Command uv -ErrorAction SilentlyContinue
 if (-not $uvPath) {
     Write-Host "  -> Installing uv package manager..." -ForegroundColor Gray
@@ -17,7 +17,7 @@ if (-not $uvPath) {
 }
 
 # 2. Inject into Claude Desktop Config
-Write-Host "[2/3] Configuring Claude Desktop MCP Integration..." -ForegroundColor Yellow
+Write-Host "[2/5] Configuring Claude Desktop MCP Integration..." -ForegroundColor Yellow
 $claudeConfigDir = "$env:APPDATA\Claude"
 $claudeConfigFile = "$claudeConfigDir\claude_desktop_config.json"
 
@@ -70,7 +70,7 @@ Write-Host "  -> Successfully configured Claude Desktop config: $claudeConfigFil
 # 2.5 Generate .env template if missing
 $envFile = Join-Path $PSScriptRoot ".env"
 if (-not (Test-Path $envFile)) {
-    Write-Host "[2.5] Creating default .env configuration file..." -ForegroundColor Yellow
+    Write-Host "[3/5] Creating default .env configuration file..." -ForegroundColor Yellow
     @"
 # Webull OpenAPI Credentials
 WEBULL_APP_KEY=YOUR_WEBULL_APP_KEY_HERE
@@ -91,29 +91,78 @@ BLS_API_KEY=
 "@ | Set-Content $envFile -Encoding UTF8
     Write-Host "  -> Created $envFile template. Add your Webull keys and SEC_USER_AGENT contact address here." -ForegroundColor Green
 } else {
-    Write-Host "[2.5] .env configuration file already exists. Skipping." -ForegroundColor Green
+    Write-Host "[3/5] .env configuration file already exists. Skipping." -ForegroundColor Green
 }
 
-# 3. Create Single Desktop Shortcut for Unified Product
-Write-Host "[3/3] Creating Desktop Shortcut for Unified Product..." -ForegroundColor Yellow
+# 3. Create Desktop Shortcut for the dashboard
+Write-Host "[4/5] Creating Desktop Shortcut..." -ForegroundColor Yellow
 $desktopDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
 $wsh = New-Object -ComObject WScript.Shell
 
-$sc = $wsh.CreateShortcut("$desktopDir\MCP Dashboard.lnk")
+# Run from the repo root, not the dashboard folder: app.py resolves its sibling
+# modules and .streamlit/config.toml relative to the working directory, and
+# launching from elsewhere loses the theme.
+$dashArgs = "-NoExit -Command `"Set-Location '$PSScriptRoot'; uv run " +
+            "--with pandas --with numpy --with plotly --with streamlit " +
+            "--with yfinance --with lxml --with html5lib --with tabulate " +
+            "--with webull-openapi-python-sdk " +
+            "streamlit run '$PSScriptRoot\dashboard\app.py'`""
+
+$sc = $wsh.CreateShortcut("$desktopDir\Finance MCP Dashboard.lnk")
 $sc.TargetPath = "powershell.exe"
-$sc.Arguments = "-NoExit -Command `"uv run --with pandas --with numpy --with plotly --with streamlit --with yfinance --with lxml --with html5lib --with webull-openapi-python-sdk streamlit run '$PSScriptRoot\dashboard\app.py'`""
+$sc.Arguments = $dashArgs
+$sc.WorkingDirectory = $PSScriptRoot
 $sc.IconLocation = "cmd.exe,0"
 $sc.Save()
 
-Write-Host "  -> Created 'MCP Dashboard' shortcut on Desktop." -ForegroundColor Green
+# The pre-rename shortcut would otherwise sit alongside the new one, pointing
+# at the same app under a stale name.
+$oldShortcut = "$desktopDir\MCP Dashboard.lnk"
+if (Test-Path $oldShortcut) {
+    Remove-Item $oldShortcut -Force
+    Write-Host "  -> Removed the old 'MCP Dashboard' shortcut." -ForegroundColor DarkGray
+}
+Write-Host "  -> Created 'Finance MCP Dashboard' shortcut on Desktop." -ForegroundColor Green
+
+# 4. Verify the install actually works before claiming success
+Write-Host "[5/5] Checking configuration..." -ForegroundColor Yellow
+$toolCount = (Select-String -Path "$PSScriptRoot\finance_mcp.py" -Pattern '^@mcp\.tool\(\)').Count
+if ($toolCount -lt 1) {
+    Write-Host "  -> WARNING: could not read the tool list from finance_mcp.py." -ForegroundColor Yellow
+    $toolCount = "the"
+} else {
+    Write-Host "  -> $toolCount tools found in finance_mcp.py." -ForegroundColor Green
+}
+
+$secLine = Select-String -Path $envFile -Pattern '^SEC_USER_AGENT=(.+)$' | Select-Object -First 1
+$secSet = $secLine -and ($secLine.Matches[0].Groups[1].Value -notmatch 'you@example\.com')
+$keyLine = Select-String -Path $envFile -Pattern '^WEBULL_APP_KEY=(.+)$' | Select-Object -First 1
+$keySet = $keyLine -and ($keyLine.Matches[0].Groups[1].Value -ne 'YOUR_WEBULL_APP_KEY_HERE')
 
 # Success summary
 Write-Host ""
 Write-Host "===================================================================" -ForegroundColor Green
-Write-Host " 🎉 INSTALLATION SUCCESSFUL!" -ForegroundColor Green
+Write-Host " INSTALLATION COMPLETE" -ForegroundColor Green
 Write-Host "===================================================================" -ForegroundColor Green
-Write-Host " 1. Restart your Claude Desktop app to load all 35 MCP tools." -ForegroundColor White
-Write-Host " 2. Double-click 'MCP Dashboard' on Desktop." -ForegroundColor White
-Write-Host "    (Includes interactive charts, forecasts, backtester & background alerts)." -ForegroundColor Gray
-Write-Host " ☕ Support Open Source: https://github.com/sponsors" -ForegroundColor Cyan
+Write-Host ""
+if (-not $keySet) {
+    Write-Host " ACTION NEEDED - add your Webull keys to:" -ForegroundColor Yellow
+    Write-Host "   $envFile" -ForegroundColor White
+    Write-Host "   Without them the price feed falls back to Yahoo and no account" -ForegroundColor Gray
+    Write-Host "   or order tools will work." -ForegroundColor Gray
+    Write-Host ""
+}
+if (-not $secSet) {
+    Write-Host " ACTION NEEDED - set SEC_USER_AGENT to a real contact address in:" -ForegroundColor Yellow
+    Write-Host "   $envFile" -ForegroundColor White
+    Write-Host "   The SEC's fair-access policy requires it; the EDGAR tools refuse" -ForegroundColor Gray
+    Write-Host "   to send requests without one rather than risk an IP ban." -ForegroundColor Gray
+    Write-Host ""
+}
+Write-Host " 1. Restart Claude Desktop to load $toolCount MCP tools." -ForegroundColor White
+Write-Host " 2. Double-click 'Finance MCP Dashboard' on the Desktop for charts," -ForegroundColor White
+Write-Host "    the backtester, the portfolio view and the order approval desk." -ForegroundColor White
+Write-Host ""
+Write-Host " Claude drafts orders. Nothing is ever submitted without you" -ForegroundColor White
+Write-Host " approving it in the dashboard's Execution tab." -ForegroundColor White
 Write-Host "===================================================================" -ForegroundColor Green

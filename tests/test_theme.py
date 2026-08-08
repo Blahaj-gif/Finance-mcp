@@ -203,3 +203,59 @@ def test_the_stylesheet_is_injected_before_the_first_widget():
     css_at = APP.index("fm_theme.css(")
     assert css_at < APP.index("st.sidebar.markdown")
     assert css_at < APP.index("st.tabs(")
+
+
+# =====================================================================
+# No emoji on any user-visible surface
+# =====================================================================
+# Pictographs standing in for words read as decoration rather than as an
+# instrument, and a glyph that fails to load silently changes the sentence.
+# Real typography stays: the em dash, the rightwards arrow, the middot.
+
+_EMOJI_RANGES = [
+    (0x1F000, 0x1FAFF),   # pictographs, emoticons, symbols
+    (0x2300, 0x23FF),     # misc technical (gear, hourglass)
+    (0x2460, 0x24FF),     # circled digits
+    (0x25A0, 0x2BFF),     # geometric shapes, dingbats, misc symbols
+    (0xFE0F, 0xFE0F),     # variation selector
+]
+_ALLOWED = {"→", "←", "↔"}   # arrows used as punctuation
+
+
+def _emoji_in(text):
+    return {c for c in text
+            if c not in _ALLOWED
+            and any(lo <= ord(c) <= hi for lo, hi in _EMOJI_RANGES)}
+
+
+@pytest.mark.parametrize("relpath", [
+    "dashboard/app.py", "dashboard/theme.py", "dashboard/alert_watcher.py",
+    "dashboard/webull_client.py", "finance_mcp.py", "installer.ps1", "README.md",
+])
+def test_no_emoji_on_a_user_visible_surface(relpath):
+    text = open(os.path.join(ROOT, relpath), encoding="utf-8").read()
+    found = _emoji_in(text)
+    assert not found, f"{relpath} contains {sorted(hex(ord(c)) for c in found)}"
+
+
+def test_provenance_markers_are_words_not_pictures():
+    """They carry how much a number can be trusted; that must always render."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_fm", os.path.join(ROOT, "finance_mcp.py"))
+    src = open(os.path.join(ROOT, "finance_mcp.py"), encoding="utf-8").read()
+    block = src.split("PROVENANCE = {", 1)[1].split("}", 1)[0]
+    for tag in ("[FILED]", "[EXACT]", "[MARKET]", "[OFFICIAL]",
+                "[THIRD-PARTY]", "[ESTIMATE]"):
+        assert tag in block, f"provenance marker {tag} is missing"
+
+
+def test_the_deploy_button_is_suppressed():
+    """
+    Streamlit's toolbar offers 'Deploy', which pushes to Streamlit Community
+    Cloud -- a public host. On a dashboard wired to a live brokerage account
+    that button has no safe outcome.
+    """
+    config = open(os.path.join(ROOT, ".streamlit", "config.toml"), encoding="utf-8").read()
+    assert "toolbarMode" in config and "minimal" in config
+    assert 'stAppDeployButton' in theme._SHARED_CSS

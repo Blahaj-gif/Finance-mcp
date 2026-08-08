@@ -195,7 +195,7 @@ def check_alerts(alerts, now_ts, fetch=_default_fetch,
             log(f"[{stamp.strftime('%H:%M:%S')}] ALERT TRIGGERED for {symbol}: "
                 f"{condition} {target_val} (bar {bar_time}, {source})")
 
-            notify(f"🚨 TRADE ALERT: {symbol} ({condition})",
+            notify(f"TRADE ALERT: {symbol} ({condition})",
                    f"{val_str}\nBar: {bar_time}\nNote: {note}\nSource: {source}")
 
             alert["status"] = "TRIGGERED"

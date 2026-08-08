@@ -21,3 +21,13 @@ fileWatcherType = "auto"
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# Streamlit's toolbar carries a "Deploy" button that pushes the app to
+# Streamlit Community Cloud — a public host. This dashboard reads a live
+# brokerage account and holds an order-approval control, so there is no safe
+# outcome to that button being clicked. "minimal" keeps the run status and
+# drops the deploy and developer options; the stylesheet hides the button too,
+# because toolbarMode alone leaves it in some Streamlit versions.
+toolbarMode = "minimal"
+showErrorDetails = true

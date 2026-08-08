@@ -211,7 +211,9 @@ def test_fallback_warning_silent_for_primary_source():
 def test_fallback_warning_loud_for_yahoo():
     banner = wc.fallback_warning("Yahoo Finance (Fallback)")
     assert "Yahoo Finance (Fallback)" in banner
-    assert "⚠️" in banner
+    # The word, not a pictograph: the banner has to survive any renderer, and a
+    # warning glyph that fails to load leaves the sentence reading as normal.
+    assert "Warning" in banner
 
 
 # =====================================================================

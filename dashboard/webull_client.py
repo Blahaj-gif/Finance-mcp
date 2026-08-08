@@ -937,6 +937,6 @@ def fallback_warning(source: str) -> str:
     if source.startswith("Webull OpenAPI"):
         return ""
     return (
-        f"> ⚠️ **Data source: {source}** — the primary Webull feed did not serve this "
+        f"> **Warning — data source: {source}.** The primary Webull feed did not serve this "
         "request. Values may differ from the broker's own quotes.\n\n"
     )

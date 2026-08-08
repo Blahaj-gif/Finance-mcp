@@ -106,13 +106,13 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
         # RSI Signal
         rsi_val = latest_bar["rsi_14"]
         if rsi_val < 30:
-            signals.append(f"- **RSI (14)**: Oversold ({rsi_val:.1f}) 🟢 **BUY**")
+            signals.append(f"- **RSI (14)**: Oversold ({rsi_val:.1f}) **BUY**")
             verdict_score += 1.5
         elif rsi_val > 70:
-            signals.append(f"- **RSI (14)**: Overbought ({rsi_val:.1f}) 🔴 **SELL**")
+            signals.append(f"- **RSI (14)**: Overbought ({rsi_val:.1f}) **SELL**")
             verdict_score -= 1.5
         else:
-            signals.append(f"- **RSI (14)**: Neutral ({rsi_val:.1f}) ⚪ **NEUTRAL**")
+            signals.append(f"- **RSI (14)**: Neutral ({rsi_val:.1f}) **NEUTRAL**")
             
         # MACD
         macd_val = latest_bar["macd"]
@@ -121,46 +121,46 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
         prev_sig = prev_bar["macd_signal"]
         
         if prev_macd <= prev_sig and macd_val > macd_sig:
-            signals.append("- **MACD**: Bullish Crossover 🟢 **STRONG BUY**")
+            signals.append("- **MACD**: Bullish Crossover **STRONG BUY**")
             verdict_score += 2
         elif prev_macd >= prev_sig and macd_val < macd_sig:
-            signals.append("- **MACD**: Bearish Crossover 🔴 **STRONG SELL**")
+            signals.append("- **MACD**: Bearish Crossover **STRONG SELL**")
             verdict_score -= 2
         else:
             macd_direction = "Bullish" if macd_val > macd_sig else "Bearish"
-            signals.append(f"- **MACD**: Trend is {macd_direction} ⚪ **NEUTRAL**")
+            signals.append(f"- **MACD**: Trend is {macd_direction} **NEUTRAL**")
             
         # Moving Averages
         sma_20 = latest_bar["sma_20"]
         sma_50 = latest_bar["sma_50"]
         if close_val > sma_20 and sma_20 > sma_50:
-            signals.append("- **Moving Averages (20/50)**: Bullish Trend (Price > SMA20 > SMA50) 🟢 **BUY**")
+            signals.append("- **Moving Averages (20/50)**: Bullish Trend (Price > SMA20 > SMA50) **BUY**")
             verdict_score += 1
         elif close_val < sma_20 and sma_20 < sma_50:
-            signals.append("- **Moving Averages (20/50)**: Bearish Trend (Price < SMA20 < SMA50) 🔴 **SELL**")
+            signals.append("- **Moving Averages (20/50)**: Bearish Trend (Price < SMA20 < SMA50) **SELL**")
             verdict_score -= 1
         else:
-            signals.append("- **Moving Averages (20/50)**: Mixed Trend ⚪ **NEUTRAL**")
+            signals.append("- **Moving Averages (20/50)**: Mixed Trend **NEUTRAL**")
             
         # Bollinger Bands
         bb_u = latest_bar["bb_upper"]
         bb_l = latest_bar["bb_lower"]
         if close_val <= bb_l:
-            signals.append("- **Bollinger Bands**: Price broke Lower Band (Rebound indicator) 🟢 **BUY**")
+            signals.append("- **Bollinger Bands**: Price broke Lower Band (Rebound indicator) **BUY**")
             verdict_score += 1
         elif close_val >= bb_u:
-            signals.append("- **Bollinger Bands**: Price broke Upper Band (Pullback indicator) 🔴 **SELL**")
+            signals.append("- **Bollinger Bands**: Price broke Upper Band (Pullback indicator) **SELL**")
             verdict_score -= 1
         else:
-            signals.append("- **Bollinger Bands**: Price inside Bands ⚪ **NEUTRAL**")
+            signals.append("- **Bollinger Bands**: Price inside Bands **NEUTRAL**")
             
         # SuperTrend
         st_dir = latest_bar["supertrend_dir"]
         if st_dir == 1:
-            signals.append("- **SuperTrend**: Bullish Trend 🟢 **BUY**")
+            signals.append("- **SuperTrend**: Bullish Trend **BUY**")
             verdict_score += 1
         else:
-            signals.append("- **SuperTrend**: Bearish Trend 🔴 **SELL**")
+            signals.append("- **SuperTrend**: Bearish Trend **SELL**")
             
         # Determine Verdict Text
         if verdict_score >= 3:
@@ -176,11 +176,11 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
             
         # Strip the prescriptive tail from each reading unless a verdict was
         # asked for. "RSI (14): Oversold (25.3)" describes what the indicator
-        # says; "🟢 BUY" tells the reader what to do on the strength of a
+        # says; a "BUY" label tells the reader what to do on the strength of a
         # weighting nobody validated.
         if not include_verdict:
             import re as _re
-            signals = [_re.sub(r"\s*[🟢🔴⚪]\s*\*\*(?:STRONG )?(?:BUY|SELL|NEUTRAL)\*\*\s*$", "", s)
+            signals = [_re.sub(r"\s*\*\*(?:STRONG )?(?:BUY|SELL|NEUTRAL)\*\*\s*$", "", s)
                        for s in signals]
 
         verdict_block = (
@@ -340,10 +340,10 @@ def log_journal_entry(symbol: str, action: str, price: float, size: float, ratio
             drift = abs(float(price) - market) / market * 100
             out += f"\nMarket reference: ${market:,.2f} as of {prov['bar_time']} ({prov['source']})."
             if drift > 5:
-                out += (f"\n\n⚠️ **The logged price is {drift:.1f}% away from the latest bar.** "
+                out += (f"\n\n**Warning:** **The logged price is {drift:.1f}% away from the latest bar.** "
                         "Verify this is intentional and not a stale or mistyped quote.")
         else:
-            out += f"\n⚠️ Could not capture a market reference: {prov.get('error', 'unknown')}"
+            out += f"\n**Warning:** Could not capture a market reference: {prov.get('error', 'unknown')}"
 
         return out
     except Exception as e:
@@ -581,7 +581,7 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
         out += fallback_warning(src)
     out += table_str + HEURISTIC_NOTE
     if failures:
-        out += (f"\n\n**⚠️ {len(failures)} of {len(ticker_list)} symbols could not be evaluated "
+        out += (f"\n\n**Warning: {len(failures)} of {len(ticker_list)} symbols could not be evaluated "
                 "and are excluded from the ranking:**\n"
                 + "\n".join(f"* `{f}`" for f in failures))
     return out
@@ -666,7 +666,7 @@ def get_multi_timeframe(symbol: str) -> str:
     out += (f"\n\n**Overall Confluence Score**: `{round(total_confluence, 2)}` / +5.0"
             f"\n**Confluence Verdict**: **{confluence_verdict}**")
     if covered_weight < 0.999:
-        out += (f"\n\n**⚠️ Partial coverage: only {covered_weight:.0%} of the timeframe weight was "
+        out += (f"\n\n**Warning: Partial coverage: only {covered_weight:.0%} of the timeframe weight was "
                 "available. The score is renormalised over the timeframes that resolved.**")
     out += HEURISTIC_NOTE
     return out
@@ -912,7 +912,7 @@ def get_sector_heatmap() -> str:
     out += table_str
     out += f"\n\n*Covering {len(rows)} of {len(sectors)} sectors.*"
     if failures:
-        out += ("\n\n**⚠️ Sectors excluded from this ranking:**\n"
+        out += ("\n\n**Warning: Sectors excluded from this ranking:**\n"
                 + "\n".join(f"* `{f}`" for f in failures))
     return out
 
@@ -999,7 +999,7 @@ def get_unusual_options(symbol: str) -> str:
                         "Open Interest": int(oi),
                         "Vol/OI Ratio": round(vol / max(oi, 1), 2),
                         "IV %": f"{round(iv * 100, 1)}%",
-                        "Flag": "🔥 Vol > OI" if vol > oi else "⚡ High IV"
+                        "Flag": "VOL>OI" if vol > oi else "HIGH IV"
                     })
                     
         if not unusual:
@@ -1037,7 +1037,7 @@ def get_short_interest(symbol: str) -> str:
         shares_str = f"{shares_short:,.0f}" if shares_short is not None else "N/A"
         inst_str = f"{round(held_inst * 100, 2)}%" if held_inst is not None else "N/A"
         
-        squeeze_risk = "HIGH SQUEEZE POTENTIAL 🔥" if (short_pct and short_pct > 0.15) else "LOW / MODERATE SQUEEZE RISK"
+        squeeze_risk = "HIGH SQUEEZE POTENTIAL" if (short_pct and short_pct > 0.15) else "LOW / MODERATE SQUEEZE RISK"
 
         out = (
             f"### Short Interest & Float Analysis: {symbol.upper()}\n"
@@ -1169,7 +1169,7 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         drafts.append(new_draft)
         atomic_write_json(drafts_path, drafts)
 
-        return f"🚨 ORDER DRAFTED: {action.upper()} {quantity} shares of {symbol.upper()} at {limit_price if limit_price else 'MKT'}. Pending Human Approval in the MCP Dashboard."
+        return f"ORDER DRAFTED: {action.upper()} {quantity} shares of {symbol.upper()} at {limit_price if limit_price else 'MKT'}. Pending Human Approval in the MCP Dashboard."
     except Exception as e:
         raise ToolError(f"Error drafting order: {e}") from e
 
@@ -1217,7 +1217,7 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
             bp = webull_client.get_buying_power(balances, "USD")
             affordable = order["side"] == "SELL" or (cost + fee) <= bp
             out += (f"* **USD buying power**: `${bp:,.2f}`\n"
-                    f"* **Affordable**: {'✅ yes' if affordable else '❌ NO — exceeds buying power'}\n")
+                    f"* **Affordable**: {'yes' if affordable else 'NO - exceeds buying power'}\n")
         except Exception as be:
             out += f"* **Buying power**: could not verify ({be})\n"
 
@@ -1403,12 +1403,12 @@ def get_sec_filings(symbol: str) -> str:
 # a scraped headline read identically, which is the failure the whole data
 # integrity effort exists to prevent.
 PROVENANCE = {
-    "filed":       ("📗", "Filed with the SEC — authoritative"),
-    "exact":       ("📘", "Exact parse of a filed form"),
-    "market":      ("📊", "Market data, integrity-checked"),
-    "official":    ("🏛️", "Official government statistics"),
-    "third_party": ("📙", "Third-party feed, not independently verified"),
-    "heuristic":   ("📕", "Computed estimate — verify before relying on it"),
+    "filed":       ("[FILED]", "Filed with the SEC — authoritative"),
+    "exact":       ("[EXACT]", "Exact parse of a filed form"),
+    "market":      ("[MARKET]", "Market data, integrity-checked"),
+    "official":    ("[OFFICIAL]", "Official government statistics"),
+    "third_party": ("[THIRD-PARTY]", "Third-party feed, not independently verified"),
+    "heuristic":   ("[ESTIMATE]", "Computed estimate — verify before relying on it"),
 }
 
 # (title, fetch, provenance). Ordered as an analyst reads: what the company is,
@@ -1530,7 +1530,7 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
         out += (f"\n*{len(wanted) - len(failed)} of {len(wanted)} sections in "
                 f"{elapsed:.1f}s, fetched concurrently.*")
         if failed:
-            out += (f"\n\n**⚠️ Unavailable: {', '.join(failed)}.** "
+            out += (f"\n\n**Warning: Unavailable: {', '.join(failed)}.** "
                     "The rest of this profile is unaffected.")
         return out
     except ToolError:
@@ -1617,10 +1617,10 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             f"(notional `${shares * entry:,.2f}`)\n"
         )
         if capped_by:
-            out += (f"\n⚠️ Risk-based size was **{raw_shares:,.4f} shares** (`${notional:,.2f}`) "
+            out += (f"\n**Warning:** Risk-based size was **{raw_shares:,.4f} shares** (`${notional:,.2f}`) "
                     f"but that exceeds {capped_by} of `${buying_power:,.2f}`. Size shown is capped.\n")
         if atr > 0 and atr_multiple < 1:
-            out += ("\n⚠️ The stop is inside one ATR of daily noise — a routine day's range "
+            out += ("\n**Warning:** The stop is inside one ATR of daily noise — a routine day's range "
                     "would likely take you out.\n")
         return out
     except (DataIntegrityError, ToolError):
@@ -1734,7 +1734,7 @@ def get_portfolio_risk() -> str:
                 out += f"\n*Portfolio volatility unavailable: {str(e)[:80]}*\n"
 
         if warnings:
-            out += "\n**⚠️ Risk notes**\n" + "\n".join(f"* {w}" for w in warnings) + "\n"
+            out += "\n**Warning: Risk notes**\n" + "\n".join(f"* {w}" for w in warnings) + "\n"
         return out
     except (DataIntegrityError, ToolError):
         raise
@@ -1940,11 +1940,11 @@ def _fundamentals_check_note(symbol: str, external_values: dict) -> str:
     disagreements = [f for f in findings if not f["agrees"]]
     if not disagreements:
         f = findings[0]
-        return (f"\n*✅ Verified against the filed {f['form']} "
+        return (f"\n*Verified against the filed {f['form']} "
                 f"({f['filed_date']}): {f['field'].replace('_', ' ')} matches to "
                 f"{f['divergence_pct']:.2f}%.*\n")
 
-    note = "\n**⚠️ Disagrees with the company's own filing:**\n"
+    note = "\n**Warning: Disagrees with the company's own filing:**\n"
     for f in disagreements:
         note += (f"* `{f['field']}` — source says `{f['external']:,.0f}`, "
                  f"{f['form']} filed {f['filed_date']} says `{f['filed']:,.0f}` "
@@ -2058,7 +2058,7 @@ def _render_proposed_sales(symbol: str, limit: int) -> str:
         out += "\n\n**Already sold in the prior three months** *(as declared on the notice)*\n\n" + rendered
 
     if res["errors"]:
-        out += f"\n\n**⚠️ {len(res['errors'])} notice(s) unparsed:** " + "; ".join(res["errors"][:3])
+        out += f"\n\n**Warning: {len(res['errors'])} notice(s) unparsed:** " + "; ".join(res["errors"][:3])
 
     out += ("\n\n*A Form 144 is a declaration of intent, filed before the sale — it leads the "
             "Form 4 that reports the completed trade, and not every notice results in a sale. "
@@ -2182,7 +2182,7 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
                 out += f"* {n[:240]}\n"
 
         if res["errors"]:
-            out += f"\n**⚠️ {len(res['errors'])} filing(s) could not be parsed:** " + \
+            out += f"\n**Warning: {len(res['errors'])} filing(s) could not be parsed:** " + \
                    "; ".join(res["errors"][:3]) + "\n"
 
         out += ("\n*Source: SEC Form 4 XML as filed. The 10b5-1 column reads the form's own "
@@ -2340,7 +2340,7 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
             out += (f"\n*Truncated: showing {budget:,} of {meta['full_length']:,} characters. "
                     "Raise `budget` or use `query` to search within it.*")
         if meta["confidence"] == "low":
-            out += ("\n\n*⚠️ Low confidence in the section boundary — this filer's headings did not "
+            out += ("\n\n*Warning: Low confidence in the section boundary — this filer's headings did not "
                     f"match cleanly ({meta['candidates']} candidate heading(s), "
                     f"basis: {meta['boundary_basis']}). Verify against the source link.*")
         return out
@@ -2455,7 +2455,7 @@ def get_data_sources() -> str:
         out = "### Data Source Status\n\n"
 
         out += "**Webull OpenAPI** — primary price feed\n"
-        out += (f"* Credentials configured: {'✅' if webull_client.WEBULL_APP_KEY else '❌ set WEBULL_APP_KEY/SECRET in .env'}\n"
+        out += (f"* Credentials configured: {'yes' if webull_client.WEBULL_APP_KEY else 'NO - set WEBULL_APP_KEY/SECRET in .env'}\n"
                 f"* Region: `{webull_client.WEBULL_REGION_ID}`\n"
                 f"* Pacing: {webull_client.WEBULL_MIN_REQUEST_INTERVAL}s between calls, "
                 f"{webull_client.WEBULL_MAX_RETRIES} retries on HTTP 429\n\n")
@@ -2476,7 +2476,7 @@ def get_data_sources() -> str:
         out += "\n"
 
         out += "**SEC EDGAR** — filings and filed financials\n"
-        out += f"* Contact header configured: {'✅' if sec['user_agent_configured'] else '❌'}\n"
+        out += f"* Contact header configured: {'yes' if sec['user_agent_configured'] else 'NO'}\n"
         out += f"* Rate limit: {sec['rate_limit']}\n"
         if sec["note"]:
             out += f"* {sec['note']}\n"
@@ -2500,7 +2500,7 @@ def validate_bls_key(key: str = None) -> str:
     """
     try:
         result = econ_calendar.validate_bls_key(key)
-        icon = "✅" if result["valid"] else "❌"
+        icon = "OK " if result["valid"] else "BAD"
         out = (f"### BLS Key Check\n\n"
                f"{icon} **{result['tier']}** — {result['daily_cap'] or '?'} queries/day\n\n"
                f"{result['detail']}\n")
@@ -2593,7 +2593,7 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
                 out += dtable.to_string(index=False) + "\n"
 
         if failed:
-            out += f"\n**⚠️ {len(failed)} schedule(s) unavailable:** " + "; ".join(failed) + "\n"
+            out += f"\n**Warning: {len(failed)} schedule(s) unavailable:** " + "; ".join(failed) + "\n"
 
         status = econ_calendar.source_status()["bls"]
         out += (f"\n*Source: BLS {status['tier']}"
@@ -2634,7 +2634,7 @@ def _render_market_series(series, count: int) -> str:
             "As of": latest["date"][:10] if latest else "—",
             "Change": (f"{d['change']:+.4g}{suffix}" if d["change"] is not None else "—"),
             "Source": d["source"].upper(),
-            "": "⚠️ stale" if d["stale"] else "",
+            "": "stale" if d["stale"] else "",
         })
 
     if not rows:
@@ -2650,7 +2650,7 @@ def _render_market_series(series, count: int) -> str:
 
     stale = [d["label"] for d in data.values() if d.get("stale")]
     if stale:
-        out += ("\n**⚠️ Stale series:** " + "; ".join(stale) +
+        out += ("\n**Warning: Stale series:** " + "; ".join(stale) +
                 ". A discontinued series keeps returning its last value with nothing "
                 "in the response to say so — FRED still serves the Bank of England's "
                 "BOERUKM, retired in 2017.\n")
