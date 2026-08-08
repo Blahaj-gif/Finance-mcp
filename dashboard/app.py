@@ -529,18 +529,42 @@ with tab_backtest:
         sell_thresh = st.slider("Sell Trigger (Consensus Score)", min_value=-5.0, max_value=0.0, value=-1.5, step=0.1)
         fee = st.number_input("Transaction Fee Ratio", min_value=0.0, max_value=0.02, value=0.0015, step=0.0001, format="%.4f")
         
-        # Execute Backtest
-        bt_results = backtester.run_backtest(res, consensus_col="consensus_score", buy_threshold=buy_thresh, sell_threshold=sell_thresh, transaction_fee=fee)
+        # Execute Backtest. `interval` matters: it sets the Sharpe annualisation,
+        # which was previously fixed at 252 bars/year regardless of bar size.
+        bt_results = backtester.run_backtest(res, consensus_col="consensus_score",
+                                             buy_threshold=buy_thresh, sell_threshold=sell_thresh,
+                                             transaction_fee=fee, interval=interval)
         metrics = bt_results["metrics"]
-        
+
         # Metrics Display
         st.markdown("#### Performance Metrics")
-        st.metric("Strategy Return", f"{metrics['total_strategy_return']:.2f}%", 
+        st.metric("Strategy Return", f"{metrics['total_strategy_return']:.2f}%",
                   delta=f"{metrics['total_strategy_return'] - metrics['total_asset_return']:.2f}% vs Market")
         st.metric("Buy & Hold Return", f"{metrics['total_asset_return']:.2f}%")
-        st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-        st.metric("Max Drawdown", f"{metrics['max_drawdown']:.2f}%")
-        st.metric("Trade Win Rate", f"{metrics['win_rate']:.1f}%", f"{metrics['total_trades']} Trades")
+        st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}",
+                  help=f"Annualised for {metrics['interval']} bars, risk-free rate 0.")
+        st.metric("Max Drawdown", f"{metrics['max_drawdown']:.2f}%",
+                  delta=f"{metrics['max_drawdown'] - metrics['asset_max_drawdown']:.2f}% vs Buy & Hold",
+                  delta_color="inverse")
+
+        if metrics["total_trades"] == 0:
+            st.warning("This strategy never traded over the selected window — the metrics above are the flat line.")
+        else:
+            st.metric("Trade Win Rate", f"{metrics['win_rate']:.1f}%",
+                      f"{metrics['total_trades']} trades"
+                      + (" (1 still open)" if metrics["open_trade"] else ""))
+            st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}",
+                      help="Gross wins / gross losses. Above 1.0 is profitable before slippage.")
+            st.metric("Time in Market", f"{metrics['exposure_pct']:.0f}%",
+                      help="Share of bars holding a position. A high return on low exposure "
+                           "is a different claim from the same return held throughout.")
+            if metrics["avg_loss_pct"]:
+                st.caption(f"Average win {metrics['avg_win_pct']:+.2f}% · "
+                           f"average loss {metrics['avg_loss_pct']:+.2f}%")
+
+        st.caption(f"{metrics['bars']} {metrics['interval']} bars. The consensus score is "
+                   "undefined for the first 50 bars (indicator warm-up), so the strategy "
+                   "stays flat until then.")
         
     with bt_col2:
         # Plot Equity Curve comparison

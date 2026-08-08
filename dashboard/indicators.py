@@ -41,14 +41,26 @@ def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int
     return pd.DataFrame({"macd": macd_val, "macd_signal": signal_val, "macd_hist": hist}, index=df.index)
 
 def calculate_rsi(df: pd.DataFrame, period: int = 14, column: str = "close") -> pd.Series:
+    """Wilder's RSI."""
     delta = df[column].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
+
+    # avg_loss == 0 means there were no down moves at all, so RSI is 100 --
+    # maximally overbought. Blanket-filling it with 50 reported "neutral" for
+    # an asset in an uninterrupted uptrend, and RSI is a primary signal in both
+    # the market-analysis verdict and the adaptive consensus.
+    no_loss = avg_loss.eq(0) & avg_gain.gt(0)
+    rsi = rsi.mask(no_loss, 100.0)
+
+    # Genuinely undefined only while both sides are still zero (flat warm-up).
+    flat = avg_loss.eq(0) & avg_gain.eq(0)
+    return rsi.mask(flat, 50.0)
 
 def calculate_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
     low_min = df["low"].rolling(window=k_period).min()
@@ -79,7 +91,10 @@ def calculate_natr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, num_std: float = 2.0, column: str = "close") -> pd.DataFrame:
     sma = calculate_sma(df, period, column)
-    std = df[column].rolling(window=period).std()
+    # ddof=0: Bollinger bands use the population standard deviation. Pandas
+    # defaults to the sample std (ddof=1), which widens the bands and puts this
+    # out of step with every charting platform the numbers get compared against.
+    std = df[column].rolling(window=period).std(ddof=0)
     upper = sma + (num_std * std)
     lower = sma - (num_std * std)
     bandwidth = (upper - lower) / sma
@@ -124,7 +139,10 @@ def calculate_mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     pos_mf = pos_flow.rolling(window=period).sum()
     neg_mf = neg_flow.rolling(window=period).sum()
     mfr = pos_mf / neg_mf.replace(0, np.nan)
-    return 100 - (100 / (1 + mfr))
+    mfi = 100 - (100 / (1 + mfr))
+
+    # No negative money flow in the window means MFI is 100, not undefined.
+    return mfi.mask(neg_mf.eq(0) & pos_mf.gt(0), 100.0)
 
 def calculate_obv(df: pd.DataFrame) -> pd.Series:
     diff = df["close"].diff()
@@ -142,25 +160,72 @@ def calculate_pvt(df: pd.DataFrame) -> pd.Series:
     close_pct = df["close"].pct_change()
     return (close_pct * df["volume"]).cumsum().fillna(0)
 
-def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+def _is_intraday(df: pd.DataFrame) -> bool:
+    """True when bars are finer than one day, inferred from the time column."""
+    if "time" not in df.columns or len(df) < 3:
+        return False
+    try:
+        ts = pd.to_datetime(df["time"])
+        return bool(ts.diff().dropna().median() < pd.Timedelta(days=1))
+    except Exception:
+        return False
+
+
+def _session_key(df: pd.DataFrame) -> pd.Series:
+    return pd.to_datetime(df["time"]).dt.date
+
+
+def calculate_vwap(df: pd.DataFrame, rolling_period: int = 20) -> pd.Series:
+    """
+    Volume-weighted average price.
+
+    VWAP is a *session* statistic. Accumulating it from the first bar of an
+    arbitrary fetch window made the value depend on `count`: the same daily bar
+    returned VWAP 149.90, 153.43 or 155.26 for count=50/100/250, and on a long
+    daily window it drifted hundreds of dollars below spot while still being
+    labelled "VWAP".
+
+    So: intraday bars reset the accumulation each session (the standard
+    definition), and daily-or-slower bars use a rolling `rolling_period` VWAP
+    (a well-defined measure that does not depend on how much history was asked
+    for). Both are stable under a change of `count`.
+    """
     tp = (df["high"] + df["low"] + df["close"]) / 3
     pv = tp * df["volume"]
-    # Usually VWAP resets daily, but for typical charting we compute cumulative rolling VWAP
-    cum_pv = pv.cumsum()
-    cum_vol = df["volume"].cumsum()
+
+    if _is_intraday(df):
+        session = _session_key(df)
+        cum_pv = pv.groupby(session).cumsum()
+        cum_vol = df["volume"].groupby(session).cumsum()
+        return cum_pv / cum_vol.replace(0, np.nan)
+
+    win = min(rolling_period, max(len(df), 1))
+    cum_pv = pv.rolling(window=win, min_periods=1).sum()
+    cum_vol = df["volume"].rolling(window=win, min_periods=1).sum()
     return cum_pv / cum_vol.replace(0, np.nan)
 
-def calculate_vwap_bands(df: pd.DataFrame, num_std: float = 2.0) -> pd.DataFrame:
-    vwap = calculate_vwap(df)
+
+def calculate_vwap_bands(df: pd.DataFrame, num_std: float = 2.0, rolling_period: int = 20) -> pd.DataFrame:
+    """VWAP with volume-weighted standard-deviation bands, on the same anchoring as calculate_vwap."""
+    vwap = calculate_vwap(df, rolling_period)
     tp = (df["high"] + df["low"] + df["close"]) / 3
-    # Compute rolling variance
-    dev = (tp - vwap) ** 2
-    cum_dev = (dev * df["volume"]).cumsum()
-    cum_vol = df["volume"].cumsum()
+    dev = ((tp - vwap) ** 2) * df["volume"]
+
+    if _is_intraday(df):
+        session = _session_key(df)
+        cum_dev = dev.groupby(session).cumsum()
+        cum_vol = df["volume"].groupby(session).cumsum()
+    else:
+        win = min(rolling_period, max(len(df), 1))
+        cum_dev = dev.rolling(window=win, min_periods=1).sum()
+        cum_vol = df["volume"].rolling(window=win, min_periods=1).sum()
+
     vwap_std = np.sqrt(cum_dev / cum_vol.replace(0, np.nan))
-    upper = vwap + (num_std * vwap_std)
-    lower = vwap - (num_std * vwap_std)
-    return pd.DataFrame({"vwap": vwap, "vwap_upper": upper, "vwap_lower": lower}, index=df.index)
+    return pd.DataFrame({
+        "vwap": vwap,
+        "vwap_upper": vwap + (num_std * vwap_std),
+        "vwap_lower": vwap - (num_std * vwap_std),
+    }, index=df.index)
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     high_diff = df["high"].diff()
@@ -214,7 +279,10 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
     final_lb = pd.Series(0.0, index=df.index)
     supertrend = pd.Series(0.0, index=df.index)
     direction = pd.Series(1, index=df.index) # 1 = up, -1 = down
-    
+
+    if len(df) == 0:
+        return pd.DataFrame({"supertrend": supertrend, "supertrend_dir": direction}, index=df.index)
+
     for i in range(1, len(df)):
         # Upper band
         if basic_ub.iloc[i] < final_ub.iloc[i-1] or df["close"].iloc[i-1] > final_ub.iloc[i-1]:
@@ -243,7 +311,12 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
             else:
                 direction.iloc[i] = 1
                 supertrend.iloc[i] = final_lb.iloc[i]
-                
+
+    # Bar 0 never had a band to compute; leaving it at 0.0 drew a line to zero
+    # on charts and looked like a real price level.
+    supertrend.iloc[0] = np.nan
+    direction.iloc[0] = np.nan
+
     return pd.DataFrame({"supertrend": supertrend, "supertrend_dir": direction}, index=df.index)
 
 def calculate_ichimoku(df: pd.DataFrame, conversion_period: int = 9, base_period: int = 26, span_b_period: int = 52, lagging_span_period: int = 26) -> pd.DataFrame:
@@ -296,18 +369,22 @@ def calculate_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     
     return pd.DataFrame({"pivot_pp": pp, "pivot_r1": r1, "pivot_s1": s1, "pivot_r2": r2, "pivot_s2": s2, "pivot_r3": r3, "pivot_s3": s3}, index=df.index)
 
-def classify_market_regime(df: pd.DataFrame) -> pd.DataFrame:
+def classify_market_regime(df: pd.DataFrame, precomputed: dict = None) -> pd.DataFrame:
     """
     Classifies market regime into one of 4 states:
     1: Bullish Trending
     2: Bearish Trending
     3: High Volatility Expansion
     4: Mean-Reverting Range-Bound
+
+    `precomputed` optionally supplies adx/bb/ema_fast/ema_slow frames to avoid
+    recalculating them.
     """
-    adx_df = calculate_adx(df)
-    bb_df = calculate_bollinger_bands(df)
-    ema_fast = calculate_ema(df, 20)
-    ema_slow = calculate_ema(df, 50)
+    p = precomputed or {}
+    adx_df = p.get("adx") if p.get("adx") is not None else calculate_adx(df)
+    bb_df = p.get("bb") if p.get("bb") is not None else calculate_bollinger_bands(df)
+    ema_fast = p.get("ema_fast") if p.get("ema_fast") is not None else calculate_ema(df, 20)
+    ema_slow = p.get("ema_slow") if p.get("ema_slow") is not None else calculate_ema(df, 50)
     
     # BB Width 20-period SMA & Std
     bb_width = bb_df["bb_width"]
@@ -342,24 +419,38 @@ def classify_market_regime(df: pd.DataFrame) -> pd.DataFrame:
             
     return pd.DataFrame({"regime": regimes}, index=df.index)
 
-def calculate_adaptive_consensus(df: pd.DataFrame) -> pd.Series:
+# Bars needed before the consensus is built on anything real. EMA(50) and
+# MACD(26,9) are *defined* from bar 0 (ewm with adjust=False seeds at close[0])
+# but carry no information until they have seen their period. Scoring them
+# anyway produced confident-looking readings on the opening bars -- invisible
+# when only the latest bar is read, but the backtester trades the whole series.
+CONSENSUS_WARMUP_BARS = 50
+
+
+def calculate_adaptive_consensus(df: pd.DataFrame, precomputed: dict = None) -> pd.Series:
     """
     Calculates a consensus score (-5 to +5) adaptively weighted by the market regime:
       - Trending: Trend indicators (MACD, MA, SuperTrend) have 80% weight.
       - Mean-Reverting: Oscillators (RSI, Stochastic, BB touch) have 80% weight.
       - Mixed/Expansion: Split equally.
+
+    The first CONSENSUS_WARMUP_BARS bars are NaN rather than a number nobody
+    should act on.
+
+    `precomputed` optionally supplies already-calculated component frames
+    (rsi/macd/bb/supertrend/ema_fast/ema_slow/regime) so a caller that has
+    already built them does not pay for them twice -- SuperTrend in particular
+    is a per-bar Python loop.
     """
-    # Pre-calculate components
-    rsi = calculate_rsi(df)
-    macd_df = calculate_macd(df)
-    bb_df = calculate_bollinger_bands(df)
-    st_df = calculate_supertrend(df)
-    
-    ema_fast = calculate_ema(df, 20)
-    ema_slow = calculate_ema(df, 50)
-    
-    regime_df = classify_market_regime(df)
-    
+    p = precomputed or {}
+    rsi = p.get("rsi") if p.get("rsi") is not None else calculate_rsi(df)
+    macd_df = p.get("macd") if p.get("macd") is not None else calculate_macd(df)
+    bb_df = p.get("bb") if p.get("bb") is not None else calculate_bollinger_bands(df)
+    st_df = p.get("supertrend") if p.get("supertrend") is not None else calculate_supertrend(df)
+    ema_fast = p.get("ema_fast") if p.get("ema_fast") is not None else calculate_ema(df, 20)
+    ema_slow = p.get("ema_slow") if p.get("ema_slow") is not None else calculate_ema(df, 50)
+    regime_df = p.get("regime") if p.get("regime") is not None else classify_market_regime(df)
+
     consensus = []
     
     for i in range(len(df)):
@@ -381,15 +472,23 @@ def calculate_adaptive_consensus(df: pd.DataFrame) -> pd.Series:
         osc_score = (rsi_sig + bb_sig) / 2.0
         
         # 2. Trend Signals (-1 to +1)
-        # MACD Crossover
-        macd_sig_val = 1.0 if macd_df["macd"].iloc[i] > macd_df["macd_signal"].iloc[i] else -1.0
-        
-        # SuperTrend
-        st_sig = 1.0 if st_df["supertrend_dir"].iloc[i] == 1 else -1.0
-        
-        # EMA Crossover
-        ema_sig = 1.0 if ema_fast.iloc[i] > ema_slow.iloc[i] else -1.0
-        
+        # Each of these is neutral when it has no opinion yet. Previously they
+        # were binary with no neutral state, and `NaN > NaN` is False, so during
+        # indicator warm-up all three read -1 and the consensus opened at a
+        # spurious -3.75 (strong sell). Harmless for the latest bar, but the
+        # backtester runs the whole series and traded on that phantom signal.
+        def _cmp(a, b):
+            if pd.isna(a) or pd.isna(b) or a == b:
+                return 0.0
+            return 1.0 if a > b else -1.0
+
+        macd_sig_val = _cmp(macd_df["macd"].iloc[i], macd_df["macd_signal"].iloc[i])
+
+        st_dir = st_df["supertrend_dir"].iloc[i]
+        st_sig = 0.0 if pd.isna(st_dir) else (1.0 if st_dir == 1 else -1.0)
+
+        ema_sig = _cmp(ema_fast.iloc[i], ema_slow.iloc[i])
+
         trend_score = (macd_sig_val + st_sig + ema_sig) / 3.0
         
         # 3. Apply Regime weighting
@@ -405,8 +504,11 @@ def calculate_adaptive_consensus(df: pd.DataFrame) -> pd.Series:
             
         # Scale to -5.0 to +5.0 range
         consensus.append(score * 5.0)
-        
-    return pd.Series(consensus, index=df.index)
+
+    series = pd.Series(consensus, index=df.index, dtype=float)
+    if len(series) > 0:
+        series.iloc[:min(CONSENSUS_WARMUP_BARS, len(series))] = np.nan
+    return series
 
 def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calculates all 50+ indicator columns and joins them to the dataframe."""
@@ -462,23 +564,33 @@ def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Complex / Multi-column
     adx_df = calculate_adx(df)
     res = res.join(adx_df)
-    
+
     st_df = calculate_supertrend(df)
     res = res.join(st_df)
-    
+
     ich_df = calculate_ichimoku(df)
     res = res.join(ich_df)
-    
+
     tsi_df = calculate_tsi(df)
     res = res.join(tsi_df)
-    
+
     pivots = calculate_pivot_points(df)
     res = res.join(pivots)
-    
-    # Regime and consensus
-    regime_df = classify_market_regime(df)
+
+    # Regime and consensus reuse what has already been built. Recomputing them
+    # meant EMA ran 17x, Bollinger 4x, ADX 3x and SuperTrend -- a per-bar Python
+    # loop -- twice per call.
+    ema_fast = calculate_ema(df, 20)
+    ema_slow = calculate_ema(df, 50)
+    shared = {
+        "adx": adx_df, "bb": bb_df, "rsi": res["rsi_14"], "macd": macd_df,
+        "supertrend": st_df, "ema_fast": ema_fast, "ema_slow": ema_slow,
+    }
+
+    regime_df = classify_market_regime(df, precomputed=shared)
     res = res.join(regime_df)
-    
-    res["consensus_score"] = calculate_adaptive_consensus(df)
-    
+
+    shared["regime"] = regime_df
+    res["consensus_score"] = calculate_adaptive_consensus(df, precomputed=shared)
+
     return res

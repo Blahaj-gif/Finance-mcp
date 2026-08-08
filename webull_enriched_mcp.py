@@ -57,8 +57,10 @@ def get_account_info() -> str:
 @mcp.tool()
 def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> str:
     """
-    Fetches market data, calculates 50+ technical indicators, and returns a 
+    Fetches market data, calculates 50+ technical indicators, and returns a
     structured technical analysis summary and trading verdict.
+    This is the usual starting point for a single symbol. For the full picture including
+    fundamentals, news and filings, call get_comprehensive_profile instead of chaining calls.
     
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
@@ -185,6 +187,8 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100) -> s
 def get_technical_indicators(symbol: str, interval: str = "D", count: int = 5) -> str:
     """
     Returns the latest calculated technical indicator values in markdown table format.
+    Use when you want the raw indicator numbers to reason over yourself. If you want the
+    numbers already interpreted into a BUY/SELL verdict, call get_market_analysis instead.
     
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
@@ -313,6 +317,8 @@ def log_journal_entry(symbol: str, action: str, price: float, size: float, ratio
 def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
     """
     Fetches raw OHLCV (Open, High, Low, Close, Volume) candlestick bars for a symbol.
+    Use when you need the price series itself — to eyeball recent action or do your own
+    maths. For indicators use get_technical_indicators; for a verdict use get_market_analysis.
     
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
@@ -344,6 +350,8 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
 def get_options_chain(symbol: str) -> str:
     """
     Fetches option chain summary (calls & puts with IV, strike, volume, open interest) for nearest expiration.
+    Use for the raw strike ladder. For IV rank, implied move, skew and greeks call
+    get_options_analytics; to hunt unusual flow call get_unusual_options.
     
     Args:
         symbol: The stock symbol (e.g. AAPL, SPY, NVDA).
@@ -413,7 +421,14 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
             regime_df = indicators.classify_market_regime(res_df)
             regime = str(regime_df["regime"].iloc[-1])
             score_series = indicators.calculate_adaptive_consensus(res_df)
-            score = float(score_series.iloc[-1])
+            raw_score = score_series.iloc[-1]
+            if pd.isna(raw_score):
+                # Fewer bars than the consensus warm-up needs. Say so rather
+                # than coercing NaN into a number that reads like a signal.
+                raise ValueError(
+                    f"only {len(res_df)} bars available; the consensus score needs "
+                    f"{indicators.CONSENSUS_WARMUP_BARS}+ bars of history")
+            score = float(raw_score)
             last_close = float(res_df["close"].iloc[-1])
             
             verdict = "NEUTRAL"
@@ -482,7 +497,14 @@ def get_multi_timeframe(symbol: str) -> str:
             regime_df = indicators.classify_market_regime(res_df)
             regime = str(regime_df["regime"].iloc[-1])
             score_series = indicators.calculate_adaptive_consensus(res_df)
-            score = float(score_series.iloc[-1])
+            raw_score = score_series.iloc[-1]
+            if pd.isna(raw_score):
+                # Fewer bars than the consensus warm-up needs. Say so rather
+                # than coercing NaN into a number that reads like a signal.
+                raise ValueError(
+                    f"only {len(res_df)} bars available; the consensus score needs "
+                    f"{indicators.CONSENSUS_WARMUP_BARS}+ bars of history")
+            score = float(raw_score)
             weighted_contrib = score * weight
             total_confluence += weighted_contrib
             covered_weight += weight
@@ -1268,42 +1290,67 @@ def get_sec_filings(symbol: str) -> str:
     except Exception as e:
         raise ToolError(f"Error fetching SEC filings for {symbol}: {e}") from e
 
+
+PROFILE_SECTIONS = {
+    "profile":   ("Company Profile",                 lambda s: get_company_profile(s)),
+    "technicals":("Technical Indicators & Price Data", lambda s: get_technical_indicators(s)),
+    "consensus": ("Market Consensus & Adaptive Signals", lambda s: get_market_analysis(s)),
+    "short":     ("Short Interest",                  lambda s: get_short_interest(s)),
+    "news":      ("Recent News",                     lambda s: get_news(s)),
+    "earnings":  ("Earnings Calendar & Surprises",   lambda s: get_earnings(s)),
+    "insiders":  ("Insider Trading Activity",        lambda s: get_insider_trades(s)),
+    "filings":   ("SEC Filings",                     lambda s: get_sec_filings(s)),
+    "options":   ("Options Analytics",               lambda s: get_options_analytics(s)),
+    "risk":      ("Portfolio Risk",                  lambda s: get_portfolio_risk()),
+}
+
+DEFAULT_PROFILE_SECTIONS = ["profile", "technicals", "consensus", "short",
+                            "news", "earnings", "insiders", "filings"]
+
+
 @mcp.tool()
-def get_comprehensive_profile(symbol: str) -> str:
+def get_comprehensive_profile(symbol: str, sections: str | list[str] = None) -> str:
     """
-    Fetches a master payload containing EVERYTHING you need to analyze a stock in a single round-trip.
-    Includes: OHLCV, Technical Indicators, Market Consensus/Signals, Recent News, Company Profile, Short Interest, Earnings, Insider Trades, and SEC Filings.
-    Use this to drastically speed up your analysis latency.
-    
+    Fetches a master payload for a stock in a single round-trip, instead of 8 separate calls.
+    Use this to open any analysis; reach for the individual tools only when you need
+    one specific thing or a non-default parameter.
+
     Args:
         symbol: Ticker symbol (e.g. AAPL, TSLA).
+        sections: Which sections to include, as a comma-separated string or list.
+            Defaults to the 8 core sections. Available:
+            profile, technicals, consensus, short, news, earnings, insiders,
+            filings, options (IV rank/greeks), risk (live account exposure).
     """
-    out = f"# COMPREHENSIVE PROFILE: {symbol.upper()}\n\n"
-    
-    out += "## 1. Company Profile\n"
-    out += get_company_profile(symbol) + "\n\n"
-    
-    out += "## 2. Technical Indicators & Price Data\n"
-    out += get_technical_indicators(symbol) + "\n\n"
-    
-    out += "## 3. Market Consensus & Adaptive Signals\n"
-    out += get_market_analysis(symbol) + "\n\n"
-    
-    out += "## 4. Short Interest\n"
-    out += get_short_interest(symbol) + "\n\n"
-    
-    out += "## 5. Recent News\n"
-    out += get_news(symbol) + "\n\n"
-    
-    out += "## 6. Earnings Calendar & Surprises\n"
-    out += get_earnings(symbol) + "\n\n"
-    
-    out += "## 7. Insider Trading Activity\n"
-    out += get_insider_trades(symbol) + "\n\n"
-    
-    out += "## 8. SEC Filings\n"
-    out += get_sec_filings(symbol) + "\n\n"
+    if sections is None:
+        wanted = list(DEFAULT_PROFILE_SECTIONS)
+    else:
+        raw = sections.split(",") if isinstance(sections, str) else list(sections)
+        wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
 
+    unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
+    if unknown:
+        raise ToolError(
+            f"Unknown section(s) {unknown}. Available: {', '.join(PROFILE_SECTIONS)}")
+
+    out = f"# COMPREHENSIVE PROFILE: {symbol.upper()}\n\n"
+    failed = []
+
+    for n, key in enumerate(wanted, start=1):
+        title, fn = PROFILE_SECTIONS[key]
+        out += f"## {n}. {title}\n"
+        try:
+            out += fn(symbol) + "\n\n"
+        except Exception as e:
+            # Per-section isolation. The sub-tools raise ToolError now, so
+            # without this one bad section would abort the whole profile --
+            # which is the opposite of what a bundle is for.
+            failed.append(key)
+            out += f"*Unavailable: {e}*\n\n"
+
+    if failed:
+        out += (f"---\n**⚠️ {len(failed)} of {len(wanted)} section(s) unavailable: "
+                f"{', '.join(failed)}.** The rest of this profile is unaffected.\n")
     return out
 
 
