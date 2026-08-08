@@ -259,3 +259,23 @@ def test_the_deploy_button_is_suppressed():
     config = open(os.path.join(ROOT, ".streamlit", "config.toml"), encoding="utf-8").read()
     assert "toolbarMode" in config and "minimal" in config
     assert 'stAppDeployButton' in theme._SHARED_CSS
+
+
+def test_the_main_container_clears_streamlits_fixed_header():
+    """
+    Streamlit's app header is position:fixed, 60px tall, opaque, and painted at
+    z-index 999990. Anything the main container places above 60px is covered by
+    it rather than pushed below it -- trimming the top padding for density slid
+    the masthead under the header and sliced the top off the ticker.
+
+    This is an *overlap*, not an overflow, which is why a scrollHeight check
+    reported the layout as clean while the ticker was visibly cut.
+    """
+    STREAMLIT_HEADER_PX = 60
+    match = re.search(r'stMainBlockContainer"\]\s*\{[^}]*padding-top:\s*([\d.]+)rem',
+                      theme._SHARED_CSS)
+    assert match, "the main container no longer sets padding-top"
+    padding_px = float(match.group(1)) * 16          # rem is root-relative, 16px
+    assert padding_px >= STREAMLIT_HEADER_PX, (
+        f"padding-top is {padding_px:.0f}px; the fixed header is "
+        f"{STREAMLIT_HEADER_PX}px and will paint over the masthead")

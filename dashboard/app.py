@@ -113,16 +113,23 @@ symbol = st.sidebar.text_input("Ticker Symbol", value="AAPL", max_chars=10).stri
 # Timeframes. Webull and Yahoo both stop at 1H and 1D; 4H and 1Y are resampled
 # from the nearest finer bar the feed will actually serve, rather than being
 # offered and silently returning something else.
+# `bars` is the default request per timeframe, not a cap. Intraday frames get
+# more because 200 one-minute bars is half a session -- not enough to see the
+# live candle forming against yesterday's structure. Measured: Webull serves
+# 1200 bars in under a second and Yahoo covers 600 at every interval, so this
+# costs about 0.13s of indicator time and nothing else.
+MAX_BARS = 600
 TIMEFRAMES = {
-    "1m":  {"label": "1m",  "interval": "M1",  "resample": None,  "bars": 200},
-    "5m":  {"label": "5m",  "interval": "M5",  "resample": None,  "bars": 200},
-    "15m": {"label": "15m", "interval": "M15", "resample": None,  "bars": 200},
-    "30m": {"label": "30m", "interval": "M30", "resample": None,  "bars": 200},
-    "1H":  {"label": "1H",  "interval": "H1",  "resample": None,  "bars": 200},
-    "4H":  {"label": "4H",  "interval": "H1",  "resample": "4h",  "bars": 200},
-    "1D":  {"label": "1D",  "interval": "D",   "resample": None,  "bars": 200},
-    "1W":  {"label": "1W",  "interval": "W",   "resample": None,  "bars": 200},
-    "1M":  {"label": "1M",  "interval": "M",   "resample": None,  "bars": 200},
+    "1m":  {"label": "1m",  "interval": "M1",  "resample": None,  "bars": 600},
+    "5m":  {"label": "5m",  "interval": "M5",  "resample": None,  "bars": 400},
+    "15m": {"label": "15m", "interval": "M15", "resample": None,  "bars": 400},
+    "30m": {"label": "30m", "interval": "M30", "resample": None,  "bars": 300},
+    "1H":  {"label": "1H",  "interval": "H1",  "resample": None,  "bars": 300},
+    # Resampled 4:1, so ask for four times what should end up on the chart.
+    "4H":  {"label": "4H",  "interval": "H1",  "resample": "4h",  "bars": 600},
+    "1D":  {"label": "1D",  "interval": "D",   "resample": None,  "bars": 300},
+    "1W":  {"label": "1W",  "interval": "W",   "resample": None,  "bars": 300},
+    "1M":  {"label": "1M",  "interval": "M",   "resample": None,  "bars": 300},
     # "YS", not "YE": a year-end label stamps the 2026 bar 2026-12-31, a date
     # that has not happened. Every other bar in the feed is labelled at its
     # start, and a bar dated in the future reads as bad data.
@@ -140,10 +147,11 @@ tf = TIMEFRAMES[timeframe]
 interval = tf["interval"]
 
 count = st.sidebar.slider(
-    "Historical Bar Count", min_value=50, max_value=500,
-    value=min(tf["bars"], 500), step=10,
-    help="Bars requested from the feed. When the timeframe is resampled (4H, 1Y) "
-         "this is the count *before* resampling, so the chart shows fewer.")
+    "Historical Bar Count", min_value=50, max_value=MAX_BARS,
+    value=min(tf["bars"], MAX_BARS), step=10, key=f"bars_{timeframe}",
+    help="Bars requested from the feed. Each timeframe remembers its own count. "
+         "When the timeframe is resampled (4H, 1Y) this is the count *before* "
+         "resampling, so the chart shows fewer.")
 
 # 2. Indicator Configuration Expanders
 st.sidebar.markdown("### 2. Indicator Parameters")

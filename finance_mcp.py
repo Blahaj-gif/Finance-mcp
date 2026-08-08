@@ -15,6 +15,7 @@ import dashboard.webull_client as webull_client
 import dashboard.indicators as indicators
 import dashboard.econ_calendar as econ_calendar
 import dashboard.iv_history as iv_history
+import dashboard.options_math as options_math
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 
@@ -396,11 +397,18 @@ def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
     history once a symbol has enough of it, and says so when it does not.
     """
     try:
-        c = calls.copy(); p = puts.copy()
-        c["d"] = (c["strike"] - spot).abs(); p["d"] = (p["strike"] - spot).abs()
-        atm_c, atm_p = c.nsmallest(1, "d").iloc[0], p.nsmallest(1, "d").iloc[0]
-        atm_iv = (float(atm_c["impliedVolatility"]) + float(atm_p["impliedVolatility"])) / 2
-        straddle = float(atm_c["lastPrice"]) + float(atm_p["lastPrice"])
+        # Solved from the mid, not read off Yahoo's column -- same correction as
+        # get_options_analytics, for the same measured reason.
+        t_years = max(days, 1) / 365.0
+        iv_info = options_math.atm_iv(calls, puts, spot, t_years)
+        atm_iv = iv_info["iv"]
+        if atm_iv is None:
+            return ""
+
+        sd = options_math.straddle_price(calls, puts, spot)
+        if not sd:
+            return ""
+        straddle = sd["straddle"]
         move_pct = straddle / spot * 100 if spot else 0.0
 
         try:
@@ -1810,10 +1818,29 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         puts["dist"] = (puts["strike"] - spot).abs()
         atm_call = calls.nsmallest(1, "dist").iloc[0]
         atm_put = puts.nsmallest(1, "dist").iloc[0]
-        straddle = float(atm_call["lastPrice"]) + float(atm_put["lastPrice"])
+
+        # Priced off the mid and solved from it, not taken from Yahoo's columns.
+        # An audit of AAPL/SPY/NVDA/MU found `lastPrice` up to 31 days stale on
+        # illiquid strikes, and `impliedVolatility` inconsistent with the very
+        # quotes printed beside it -- re-pricing the ATM call at Yahoo's IV came
+        # out 9.4% to 17.6% below the mid. Solving from the mid reproduces it to
+        # within 0.1%.
+        sd = options_math.straddle_price(calls, puts, spot)
+        if sd:
+            straddle, straddle_quality = sd["straddle"], sd["quality"]
+        else:
+            straddle = float(atm_call["lastPrice"]) + float(atm_put["lastPrice"])
+            straddle_quality = "last"
         implied_move_pct = straddle / spot * 100
 
-        atm_iv = (float(atm_call["impliedVolatility"]) + float(atm_put["impliedVolatility"])) / 2
+        iv_info = options_math.atm_iv(calls, puts, spot, t)
+        atm_iv = iv_info["iv"]
+        if atm_iv is None:
+            raise ToolError(
+                f"Could not derive an at-the-money implied volatility for "
+                f"{symbol.upper()} at {expiry}. The ATM quotes are unusable "
+                "(no two-sided market, or a price outside the no-arbitrage band)."
+            )
 
         # IV rank/percentile against a year of realised vol -- a true IV history
         # needs a paid feed, so state the proxy rather than implying otherwise.
@@ -1871,13 +1898,39 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
                 f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)\n")
 
         # Put/call skew: are downside strikes bid up relative to upside?
-        otm_puts = puts[puts["strike"] < spot * 0.95]
-        otm_calls = calls[calls["strike"] > spot * 1.05]
-        if not otm_puts.empty and not otm_calls.empty:
-            skew = float(otm_puts["impliedVolatility"].mean() - otm_calls["impliedVolatility"].mean())
+        # Illiquid rows are dropped first. 30% of AAPL strikes had a zero bid
+        # and the 90th-percentile relative spread was 200%; averaging those in
+        # imports noise as signal, and OTM wings are exactly where Yahoo's own
+        # IV column goes to 600%+.
+        def _wing_iv(frame, mask, is_call):
+            rows = frame[mask]
+            vols = []
+            for _, row in rows.iterrows():
+                if not options_math.is_liquid(row):
+                    continue
+                solved = options_math.solve_row_iv(row, spot, t, is_call)
+                if solved["iv"] is not None:
+                    vols.append(solved["iv"])
+            return vols
+
+        # Wings sized by the move the market is actually pricing, not a flat 5%.
+        # On a 1-day expiry nothing trades 5% out, so a fixed band reported
+        # "not measurable" on the most liquid chain in the world; on a LEAP it
+        # would sit far inside the money instead.
+        wing = max(implied_move_pct / 100.0, 0.01)
+        put_vols = _wing_iv(puts, puts["strike"] < spot * (1 - wing), False)
+        call_vols = _wing_iv(calls, calls["strike"] > spot * (1 + wing), True)
+        if put_vols and call_vols:
+            skew = sum(put_vols) / len(put_vols) - sum(call_vols) / len(call_vols)
             direction = "downside protection is bid up (bearish / hedging demand)" if skew > 0.02 else \
                         ("upside calls are bid up (bullish/speculative)" if skew < -0.02 else "roughly symmetric")
-            out += f"* **Put/call IV skew**: `{skew * 100:+.1f} vol pts` — {direction}\n"
+            out += (f"* **Put/call IV skew**: `{skew * 100:+.1f} vol pts` — {direction}\n"
+                    f"  <br>*From {len(put_vols)} put and {len(call_vols)} call strikes beyond "
+                    f"±{wing * 100:.1f}% (one implied move) with a tradeable two-sided "
+                    f"market; illiquid strikes excluded.*\n")
+        else:
+            out += ("* **Put/call IV skew**: not measurable — too few wing strikes "
+                    "have a two-sided market.\n")
 
         # Greeks for strikes bracketing the money.
         near_calls = calls.nsmallest(3, "dist").sort_values("strike")
@@ -1885,15 +1938,23 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         grows = []
         for frame, is_call in ((near_calls, True), (near_puts, False)):
             for _, row in frame.iterrows():
-                iv = float(row["impliedVolatility"])
-                g = greeks(spot, float(row["strike"]), t, iv, is_call)
+                solved = options_math.solve_row_iv(row, spot, t, is_call)
+                iv = solved["iv"]
+                if iv is None:
+                    continue
+                g = options_math.greeks(spot, float(row["strike"]), t, iv, is_call)
                 if not g:
                     continue
                 grows.append({
                     "Type": "CALL" if is_call else "PUT",
                     "Strike": round(float(row["strike"]), 2),
-                    "Last": round(float(row["lastPrice"]), 2),
+                    # The price the greeks were actually derived from, and how
+                    # good that price is -- a greek off a 31-day-old last trade
+                    # should not read the same as one off a live two-sided mid.
+                    "Price": round(solved["price"], 2) if solved["price"] else None,
+                    "Quote": solved["price_quality"],
                     "IV %": round(iv * 100, 1),
+                    "IV src": solved["iv_source"],
                     "Delta": round(g["delta"], 3),
                     "Gamma": round(g["gamma"], 5),
                     "Vega": round(g["vega"], 3),

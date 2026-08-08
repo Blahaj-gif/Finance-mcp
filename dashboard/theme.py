@@ -181,7 +181,14 @@ _SHARED_CSS = """
 /* "Deploy" pushes the app to Streamlit Community Cloud — a public host — from
    a dashboard holding live account balances and an order-approval control. */
 [data-testid="stAppDeployButton"] { display: none !important; }
-[data-testid="stMainBlockContainer"] { padding-top: 2.2rem; padding-bottom: 3rem; }
+/* Streamlit's app header is FIXED, 60px tall, opaque, and sits at z-index
+   999990 -- so anything the main container places above 60px is painted over
+   rather than pushed down. Trimming the top padding for density slid the
+   masthead under it and sliced the top off the ticker: an overlap, not an
+   overflow, which is why an overflow check reported the layout as clean.
+   4.5rem = 72px, clearing the header with room for the accent rule. */
+[data-testid="stMainBlockContainer"] { padding-top: 4.5rem; padding-bottom: 3rem; }
+[data-testid="stSidebarUserContent"] { padding-top: 0.5rem; }
 
 /* Streamlit wraps every markdown block in a flex box whose height it derives
    from a single line of body text -- about 16px. Anything taller than one line
