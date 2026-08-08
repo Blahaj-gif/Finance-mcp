@@ -3,10 +3,32 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import html as _html
 import sys
 import os
 import json
 import datetime
+
+
+def render_html(markup: str, target=None):
+    """
+    Hand Streamlit a block of hand-built HTML without markdown eating it.
+
+    `st.markdown` runs the markdown parser first even with unsafe_allow_html,
+    and markdown has two rules that quietly destroy raw HTML: a blank line ends
+    an HTML block, and four leading spaces start a code block. The signals table
+    was built by concatenating f-strings, which left a whitespace-only line
+    between the <tbody> and the first <tr> -- so markdown closed the HTML block
+    and rendered every row as escaped source. Stripping each line to column zero
+    and dropping blank lines keeps the whole fragment inside one HTML block.
+    """
+    cleaned = "\n".join(line.strip() for line in markup.splitlines() if line.strip())
+    (target or st).markdown(cleaned, unsafe_allow_html=True)
+
+
+def as_html_text(value) -> str:
+    """Escape free text for interpolation into markup, preserving line breaks."""
+    return _html.escape(str(value)).replace("\n", "<br>")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
@@ -25,7 +47,7 @@ st.set_page_config(
 )
 
 # Custom CSS for Premium Sleek Dark Mode Look
-st.markdown("""
+render_html("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap');
     
@@ -132,7 +154,7 @@ st.markdown("""
         color: #F8FAFC;
     }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 # App Sidebar
 st.sidebar.markdown("<h2 style='font-weight:800; color:#38BDF8; margin-bottom: 0px;'>Controls</h2>", unsafe_allow_html=True)
@@ -251,7 +273,7 @@ price_pct_change = (price_change / prev_bar["close"]) * 100
 col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
-    st.markdown(f"""
+    render_html(f"""
     <div class="metric-card">
         <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Last Price</div>
         <div style="font-size:1.8rem; font-weight:700; color:{'#10B981' if price_change >= 0 else '#EF4444'}; margin-top:5px;">
@@ -261,10 +283,10 @@ with col1:
             {'+' if price_change >= 0 else ''}{price_change:.2f} ({price_pct_change:.2f}%)
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 with col2:
-    st.markdown(f"""
+    render_html(f"""
     <div class="metric-card">
         <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Volume</div>
         <div style="font-size:1.8rem; font-weight:700; color:#E2E8F0; margin-top:5px;">
@@ -274,10 +296,10 @@ with col2:
             Shares Traded
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 with col3:
-    st.markdown(f"""
+    render_html(f"""
     <div class="metric-card">
         <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Market Regime</div>
         <div style="font-size:1.4rem; font-weight:700; color:#F59E0B; margin-top:10px; line-height: 1.2;">
@@ -287,7 +309,7 @@ with col3:
             Regime Classifier
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 # Determine Consensus Verdict
 if consensus_score >= 3:
@@ -307,7 +329,7 @@ else:
     verdict_class = "pill-neutral"
 
 with col4:
-    st.markdown(f"""
+    render_html(f"""
     <div class="metric-card">
         <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Adaptive Consensus</div>
         <div style="margin-top:10px;">
@@ -317,10 +339,10 @@ with col4:
             Score: {consensus_score:+.1f} / +5.0
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 with col5:
-    st.markdown(f"""
+    render_html(f"""
     <div class="metric-card">
         <div style="font-size:0.85rem; color:#94A3B8; font-weight:600; text-transform:uppercase;">Volatility (ATR)</div>
         <div style="font-size:1.8rem; font-weight:700; color:#E2E8F0; margin-top:5px;">
@@ -330,7 +352,7 @@ with col5:
             NATR: {latest_bar["natr_14"]:.2f}%
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # Initialize Background Alert Watcher Thread in Streamlit if not running
@@ -691,20 +713,22 @@ with tab_journal:
             st.markdown("#### Journal Entries Timeline")
             for e in reversed(entries):
                 action_color = "#34D399" if e["action"] == "BUY" else "#F87171" if e["action"] == "SELL" else "#94A3B8"
-                st.markdown(f"""
+                # Rationale is free text. Interpolated raw it broke the layout on
+                # any '<', and a blank line in it ended the HTML block outright --
+                # dumping the rest of the card as visible markup.
+                rationale = as_html_text(e["rationale"])
+                render_html(f"""
                 <div class="journal-entry">
                     <div class="journal-header">
-                        <span>📅 {e['timestamp']}</span>
-                        <span>Confidence: <b>{e['confidence']}/10</b></span>
+                        <span>📅 {as_html_text(e['timestamp'])}</span>
+                        <span>Confidence: <b>{as_html_text(e['confidence'])}/10</b></span>
                     </div>
                     <div class="journal-title">
-                        {e['symbol']} • <span style="color:{action_color}; font-weight:700;">{e['action']}</span> @ ${e['price']:.2f} (Size: {e['size']:.0f})
+                        {as_html_text(e['symbol'])} • <span style="color:{action_color}; font-weight:700;">{as_html_text(e['action'])}</span> @ ${e['price']:.2f} (Size: {e['size']:.0f})
                     </div>
-                    <p style="color:#CBD5E1; font-size:0.95rem; margin-top:8px; line-height:1.4; white-space: pre-wrap;">
-                        {e['rationale']}
-                    </p>
+                    <p style="color:#CBD5E1; font-size:0.95rem; margin-top:8px; line-height:1.4;">{rationale}</p>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
     else:
         st.info("Journal database file not found. Logging your first entry will create it.")
 
@@ -744,7 +768,15 @@ with tab_signals:
     bb_color = "#10B981" if bb_verdict == "BUY" else "#EF4444" if bb_verdict == "SELL" else "#94A3B8"
     signals.append(("Volatility (Bollinger Bands)", f"Bands: ${bb_l:.2f} - ${bb_u:.2f}", bb_verdict, bb_color))
     
-    signal_table_html = """
+    rows = "".join(
+        f'<tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">'
+        f'<td style="padding: 14px 20px; font-weight:600; color:#E2E8F0;">{category}</td>'
+        f'<td style="padding: 14px 20px; color:#94A3B8; font-variant-numeric: tabular-nums;">{details}</td>'
+        f'<td style="padding: 14px 20px; font-weight:700; color:{color}; text-align:right;">{verdict}</td>'
+        f'</tr>'
+        for category, details, verdict, color in signals
+    )
+    render_html(f"""
     <table style="width:100%; border-collapse:collapse; background: rgba(30, 41, 59, 0.2); border-radius:12px; overflow:hidden;">
         <thead>
             <tr style="background: rgba(30, 41, 59, 0.6); text-align:left; border-bottom: 2px solid rgba(255,255,255,0.05);">
@@ -753,26 +785,12 @@ with tab_signals:
                 <th style="padding: 14px 20px; font-weight:600; color:#38BDF8; text-align:right;">Verdict</th>
             </tr>
         </thead>
-        <tbody>
-    """
-    
-    for category, details, verdict, color in signals:
-        signal_table_html += f"""
-            <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
-                <td style="padding: 14px 20px; font-weight:600; color:#E2E8F0;">{category}</td>
-                <td style="padding: 14px 20px; color:#94A3B8;">{details}</td>
-                <td style="padding: 14px 20px; font-weight:700; color:{color}; text-align:right;">{verdict}</td>
-            </tr>
-        """
-        
-    signal_table_html += """
-        </tbody>
+        <tbody>{rows}</tbody>
     </table>
-    """
-    st.markdown(signal_table_html, unsafe_allow_html=True)
-    
+    """)
+
     # Weighting explanation
-    st.markdown("<br>#### Regime Adaptive Consensus Weighting Matrix", unsafe_allow_html=True)
+    st.markdown("#### Regime Adaptive Consensus Weighting Matrix")
     st.markdown("""
     When the system changes its classification of the market regime, the indicator weights are updated dynamically:
     
@@ -812,21 +830,22 @@ with tab_execution:
             st.info("✅ No pending order drafts. Ask Claude to draft a trade!")
         else:
             for draft in pending_drafts:
-                st.markdown(f"""
+                limit_label = f"${draft['limit_price']}" if draft["limit_price"] else "MKT"
+                render_html(f"""
                 <div style="background: rgba(30, 41, 59, 0.6); border: 2px solid {'#10B981' if draft['action'] == 'BUY' else '#EF4444'}; border-radius: 12px; padding: 20px; margin-bottom: 15px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; margin-bottom: 15px;">
-                        <span style="font-size: 1.2rem; font-weight: bold;">Order Draft ID: {draft['draft_id']}</span>
-                        <span style="color: #94A3B8; font-size: 0.9rem;">{draft['timestamp']}</span>
+                        <span style="font-size: 1.2rem; font-weight: bold;">Order Draft ID: {as_html_text(draft['draft_id'])}</span>
+                        <span style="color: #94A3B8; font-size: 0.9rem;">{as_html_text(draft['timestamp'])}</span>
                     </div>
-                    <div style="display: flex; gap: 30px; font-size: 1.1rem; margin-bottom: 20px;">
-                        <div><span style="color:#94A3B8;">Action:</span> <strong style="color: {'#10B981' if draft['action'] == 'BUY' else '#EF4444'};">{draft['action']}</strong></div>
-                        <div><span style="color:#94A3B8;">Symbol:</span> <strong>{draft['symbol']}</strong></div>
-                        <div><span style="color:#94A3B8;">Quantity:</span> <strong>{draft['quantity']}</strong></div>
-                        <div><span style="color:#94A3B8;">Type:</span> <strong>{draft['order_type']}</strong></div>
-                        <div><span style="color:#94A3B8;">Limit Price:</span> <strong>{f"${draft['limit_price']}" if draft['limit_price'] else 'MKT'}</strong></div>
+                    <div style="display: flex; gap: 30px; font-size: 1.1rem; margin-bottom: 20px; font-variant-numeric: tabular-nums;">
+                        <div><span style="color:#94A3B8;">Action:</span> <strong style="color: {'#10B981' if draft['action'] == 'BUY' else '#EF4444'};">{as_html_text(draft['action'])}</strong></div>
+                        <div><span style="color:#94A3B8;">Symbol:</span> <strong>{as_html_text(draft['symbol'])}</strong></div>
+                        <div><span style="color:#94A3B8;">Quantity:</span> <strong>{as_html_text(draft['quantity'])}</strong></div>
+                        <div><span style="color:#94A3B8;">Type:</span> <strong>{as_html_text(draft['order_type'])}</strong></div>
+                        <div><span style="color:#94A3B8;">Limit Price:</span> <strong>{as_html_text(limit_label)}</strong></div>
                     </div>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
                 
                 preview_key = f"preview_{draft['draft_id']}"
                 col_prev, col_exec = st.columns([1, 1])
