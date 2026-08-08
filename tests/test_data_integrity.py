@@ -287,18 +287,32 @@ class FakeRateLimitError(Exception):
         self.error_code = "TOO_MANY_REQUESTS"
 
 
-def test_rate_limiter_spaces_consecutive_calls():
+def test_rate_limiter_spaces_consecutive_calls(monkeypatch):
     import time
+    # Driven by a fake clock rather than wall-clock: Windows' sleep granularity
+    # is ~15.6 ms, which makes real-time assertions on 50 ms intervals flaky.
+    clock = {"t": 1000.0}
+    slept = []
+
+    def fake_monotonic():
+        return clock["t"]
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
     interval, calls = 0.05, 4
     limiter = wc._RateLimiter(interval)
-    start = time.monotonic()
     for _ in range(calls):
         limiter.acquire()
-    elapsed = time.monotonic() - start
-    # The first acquire does not wait, so the floor is (calls - 1) intervals.
-    # 5% slack absorbs the coarse Windows timer.
-    floor = (calls - 1) * interval * 0.95
-    assert elapsed >= floor, f"{calls} calls at {interval}s spacing took only {elapsed:.3f}s"
+
+    # The first acquire does not wait; every subsequent one waits a full interval.
+    assert len(slept) == calls - 1
+    assert all(s == pytest.approx(interval) for s in slept)
+    assert sum(slept) == pytest.approx((calls - 1) * interval)
 
 
 def test_call_webull_retries_a_429_then_succeeds(monkeypatch):

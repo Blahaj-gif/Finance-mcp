@@ -18,6 +18,12 @@ dependencies = [
 dev = ["pytest"]
 dashboard = ["streamlit", "plotly"]
 
+# Flat layout: name the packages explicitly so auto-discovery does not sweep
+# `tests` into the distribution.
+[tool.setuptools]
+packages = ["dashboard"]
+py-modules = ["webull_enriched_mcp"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
