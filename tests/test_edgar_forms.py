@@ -9,6 +9,7 @@ reading of the trade entirely.
 The fixture below mirrors a real Micron Form 4.
 """
 import os
+import re
 import sys
 
 import pytest
@@ -504,3 +505,175 @@ def test_13dg_xml_path():
     assert s["fields"]["aggregate_amount"] == pytest.approx(1_234_567)
     assert s["fields"]["percent_of_class"] == pytest.approx(7.5)
     assert s["issuer"] == "ACME CORP"
+
+
+# =====================================================================
+# Namespaces — the silent-empty-parse failure
+# =====================================================================
+
+def test_namespaced_tags_are_parsed():
+    """
+    Filing agents differ: one emits <issuerName>, another <own:issuerName>.
+    Matching only the bare tag returned an empty record rather than an error —
+    on a real Form 144 that hid 53% of the proposed sale value.
+    """
+    ns = FORM4.replace("<rptOwnerName>", "<own:rptOwnerName>") \
+              .replace("</rptOwnerName>", "</own:rptOwnerName>") \
+              .replace("<aff10b5One>", "<own:aff10b5One>") \
+              .replace("</aff10b5One>", "</own:aff10b5One>")
+    r = ef.parse_form4(ns)
+    assert r["owner"] == "MEHROTRA SANJAY"
+    assert r["plan_10b5_1"] is True
+
+
+# =====================================================================
+# Form 144 — proposed sales
+# =====================================================================
+
+FORM144 = """<?xml version="1.0"?>
+<edgarSubmission>
+ <formData>
+  <issuerInfo><issuerCik>0000723125</issuerCik>
+    <issuerName>MICRON TECHNOLOGY INC</issuerName></issuerInfo>
+  <securitiesInformation>
+    <securitiesClassTitle>Common</securitiesClassTitle>
+    <noOfUnitsSold>40000</noOfUnitsSold>
+    <aggregateMarketValue>37290024.00</aggregateMarketValue>
+    <noOfUnitsOutstanding>1129393151</noOfUnitsOutstanding>
+    <approxSaleDate>07/24/2026</approxSaleDate>
+    <securitiesExchangeName>NASDAQ</securitiesExchangeName>
+  </securitiesInformation>
+  <securitiesToBeSold>
+    <acquiredDate>10/13/2024</acquiredDate>
+    <natureOfAcquisitionTransaction>RSU/PSU Release</natureOfAcquisitionTransaction>
+    <isGiftTransaction>N</isGiftTransaction>
+    <amountOfSecuritiesAcquired>33944</amountOfSecuritiesAcquired>
+  </securitiesToBeSold>
+  <securitiesSoldInPast3Months>
+    <sellerDetails><name>The Mehrotra Family Trust</name></sellerDetails>
+    <saleDate>05/01/2026</saleDate>
+    <amountOfSecuritiesSold>40000</amountOfSecuritiesSold>
+    <grossProceeds>21450524.00</grossProceeds>
+  </securitiesSoldInPast3Months>
+  <noticeSignature><noticeDate>07/24/2026</noticeDate>
+    <planAdoptionDates><planAdoptionDate>01/30/2026</planAdoptionDate></planAdoptionDates>
+  </noticeSignature>
+ </formData>
+</edgarSubmission>"""
+
+
+def test_form144_core_fields():
+    r = ef.parse_form144(FORM144)
+    assert r["issuer"] == "MICRON TECHNOLOGY INC"
+    assert r["units_to_be_sold"] == pytest.approx(40_000)
+    assert r["aggregate_market_value"] == pytest.approx(37_290_024)
+    assert r["approx_sale_date"] == "07/24/2026"
+    assert r["acquisition_nature"] == "RSU/PSU Release"
+    assert r["is_gift"] is False
+
+
+def test_form144_units_come_from_the_confusingly_named_tag():
+    """The proposed quantity is `noOfUnitsSold`, despite naming a completed sale."""
+    assert ef.parse_form144(FORM144)["units_to_be_sold"] == pytest.approx(40_000)
+
+
+def test_form144_captures_the_10b5_1_adoption_date():
+    """
+    Form 4 says whether a plan existed; only Form 144 says when it was adopted,
+    which is what the cooling-off rules turn on.
+    """
+    assert ef.parse_form144(FORM144)["plan_adoption_dates"] == ["01/30/2026"]
+
+
+def test_form144_percent_of_shares_outstanding():
+    r = ef.parse_form144(FORM144)
+    assert r["pct_of_shares_outstanding"] == pytest.approx(40_000 / 1_129_393_151 * 100)
+
+
+def test_form144_prior_three_month_sales():
+    prior = ef.parse_form144(FORM144)["sold_in_past_3_months"]
+    assert len(prior) == 1
+    assert prior[0]["shares"] == pytest.approx(40_000)
+    assert prior[0]["gross_proceeds"] == pytest.approx(21_450_524)
+
+
+def test_form144_survives_namespaced_markup():
+    ns = re.sub(r"<(/?)(\w+)>", r"<\1own:\2>", FORM144)
+    r = ef.parse_form144(ns)
+    assert r["issuer"] == "MICRON TECHNOLOGY INC"
+    assert r["units_to_be_sold"] == pytest.approx(40_000)
+    assert r["plan_adoption_dates"] == ["01/30/2026"]
+
+
+# =====================================================================
+# NPORT-P — fund holdings
+# =====================================================================
+
+NPORT = """<edgarSubmission>
+ <genInfo><seriesName>VANGUARD 500 INDEX FUND</seriesName><repPdDate>2026-03-31</repPdDate></genInfo>
+ <fundInfo><totAssets>1500000000000</totAssets><netAssets>1421263311403</netAssets></fundInfo>
+ <invstOrSecs>
+  <invstOrSec><name>NVIDIA Corp</name><cusip>67066G104</cusip><balance>617520783</balance>
+    <valUSD>107695624555</valUSD><pctVal>7.577</pctVal><assetCat>EC</assetCat>
+    <payoffProfile>Long</payoffProfile></invstOrSec>
+  <invstOrSec><name>Apple Inc</name><cusip>037833100</cusip><balance>373078146</balance>
+    <valUSD>94683502673</valUSD><pctVal>6.662</pctVal><assetCat>EC</assetCat>
+    <payoffProfile>Long</payoffProfile></invstOrSec>
+  <invstOrSec><name>Cash Reserve</name><cusip>000000000</cusip><balance>100</balance>
+    <valUSD>5000000000</valUSD><pctVal>0.35</pctVal><assetCat>STIV</assetCat>
+    <payoffProfile>Long</payoffProfile></invstOrSec>
+ </invstOrSecs>
+</edgarSubmission>"""
+
+
+def test_nport_ranks_by_value():
+    d = ef.parse_nport(NPORT)
+    assert d["positions"] == 3
+    assert d["holdings"][0]["name"] == "NVIDIA Corp"
+    assert d["holdings"][0]["value_usd"] == pytest.approx(107_695_624_555)
+    assert d["holdings"][0]["pct_of_fund"] == pytest.approx(7.577)
+
+
+def test_nport_reports_net_assets_and_period():
+    d = ef.parse_nport(NPORT)
+    assert d["net_assets"] == pytest.approx(1_421_263_311_403)
+    assert d["period_end"] == "2026-03-31"
+
+
+def test_nport_groups_by_asset_category():
+    cats = ef.parse_nport(NPORT)["by_category"]
+    assert "Equity-common" in cats
+    assert "Short-term investment" in cats
+    assert cats["Equity-common"] > cats["Short-term investment"]
+
+
+def test_nport_respects_the_limit():
+    assert len(ef.parse_nport(NPORT, limit=2)["holdings"]) == 2
+
+
+# =====================================================================
+# 8-K exhibit 99 — the press release
+# =====================================================================
+
+def test_exhibit_99_filenames_are_recognised():
+    assert ef._EX99.search("a2026q3ex991-pressrelease.htm")
+    assert ef._EX99.search("exhibit99_1.htm")
+    assert ef._EX99.search("ex-99.1.htm")
+    assert not ef._EX99.search("mu-20260624.htm")
+
+
+def test_headline_figures_from_a_press_release():
+    text = ("Micron Technology, Inc. Reports Results\n"
+            "Revenue of $11.32 billion\n"
+            "Net income of $3.09 billion\n"
+            "Diluted EPS of $2.71\n"
+            "Gross margin of 39.5%\n")
+    figures = ef.extract_headline_figures(text)
+    assert figures["revenue"] == pytest.approx(11.32e9)
+    assert figures["net_income"] == pytest.approx(3.09e9)
+    assert figures["eps_diluted"] == pytest.approx(2.71)
+    assert figures["gross_margin"] == pytest.approx(39.5)
+
+
+def test_headline_extraction_returns_nothing_rather_than_guessing():
+    assert ef.extract_headline_figures("The company held its annual meeting.") == {}

@@ -73,19 +73,26 @@ EIGHT_K_ITEMS = {
 }
 
 
+# Filing agents differ on namespaces: the same Form 144 arrives as <issuerCik>
+# from one agent and <own:issuerCik> from another. Matching only the bare tag
+# silently returns nothing for every namespaced filing, which reads as an empty
+# notice rather than a parse failure.
+_NS = r"(?:\w+:)?"
+
+
 def _text(xml: str, tag: str, default=None):
-    """First value of `tag`, stripping any nested <value> wrapper Form 4 uses."""
-    m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", xml, re.S | re.I)
+    """First value of `tag`, namespace-agnostic, unwrapping any nested <value>."""
+    m = re.search(rf"<{_NS}{tag}\b[^>]*>(.*?)</{_NS}{tag}>", xml, re.S | re.I)
     if not m:
         return default
     inner = m.group(1)
-    v = re.search(r"<value>(.*?)</value>", inner, re.S | re.I)
+    v = re.search(rf"<{_NS}value>(.*?)</{_NS}value>", inner, re.S | re.I)
     raw = v.group(1) if v else inner
     return nz.normalize_text(re.sub(r"<[^>]+>", " ", raw)) or default
 
 
 def _blocks(xml: str, tag: str):
-    return re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", xml, re.S | re.I)
+    return re.findall(rf"<{_NS}{tag}\b[^>]*>(.*?)</{_NS}{tag}>", xml, re.S | re.I)
 
 
 def _fetch(url: str) -> str:
@@ -156,7 +163,7 @@ def parse_form4(xml: str) -> dict:
         plan_10b5_1 = raw_flag.strip().lower() in ("1", "true")
 
     footnotes = {}
-    for fid, body in re.findall(r'<footnote\s+id="([^"]+)"[^>]*>(.*?)</footnote>', xml, re.S | re.I):
+    for fid, body in re.findall(rf'<{_NS}footnote\s+id="([^"]+)"[^>]*>(.*?)</{_NS}footnote>', xml, re.S | re.I):
         footnotes[fid] = nz.normalize_text(re.sub(r"<[^>]+>", " ", body))
 
     transactions = []
@@ -759,6 +766,249 @@ def parse_13dg(document: str, is_xml: bool = False) -> dict:
     out["confidence"] = ("high" if got.get("aggregate_amount") and got.get("percent_of_class")
                          else ("medium" if got else "low"))
     return out
+
+
+# =====================================================================
+# FORM 144 — PROPOSED SALES (leads the Form 4)
+# =====================================================================
+# Filed *before* a sale of restricted or control securities, so it front-runs
+# the Form 4 that reports the same trade after the fact. Electronic XML filing
+# has been mandatory since April 2023.
+#
+# It also carries something Form 4 does not: the 10b5-1 plan *adoption date*.
+# Form 4 says whether a plan existed; Form 144 says when it was adopted, which
+# is what the cooling-off rules turn on and what makes a plan adopted shortly
+# before a large sale worth a second look.
+
+def parse_form144(xml: str) -> dict:
+    """Parse a Form 144 notice of proposed sale."""
+    def num(tag):
+        return nz.parse_number(_text(xml, tag))
+
+    plan_dates = [nz.normalize_text(d) for d in
+                  re.findall(rf"<{_NS}planAdoptionDate>(.*?)</{_NS}planAdoptionDate>", xml, re.S | re.I)]
+
+    prior = []
+    for block in _blocks(xml, "securitiesSoldInPast3Months"):
+        amount = nz.parse_number(_text(block, "amountOfSecuritiesSold"))
+        if amount is None:
+            continue
+        prior.append({
+            "seller": _text(block, "name", ""),
+            "date": _text(block, "saleDate", ""),
+            "shares": amount,
+            "gross_proceeds": nz.parse_number(_text(block, "grossProceeds")),
+            "class": _text(block, "securitiesClassTitle", ""),
+        })
+
+    # The proposed quantity is `noOfUnitsSold` -- named as though it were a
+    # completed sale, but it sits in the securities-information block and is
+    # the amount this notice proposes to sell.
+    units = None
+    for tag in ("noOfUnitsSold", "unitsToBeSold", "amountOfSecuritiesToBeSold"):
+        units = num(tag)
+        if units is not None:
+            break
+
+    market_value = num("aggregateMarketValue")
+    outstanding = num("noOfUnitsOutstanding")
+
+    return {
+        "issuer": _text(xml, "issuerName", ""),
+        "issuer_cik": _text(xml, "issuerCik", ""),
+        "seller": _text(xml, "nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold", ""),
+        "security_class": _text(xml, "securitiesClassTitle", ""),
+        "broker": _text(xml, "brokerName", "") or _text(xml, "name", ""),
+        "exchange": _text(xml, "securitiesExchangeName", ""),
+        "units_to_be_sold": units,
+        "aggregate_market_value": market_value,
+        "shares_outstanding": outstanding,
+        "pct_of_shares_outstanding": ((units / outstanding * 100)
+                                      if units and outstanding else None),
+        "approx_sale_date": _text(xml, "approxSaleDate", ""),
+        "notice_date": _text(xml, "noticeDate", ""),
+        "acquired_date": _text(xml, "acquiredDate", ""),
+        "acquisition_nature": _text(xml, "natureOfAcquisitionTransaction", ""),
+        "amount_acquired": num("amountOfSecuritiesAcquired"),
+        "is_gift": (_text(xml, "isGiftTransaction", "") or "").lower() in ("1", "true", "y"),
+        "plan_adoption_dates": plan_dates,
+        "nothing_sold_in_past_3_months":
+            (_text(xml, "nothingToReportFlagOnSecuritiesSoldInPast3Months", "") or "").lower()
+            in ("1", "true", "y"),
+        "sold_in_past_3_months": prior,
+        "signature": _text(xml, "signature", ""),
+    }
+
+
+def proposed_sales(symbol: str, limit: int = 10) -> dict:
+    """Recent Form 144 notices for a company, newest first."""
+    info = ec.ticker_to_cik(symbol)
+    filings = ec.company_filings(symbol, forms=["144"], limit=limit)
+
+    notices, errors = [], []
+    for f in filings:
+        try:
+            xml = fetch_form4_xml(info["cik"], f["accession"], f.get("primary_document"))
+            rec = parse_form144(xml)
+        except Exception as e:
+            errors.append(f"{f.get('accession', '?')}: {str(e)[:70]}")
+            continue
+        rec["filed"] = f.get("filing_date")
+        rec["url"] = f.get("url")
+        notices.append(rec)
+
+    total = sum(n["aggregate_market_value"] or 0 for n in notices)
+    return {"symbol": symbol.upper(), "company": info["title"], "notices": notices,
+            "total_proposed_value": total, "errors": errors}
+
+
+# =====================================================================
+# NPORT-P — FUND PORTFOLIO HOLDINGS
+# =====================================================================
+# Monthly holdings for registered funds. A single Vanguard 500 filing is
+# 500,000 characters and 519 positions -- ~125,000 tokens raw -- so this is
+# parsed and ranked rather than returned.
+
+ASSET_CATEGORIES = {
+    "EC": "Equity-common", "EP": "Equity-preferred", "DBT": "Debt",
+    "STIV": "Short-term investment", "RE": "Real estate", "LON": "Loan",
+    "ABS-MBS": "Mortgage-backed", "DE": "Derivative", "COMM": "Commodity",
+}
+
+
+def parse_nport(xml: str, limit: int = 25) -> dict:
+    """Holdings from an NPORT-P filing, largest position first."""
+    holdings = []
+    for block in _blocks(xml, "invstOrSec"):
+        value = nz.parse_number(_text(block, "valUSD"))
+        holdings.append({
+            "name": _text(block, "name", ""),
+            "title": _text(block, "title", ""),
+            "cusip": _text(block, "cusip", ""),
+            "lei": _text(block, "lei", ""),
+            "balance": nz.parse_number(_text(block, "balance")),
+            "value_usd": value,
+            "pct_of_fund": nz.parse_number(_text(block, "pctVal")),
+            "asset_category": _text(block, "assetCat", ""),
+            "issuer_category": _text(block, "issuerCat", ""),
+            "payoff_profile": _text(block, "payoffProfile", ""),
+        })
+
+    holdings.sort(key=lambda h: h.get("value_usd") or 0, reverse=True)
+    total = sum(h.get("value_usd") or 0 for h in holdings)
+
+    by_category = {}
+    for h in holdings:
+        cat = ASSET_CATEGORIES.get(h["asset_category"], h["asset_category"] or "unclassified")
+        by_category[cat] = by_category.get(cat, 0) + (h.get("value_usd") or 0)
+
+    return {
+        "series_name": _text(xml, "seriesName", ""),
+        "period_end": _text(xml, "repPdDate", "") or _text(xml, "repPdEnd", ""),
+        "total_assets": nz.parse_number(_text(xml, "totAssets")),
+        "net_assets": nz.parse_number(_text(xml, "netAssets")),
+        "positions": len(holdings),
+        "holdings_value": total,
+        "by_category": dict(sorted(by_category.items(), key=lambda kv: -kv[1])),
+        "holdings": holdings[:limit],
+    }
+
+
+def fund_holdings(identifier: str, limit: int = 25) -> dict:
+    """Latest NPORT-P portfolio for a fund, by ticker or CIK."""
+    ident = str(identifier).strip()
+    if ident.isdigit():
+        cik = ident.zfill(10)
+        ec.SEC_LIMITER.acquire()
+        payload = json.loads(ec._http(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                                      headers=ec._sec_headers()))
+    else:
+        info = ec.ticker_to_cik(ident)
+        cik = info["cik"]
+        ec.SEC_LIMITER.acquire()
+        payload = json.loads(ec._http(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                                      headers=ec._sec_headers()))
+
+    name = nz.normalize_text(payload.get("name", ident))
+    recent = payload.get("filings", {}).get("recent", {})
+    target = None
+    for i in range(len(recent.get("form", []))):
+        if recent["form"][i].upper().startswith("NPORT-P"):
+            target = {"accession": recent["accessionNumber"][i],
+                      "filed": recent["filingDate"][i]}
+            break
+    if not target:
+        raise ValueError(f"No NPORT-P filing found for {identifier}")
+
+    base = _filing_dir(cik, target["accession"])
+    listing = _fetch(f"{base}/")
+    xmls = [x for x in re.findall(r'href="([^"]+\.xml)"', listing) if "xsl" not in x.lower()]
+    if not xmls:
+        raise ValueError(f"No XML in {base}")
+    href = xmls[0]
+    xml = _fetch(href if href.startswith("http") else "https://www.sec.gov" + href)
+
+    out = parse_nport(xml, limit=limit)
+    out.update({"fund": name, "cik": cik, "filed": target["filed"]})
+    return out
+
+
+# =====================================================================
+# 8-K EXHIBIT 99 — THE PRESS RELEASE
+# =====================================================================
+# The narrative and headline numbers of an earnings 8-K live in exhibit 99.1,
+# not in the 8-K cover document, which is usually a one-page pointer.
+
+_EX99 = re.compile(r"ex(?:hibit)?[-_]?99", re.I)
+
+
+def find_exhibit_99(cik: str, accession: str):
+    """Filenames in a filing that look like exhibit 99.x, most specific first."""
+    listing = _fetch(f"{_filing_dir(cik, accession)}/")
+    docs = [d.rsplit("/", 1)[-1]
+            for d in re.findall(r'href="(/Archives[^"]+\.(?:htm|html|txt))"', listing, re.I)]
+    return [d for d in docs if _EX99.search(d)]
+
+
+def fetch_exhibit_99(cik: str, accession: str):
+    """Flattened text of the first exhibit 99 in a filing, or (None, None)."""
+    names = find_exhibit_99(cik, accession)
+    if not names:
+        return None, None
+    name = names[0]
+    return html_to_text(_fetch(f"{_filing_dir(cik, accession)}/{name}")), name
+
+
+# Headline figures an earnings release almost always states in the first screen.
+_HEADLINE_PATTERNS = [
+    ("revenue", r"(?:total\s+)?revenue[sd]?\s+(?:of\s+|were\s+|was\s+)?\$?\s*([\d,.]+)\s*(billion|million|B|M)?"),
+    ("eps_diluted", r"diluted\s+(?:earnings|EPS)[^$\n]{0,40}?\$\s*([\d.]+)"),
+    ("net_income", r"net\s+income\s+(?:of\s+|was\s+|were\s+)?\$?\s*([\d,.]+)\s*(billion|million|B|M)?"),
+    ("gross_margin", r"gross\s+margin[^\d\n]{0,40}?([\d.]+)\s*%"),
+]
+
+
+def extract_headline_figures(text: str) -> dict:
+    """
+    Best-effort headline numbers from a press release.
+
+    Explicitly heuristic: press releases are prose and phrase these differently
+    every quarter. Treated as a pointer to verify against the filed XBRL, never
+    as the figure of record.
+    """
+    scale = {"billion": 1e9, "b": 1e9, "million": 1e6, "m": 1e6}
+    head = text[:12000]
+    found = {}
+    for key, pat in _HEADLINE_PATTERNS:
+        m = re.search(pat, head, re.I)
+        if not m:
+            continue
+        value = nz.parse_number(m.group(1))
+        if value is None:
+            continue
+        unit = (m.group(2) or "").lower() if m.lastindex and m.lastindex >= 2 else ""
+        found[key] = value * scale.get(unit, 1)
+    return found
 
 
 def describe_8k_items(items: str) -> list:

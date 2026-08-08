@@ -1943,6 +1943,67 @@ def get_company_financials(symbol: str) -> str:
         raise ToolError(f"Error fetching filed financials for {symbol}: {e}") from e
 
 
+def _render_proposed_sales(symbol: str, limit: int) -> str:
+    """Form 144 notices — intent to sell, filed ahead of the trade."""
+    res = edgar_forms.proposed_sales(symbol, limit=limit)
+    if not res["notices"]:
+        return (f"### Proposed Sales (Form 144) — {res['company']} ({res['symbol']})\n\n"
+                "*No Form 144 notices on file.*")
+
+    out = (f"### Proposed Sales (Form 144) — {res['company']} ({res['symbol']})\n\n"
+           f"**{len(res['notices'])} notice(s), "
+           f"`${res['total_proposed_value']:,.0f}` of stock proposed for sale**\n\n")
+
+    rows = []
+    for n in res["notices"]:
+        rows.append({
+            "Filed": n["filed"],
+            "Planned sale": n["approx_sale_date"] or "—",
+            "Seller": (n["seller"] or "—")[:26],
+            "Shares": f"{n['units_to_be_sold']:,.0f}" if n["units_to_be_sold"] else "—",
+            "Market value": f"${n['aggregate_market_value']:,.0f}" if n["aggregate_market_value"] else "—",
+            "% of shares out": f"{n['pct_of_shares_outstanding']:.3f}%" if n["pct_of_shares_outstanding"] else "—",
+            "Acquired via": (n["acquisition_nature"] or "—")[:22],
+            "10b5-1 adopted": ", ".join(n["plan_adoption_dates"]) or "—",
+        })
+    table = pd.DataFrame(rows)
+    try:
+        out += table.to_markdown(index=False)
+    except Exception:
+        out += table.to_string(index=False)
+
+    prior = [(n, p) for n in res["notices"] for p in n["sold_in_past_3_months"]]
+    if prior:
+        seen, prows = set(), []
+        for n, p in prior:
+            key = (p["date"], p["shares"], p["seller"])
+            if key in seen:
+                continue
+            seen.add(key)
+            prows.append({
+                "Sale date": p["date"],
+                "Seller": p["seller"][:30],
+                "Shares": f"{p['shares']:,.0f}",
+                "Gross proceeds": f"${p['gross_proceeds']:,.0f}" if p["gross_proceeds"] else "—",
+            })
+        ptable = pd.DataFrame(prows)
+        try:
+            rendered = ptable.to_markdown(index=False)
+        except Exception:
+            rendered = ptable.to_string(index=False)
+        out += "\n\n**Already sold in the prior three months** *(as declared on the notice)*\n\n" + rendered
+
+    if res["errors"]:
+        out += f"\n\n**⚠️ {len(res['errors'])} notice(s) unparsed:** " + "; ".join(res["errors"][:3])
+
+    out += ("\n\n*A Form 144 is a declaration of intent, filed before the sale — it leads the "
+            "Form 4 that reports the completed trade, and not every notice results in a sale. "
+            "The plan-adoption date is the one Form 4 does not carry: a 10b5-1 plan adopted "
+            "shortly before a large sale is worth a second look, since the cooling-off rules "
+            "turn on that date.*")
+    return out
+
+
 @mcp.tool()
 def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
                          since: str = None, forms: str = "4") -> str:
@@ -1964,9 +2025,16 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
         forms: Which ownership forms to read — "4" (changes in ownership, the default),
             "3" (initial statement filed on becoming an insider — all holdings, no trades),
             "5" (annual statement of exempt or deferred transactions), or "3,4,5".
+            Use "144" for notices of *proposed* sales, which are filed before the
+            trade and so lead the Form 4 that later reports it.
     """
     try:
         form_list = [f.strip() for f in str(forms).split(",") if f.strip()]
+
+        # Form 144 is a different schema and a different question -- intent to
+        # sell, not a completed sale -- so it gets its own rendering.
+        if form_list == ["144"]:
+            return _render_proposed_sales(symbol, limit)
         res = edgar_forms.insider_transactions(symbol, limit=limit, person=person,
                                                since=since, forms=form_list)
         reports = res["filings"]
@@ -2125,6 +2193,37 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
                         "Pass `section` or `query` to read the surrounding narrative.*")
                 return out
 
+        if not section and not query and upper_form.startswith("8-K"):
+            # The 8-K cover document is usually a one-page pointer; the substance
+            # is in exhibit 99.1.
+            items = edgar_forms.describe_8k_items(f.get("items", ""))
+            out = head
+            if items:
+                out += "**Reported items**\n" + "\n".join(f"* {i}" for i in items) + "\n\n"
+
+            exhibit, name = edgar_forms.fetch_exhibit_99(cik, f["accession"])
+            if exhibit:
+                figures = edgar_forms.extract_headline_figures(exhibit)
+                out += f"**Press release** (`{name}`, {len(exhibit):,} chars)\n\n"
+                if figures:
+                    out += "*Headline figures found in the opening text:*\n"
+                    for k, v in figures.items():
+                        label = k.replace("_", " ").title()
+                        out += (f"* {label}: `{v:,.2f}%`\n" if k == "gross_margin"
+                                else f"* {label}: `${v:,.2f}`\n" if k == "eps_diluted"
+                                else f"* {label}: `${v:,.0f}`\n")
+                    out += ("\n*Parsed from prose and phrased differently each quarter — treat as a "
+                            "pointer and confirm against get_company_financials, which reads the "
+                            "filed XBRL.*\n")
+                out += "\n" + exhibit[:budget]
+                if len(exhibit) > budget:
+                    out += (f"\n\n*Truncated: {budget:,} of {len(exhibit):,} characters. "
+                            "Use `query` to search within the filing.*")
+                return out
+
+            out += "*No exhibit 99 in this filing.*\n\n" + text[:budget]
+            return out
+
         if not section and not query and upper_form.startswith(("SC 13D", "SC 13G")):
             stake = edgar_forms.parse_13dg(raw, is_xml=raw.lstrip().startswith("<?xml"))
             fields = stake["fields"]
@@ -2162,11 +2261,7 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
             return out
 
         if not section:
-            if f["form"].upper().startswith("8-K"):
-                items = edgar_forms.describe_8k_items(f.get("items", ""))
-                out = head + ("**Reported items**\n" + "\n".join(f"* {i}" for i in items) + "\n\n"
-                              if items else "")
-                return out + "**Opening text**\n\n" + text[:budget]
+            # 8-K, DEF 14A and 13D/G are handled above by their own extractors.
             available = ", ".join(f"{k} ({v})" for k, v in edgar_forms.FILING_SECTIONS.items())
             return head + f"*Pass `section` to extract one, or `query` to search.*\n\nAvailable: {available}"
 
@@ -2191,8 +2286,45 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
         raise ToolError(f"Error reading {form} for {symbol}: {e}") from e
 
 
+def _render_fund_holdings(identifier: str, limit: int) -> str:
+    """NPORT-P portfolio — monthly, and unlike 13F it includes bonds and derivatives."""
+    d = edgar_forms.fund_holdings(identifier, limit=limit)
+    if not d["holdings"]:
+        return f"### {d['fund']}\n\n*No holdings in the latest NPORT-P.*"
+
+    out = (f"### Fund Portfolio (NPORT-P) — {d['fund']}\n"
+           f"*Period ending {d['period_end'] or '—'} · filed {d['filed']} · "
+           f"{d['positions']:,} positions*\n\n")
+    if d["net_assets"]:
+        out += f"* **Net assets**: `${d['net_assets']:,.0f}`\n"
+    if d["by_category"]:
+        out += "* **By asset class**: " + " · ".join(
+            f"{k} `{v / max(d['holdings_value'], 1) * 100:.1f}%`"
+            for k, v in list(d["by_category"].items())[:6]) + "\n"
+    out += "\n"
+
+    rows = [{
+        "Holding": (h["name"] or h["title"])[:32],
+        "Value": f"${h['value_usd']:,.0f}" if h["value_usd"] else "—",
+        "% of fund": f"{h['pct_of_fund']:.3f}%" if h["pct_of_fund"] else "—",
+        "Units": f"{h['balance']:,.0f}" if h["balance"] else "—",
+        "Class": edgar_forms.ASSET_CATEGORIES.get(h["asset_category"], h["asset_category"] or "—"),
+        "Side": h.get("payoff_profile") or "—",
+    } for h in d["holdings"]]
+
+    table = pd.DataFrame(rows)
+    try:
+        out += table.to_markdown(index=False)
+    except Exception:
+        out += table.to_string(index=False)
+
+    return out + ("\n\n*NPORT-P is filed monthly and covers the whole portfolio — bonds, "
+                  "derivatives and short positions included — where a 13F shows only US-listed "
+                  "long equity and options, quarterly.*")
+
+
 @mcp.tool()
-def get_institutional_holdings(institution: str, limit: int = 25) -> str:
+def get_institutional_holdings(institution: str, limit: int = 25, source: str = "13F") -> str:
     """
     Latest 13F-HR portfolio for an institutional manager — every reported position,
     largest first. Accepts a ticker (BRK-B) or a raw CIK (1067983).
@@ -2204,8 +2336,14 @@ def get_institutional_holdings(institution: str, limit: int = 25) -> str:
     Args:
         institution: Ticker or CIK of the filer (e.g. 1067983 for Berkshire Hathaway).
         limit: How many positions to show (default 25).
+        source: "13F" for quarterly manager holdings (default), or "NPORT" for a
+            registered fund's monthly portfolio, which also covers bonds and
+            derivatives that 13F omits entirely.
     """
     try:
+        if str(source).upper().startswith("NPORT"):
+            return _render_fund_holdings(institution, limit)
+
         data = edgar_forms.institutional_holdings(institution, limit=limit)
         if not data["holdings"]:
             return f"### {data['institution']}\n\n*No holdings in the latest 13F-HR.*"
