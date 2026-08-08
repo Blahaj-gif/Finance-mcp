@@ -1169,7 +1169,13 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         drafts.append(new_draft)
         atomic_write_json(drafts_path, drafts)
 
-        return f"ORDER DRAFTED: {action.upper()} {quantity} shares of {symbol.upper()} at {limit_price if limit_price else 'MKT'}. Pending Human Approval in the MCP Dashboard."
+        # State the surface on the draft itself. A model reading this back later
+        # should never have to infer whether approving it spends real money.
+        surface = ("simulated (Webull sandbox)" if webull_client.is_paper_environment()
+                   else "the LIVE account")
+        return (f"ORDER DRAFTED: {action.upper()} {quantity} shares of {symbol.upper()} "
+                f"at {limit_price if limit_price else 'MKT'}. Pending human approval in "
+                f"the dashboard's Execution tab, where it would reach {surface}.")
     except Exception as e:
         raise ToolError(f"Error drafting order: {e}") from e
 
@@ -2454,14 +2460,35 @@ def get_data_sources() -> str:
 
         out = "### Data Source Status\n\n"
 
-        out += "**Webull OpenAPI** — primary price feed\n"
+        # Which broker surface is live is the single most consequential line in
+        # this report -- it decides whether an approved order spends money.
+        paper = webull_client.is_paper_environment()
+        out += "**Webull OpenAPI** — primary price feed and broker\n"
+        out += (f"* **Environment: {webull_client.environment_label()}** — "
+                + ("orders are simulated against Webull's sandbox.\n" if paper else
+                   "orders reach the real account. Set `WEBULL_ENVIRONMENT=paper` "
+                   "in `.env` to point at the sandbox instead.\n"))
         out += (f"* Credentials configured: {'yes' if webull_client.WEBULL_APP_KEY else 'NO - set WEBULL_APP_KEY/SECRET in .env'}\n"
                 f"* Region: `{webull_client.WEBULL_REGION_ID}`\n"
                 f"* Pacing: {webull_client.WEBULL_MIN_REQUEST_INTERVAL}s between calls, "
                 f"{webull_client.WEBULL_MAX_RETRIES} retries on HTTP 429\n\n")
 
         out += "**Yahoo Finance** — fallback prices, options, fundamentals\n"
-        out += "* No key required. Fundamentals are cross-checked against SEC filings where possible.\n\n"
+        out += (f"* No key required. Paced at {webull_client.YF_MIN_REQUEST_INTERVAL}s "
+                f"between calls, {webull_client.YF_MAX_RETRIES} retries when throttled.\n")
+        out += ("* An empty response is classified before it is reported: a "
+                f"`{webull_client._CANARY_SYMBOL}` canary distinguishes a rate limit "
+                "from a symbol that does not exist.\n")
+        delay = webull_client.yahoo_feed_delay("SPY")
+        if delay:
+            if delay["market_open"]:
+                out += (f"* Observed lag right now: **{delay['observed_lag_minutes']:.1f} min** "
+                        f"behind {delay['exchange']} (last print {delay['last_print_utc']} UTC).\n")
+            else:
+                out += (f"* {delay['exchange']} is closed; last print "
+                        f"{delay['last_print_utc']} UTC, so the gap is the session, "
+                        "not feed delay.\n")
+        out += "* Fundamentals are cross-checked against SEC filings where possible.\n\n"
 
         out += f"**BLS** — macroeconomic data — `{bls['tier']}`\n"
         out += f"* Daily cap: {bls['daily_cap']} API queries"

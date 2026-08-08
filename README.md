@@ -182,6 +182,7 @@ your account. **`check_connection`** confirms the Webull session specifically.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `WEBULL_ENVIRONMENT` | `prod` | `prod` trades the real account. **`paper`** (aliases `uat`, `sandbox`, `simulated`) routes every call to Webull's simulated environment for your region, so the whole approval path — draft, preview, approve, submit — can be rehearsed without risking anything. The dashboard shows `LIVE` or `PAPER` beside the wordmark and on the Execution tab. If no sandbox host is published for your region the client refuses to start rather than falling through to production. |
 | `WEBULL_ACCOUNT_ID` | *(unset)* | Pin a specific account. **Required if your login has more than one** — the server refuses to guess rather than silently trading the wrong account. |
 | `WEBULL_MIN_REQUEST_INTERVAL` | `0.25` | Seconds between Webull API calls. Pacing keeps list-sweeping tools (sector heatmap, watchlist scans) off the rate limiter. |
 | `WEBULL_MAX_RETRIES` | `3` | Attempts before a rate-limited call gives up and falls back. |

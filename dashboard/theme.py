@@ -183,6 +183,18 @@ _SHARED_CSS = """
 [data-testid="stAppDeployButton"] { display: none !important; }
 [data-testid="stMainBlockContainer"] { padding-top: 2.2rem; padding-bottom: 3rem; }
 
+/* Streamlit wraps every markdown block in a flex box whose height it derives
+   from a single line of body text -- about 16px. Anything taller than one line
+   overflows it, and because the wrapper still only *reserves* 16px, the next
+   element starts too high and draws over the bottom of it: the masthead's
+   accent rule cut straight through the ticker, and the metric strip lost its
+   lower row of captions. Let those wrappers size to their content. */
+[data-testid="stMarkdown"] { height: auto !important; }
+[data-testid="stMarkdown"] > div {
+    height: auto !important;
+    align-items: flex-start !important;
+}
+
 /* ---- sidebar ---- */
 [data-testid="stSidebar"], [data-testid="stSidebarContent"] {
     background: var(--fm-panel) !important;
@@ -258,6 +270,63 @@ input, [data-baseweb="select"] * {
 .fm-meta {
     color: var(--fm-dim); font-size: 0.72rem; letter-spacing: 0.05em;
     text-transform: uppercase; margin-left: auto;
+}
+/* Which bar size the chart is on, stated next to the symbol rather than only
+   inside the picker. */
+.fm-tf {
+    font-family: var(--fm-font-num); font-size: 0.72rem; font-weight: 700;
+    letter-spacing: 0.06em; color: var(--fm-accent);
+    border: 1px solid var(--fm-accent); border-radius: var(--fm-radius);
+    padding: 0.02rem 0.32rem; line-height: 1.5;
+}
+
+/* ---- sidebar wordmark ---- */
+.fm-wordmark {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    font-family: var(--fm-font-num); font-size: 0.95rem; font-weight: 700;
+    letter-spacing: 0.06em; color: var(--fm-accent);
+    padding-bottom: 0.5rem; margin-bottom: 0.7rem;
+    border-bottom: 1px solid var(--fm-accent);
+}
+/* Which account surface is being traded. There is no situation in which a
+   person should have to guess whether a submit button spends real money. */
+.fm-env {
+    font-family: var(--fm-font-ui); font-size: 0.6rem; font-weight: 700;
+    letter-spacing: 0.12em; padding: 0.05rem 0.35rem;
+    border: 1px solid currentColor; border-radius: var(--fm-radius);
+}
+.fm-env.live  { color: var(--fm-down); }
+.fm-env.paper { color: var(--fm-up); }
+
+/* ---- timeframe picker ----
+   A row of radio circles is the wrong control for a timeframe: nobody has ever
+   seen one on a chart. Same widget, restyled as the segmented button strip the
+   job actually calls for -- the dot is hidden and the label becomes the target. */
+.st-key-fm_tf_picker [role="radiogroup"] { gap: 0 !important; flex-wrap: wrap; }
+.st-key-fm_tf_picker [role="radiogroup"] label {
+    margin: 0 !important; padding: 0.18rem 0.62rem;
+    border: 1px solid var(--fm-rule); border-right-width: 0;
+    background: var(--fm-panel); cursor: pointer;
+}
+.st-key-fm_tf_picker [role="radiogroup"] label:last-of-type { border-right-width: 1px; }
+/* The radio dot. It lives three divs deep -- label > wrapper > row > circle --
+   and the label's own first child is the visually-hidden input, not the dot. */
+.st-key-fm_tf_picker [role="radiogroup"] label > div > div > div:first-child {
+    display: none !important;
+}
+.st-key-fm_tf_picker [role="radiogroup"] label > div > div { justify-content: center; }
+.st-key-fm_tf_picker [role="radiogroup"] label > div { min-width: 2.2rem; }
+.st-key-fm_tf_picker [role="radiogroup"] label p {
+    font-family: var(--fm-font-num) !important; font-size: 0.72rem !important;
+    font-weight: 600; color: var(--fm-dim) !important; letter-spacing: 0.03em;
+}
+.st-key-fm_tf_picker [role="radiogroup"] label:hover { border-color: var(--fm-accent); }
+.st-key-fm_tf_picker [role="radiogroup"] label:hover p { color: var(--fm-ink) !important; }
+.st-key-fm_tf_picker [role="radiogroup"] label:has(input:checked) {
+    background: var(--fm-accent); border-color: var(--fm-accent);
+}
+.st-key-fm_tf_picker [role="radiogroup"] label:has(input:checked) p {
+    color: var(--fm-accent-ink) !important; font-weight: 700;
 }
 
 /* ---- metric strip ---- */

@@ -12,18 +12,31 @@ import datetime
 
 def render_html(markup: str, target=None):
     """
-    Hand Streamlit a block of hand-built HTML without markdown eating it.
+    Hand Streamlit a block of hand-built HTML, unmangled and unclipped.
 
-    `st.markdown` runs the markdown parser first even with unsafe_allow_html,
-    and markdown has two rules that quietly destroy raw HTML: a blank line ends
-    an HTML block, and four leading spaces start a code block. The signals table
+    Two separate Streamlit behaviours had to be routed around.
+
+    Markdown first: `st.markdown` runs the parser even with unsafe_allow_html,
+    and markdown has two rules that destroy raw HTML -- a blank line ends an
+    HTML block, and four leading spaces start a code block. The signals table
     was built by concatenating f-strings, which left a whitespace-only line
-    between the <tbody> and the first <tr> -- so markdown closed the HTML block
-    and rendered every row as escaped source. Stripping each line to column zero
-    and dropping blank lines keeps the whole fragment inside one HTML block.
+    between the <tbody> and the first <tr>, so every row rendered as escaped
+    source. Stripping each line to column zero and dropping blank lines keeps
+    the fragment inside one HTML block.
+
+    Sizing second: the markdown element wrapper reserves the height of a single
+    line of body text, about 17px, whatever it actually contains. Anything
+    taller overflows it while the wrapper still only claims 17px, so the *next*
+    element starts too high and paints over the bottom -- which is why the
+    masthead rule cut through the ticker. `st.html` has no such wrapper, so
+    prefer it and keep the markdown path only as a fallback.
     """
     cleaned = "\n".join(line.strip() for line in markup.splitlines() if line.strip())
-    (target or st).markdown(cleaned, unsafe_allow_html=True)
+    sink = target or st
+    if hasattr(sink, "html"):
+        sink.html(cleaned)
+    else:
+        sink.markdown(cleaned, unsafe_allow_html=True)
 
 
 def as_html_text(value) -> str:
@@ -77,19 +90,60 @@ CHART_CONFIG = {
 # The stylesheet lives in dashboard/theme.py -- one token block per theme
 # feeding one shared sheet, injected above before anything renders.
 
-# App Sidebar
+# ------------------------------------------------------------------
+# Sidebar
+# ------------------------------------------------------------------
+# The wordmark belongs here, at the top-left, not in the masthead: the masthead
+# is where the *subject* lives (which symbol, which feed, which bar), and a
+# fixed product name competing with the ticker for that space made the ticker
+# read as a subtitle.
+IS_PAPER = webull_client.is_paper_environment()
+render_html(
+    f'<div class="fm-wordmark">Finance MCP'
+    f'<span class="fm-env {"paper" if IS_PAPER else "live"}">'
+    f'{webull_client.environment_label()}</span></div>',
+    target=st.sidebar)
 render_html('<div class="fm-brand" style="border-bottom:1px solid var(--fm-rule); '
             'padding-bottom:0.3rem;">Controls</div>', target=st.sidebar)
 
 # 1. Market Settings
 st.sidebar.markdown("### 1. Market Settings")
 symbol = st.sidebar.text_input("Ticker Symbol", value="AAPL", max_chars=10).strip().upper()
-interval = st.sidebar.selectbox(
-    "Timespan / Interval",
-    options=["D", "M1", "M5", "M15", "M30", "H1", "W", "M"],
-    format_func=lambda x: {"D": "Daily", "M1": "1 Minute", "M5": "5 Minutes", "M15": "15 Minutes", "M30": "30 Minutes", "H1": "1 Hour", "W": "Weekly", "M": "Monthly"}[x]
-)
-count = st.sidebar.slider("Historical Bar Count", min_value=50, max_value=500, value=200, step=10)
+
+# Timeframes. Webull and Yahoo both stop at 1H and 1D; 4H and 1Y are resampled
+# from the nearest finer bar the feed will actually serve, rather than being
+# offered and silently returning something else.
+TIMEFRAMES = {
+    "1m":  {"label": "1m",  "interval": "M1",  "resample": None,  "bars": 200},
+    "5m":  {"label": "5m",  "interval": "M5",  "resample": None,  "bars": 200},
+    "15m": {"label": "15m", "interval": "M15", "resample": None,  "bars": 200},
+    "30m": {"label": "30m", "interval": "M30", "resample": None,  "bars": 200},
+    "1H":  {"label": "1H",  "interval": "H1",  "resample": None,  "bars": 200},
+    "4H":  {"label": "4H",  "interval": "H1",  "resample": "4h",  "bars": 200},
+    "1D":  {"label": "1D",  "interval": "D",   "resample": None,  "bars": 200},
+    "1W":  {"label": "1W",  "interval": "W",   "resample": None,  "bars": 200},
+    "1M":  {"label": "1M",  "interval": "M",   "resample": None,  "bars": 200},
+    # "YS", not "YE": a year-end label stamps the 2026 bar 2026-12-31, a date
+    # that has not happened. Every other bar in the feed is labelled at its
+    # start, and a bar dated in the future reads as bad data.
+    "1Y":  {"label": "1Y",  "interval": "M",   "resample": "YS",  "bars": 480},
+}
+
+INTERVAL_NAMES = {"M1": "1 min", "M5": "5 min", "M15": "15 min", "M30": "30 min",
+                  "H1": "1 hour", "D": "daily", "W": "weekly", "M": "monthly"}
+
+st.session_state.setdefault("ui_timeframe", "1D")
+if st.session_state["ui_timeframe"] not in TIMEFRAMES:
+    st.session_state["ui_timeframe"] = "1D"
+timeframe = st.session_state["ui_timeframe"]
+tf = TIMEFRAMES[timeframe]
+interval = tf["interval"]
+
+count = st.sidebar.slider(
+    "Historical Bar Count", min_value=50, max_value=500,
+    value=min(tf["bars"], 500), step=10,
+    help="Bars requested from the feed. When the timeframe is resampled (4H, 1Y) "
+         "this is the count *before* resampling, so the chart shows fewer.")
 
 # 2. Indicator Configuration Expanders
 st.sidebar.markdown("### 2. Indicator Parameters")
@@ -150,11 +204,41 @@ with st.sidebar.expander("SuperTrend & Ichimoku"):
 
 # Load Data
 try:
-    with st.spinner(f"Fetching market data for {symbol}..."):
+    with st.spinner(f"Fetching {timeframe} data for {symbol}..."):
         df, source = webull_client.fetch_data(symbol, interval, count)
+except webull_client.YahooThrottledError as e:
+    # Worth separating from a bad ticker: one is our fault and passes, the
+    # other is the user's and does not.
+    st.error(f"Feed throttled — not a bad symbol. {e}")
+    st.stop()
 except Exception as e:
     st.error(f"Error fetching data: {str(e)}")
     st.stop()
+
+
+def _resample_ohlcv(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """
+    Aggregate to a coarser bar the feed does not serve natively (4H, 1Y).
+
+    OHLCV does not aggregate uniformly: open is the first, close the last, high
+    and low the extremes, volume the sum. Averaging any of them would invent a
+    bar that never traded.
+    """
+    out = frame.copy()
+    out["time"] = pd.to_datetime(out["time"])
+    agg = out.set_index("time").resample(rule).agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"}).dropna(subset=["open"])
+    agg = agg.reset_index()
+    agg["time"] = agg["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return agg[["time", "open", "high", "low", "close", "volume"]]
+
+
+if tf["resample"]:
+    before = len(df)
+    df = _resample_ohlcv(df, tf["resample"])
+    source += f" [{timeframe} resampled from {INTERVAL_NAMES[interval]}, "
+    source += f"{before} to {len(df)} bars]"
 
 # Compute Indicators Dynamically
 with st.spinner("Calculating technical indicators..."):
@@ -167,17 +251,14 @@ with st.spinner("Calculating technical indicators..."):
 latest_bar = res.iloc[-1]
 prev_bar = res.iloc[-2]
 
-INTERVAL_LABELS = {"D": "Daily", "M1": "1 Min", "M5": "5 Min", "M15": "15 Min",
-                   "M30": "30 Min", "H1": "1 Hour", "W": "Weekly", "M": "Monthly"}
-
 col_head, col_set = st.columns([9, 1])
 with col_head:
     render_html(f"""
     <div class="fm-head">
-        <span class="fm-brand">Finance MCP</span>
         <span class="fm-sym">{as_html_text(symbol)}</span>
-        <span class="fm-meta">{as_html_text(source)} · {INTERVAL_LABELS.get(interval, interval)}
-            · bar {as_html_text(latest_bar['time'])} · {count} bars</span>
+        <span class="fm-tf">{as_html_text(timeframe)}</span>
+        <span class="fm-meta">{as_html_text(source)}
+            · bar {as_html_text(latest_bar['time'])} · {len(res)} bars</span>
     </div>
     """)
 
@@ -307,6 +388,17 @@ tab_charts, tab_backtest, tab_journal, tab_signals, tab_execution, tab_portfolio
 
 # Tab 1: Charts
 with tab_charts:
+    # Timeframe sits on the chart, where a chart's timeframe belongs -- it was
+    # buried in the sidebar under indicator parameters, so switching from daily
+    # to hourly meant leaving the chart to find a dropdown. Rendered as a
+    # segmented strip by the stylesheet; it is a radio underneath.
+    with st.container(key="fm_tf_picker"):
+        st.radio(
+            "Timeframe", options=list(TIMEFRAMES), key="ui_timeframe",
+            horizontal=True, label_visibility="collapsed",
+            format_func=lambda k: TIMEFRAMES[k]["label"],
+        )
+
     col_opt1, col_opt2 = st.columns([1, 1])
     with col_opt1:
         selected_overlays = st.multiselect(
@@ -801,6 +893,18 @@ with tab_signals:
 with tab_execution:
     st.markdown("### Human-In-The-Loop (HITL) Execution Desk")
     st.markdown("Review and approve orders drafted by the AI. **Claude cannot trade without your explicit physical approval here.**")
+
+    # This is the one screen where a click spends money. Which account surface
+    # that click reaches is stated here, not left to be inferred from a .env
+    # file the person approving may never have opened.
+    if IS_PAPER:
+        st.info(f"PAPER — orders are simulated against Webull's sandbox "
+                f"({webull_client.SANDBOX_ENDPOINTS[webull_client.WEBULL_REGION_ID.lower()]['api']}). "
+                "Nothing here reaches a real account.")
+    else:
+        st.warning("LIVE — an approved order reaches the real account and spends real "
+                   "money. Set `WEBULL_ENVIRONMENT=paper` in `.env` and restart to "
+                   "rehearse against Webull's sandbox instead.")
     
     drafts_path = BASE_DIR + "/dashboard/order_drafts.json"
     

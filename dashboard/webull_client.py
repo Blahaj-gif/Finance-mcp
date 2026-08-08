@@ -35,6 +35,72 @@ WEBULL_ENVIRONMENT = os.getenv("WEBULL_ENVIRONMENT", "prod")
 WEBULL_TOKEN_DIR = os.getenv("WEBULL_TOKEN_DIR", os.path.join(BASE_DIR, "conf"))
 
 
+# ---------------------------------------------------------------------
+# Paper trading (sandbox)
+# ---------------------------------------------------------------------
+# Webull's OpenAPI has a simulated environment, but the Python SDK ships only
+# production hosts (webull/core/data/endpoints.json), so the sandbox has to be
+# injected per region. This map is taken from Webull's own MCP server,
+# webull-inc/webull-openapi-mcp (webull_openapi_mcp/sdk_client.py, UAT_ENDPOINTS)
+# -- the same values it feeds to the same SDK call. Some regions have migrated
+# to *.sandbox.webull.* and some have not; both forms are current upstream.
+#
+# This code previously tried to `import webull_openapi_mcp`, a package this
+# project does not depend on and does not ship. Setting WEBULL_ENVIRONMENT=uat
+# therefore raised ModuleNotFoundError at client construction -- a documented
+# setting that broke the app rather than switching it to paper.
+SANDBOX_ENDPOINTS = {
+    "us": {"api": "api.sandbox.webull.com",
+           "quotes-api": "api.sandbox.webull.com",
+           "events-api": "events-api.sandbox.webull.com"},
+    "hk": {"api": "api.sandbox.webull.hk",
+           "quotes-api": "data-api.sandbox.webull.hk",
+           "events-api": "events-api.sandbox.webull.hk"},
+    "jp": {"api": "jp-openapi-alb.uat.webullbroker.com",
+           "quotes-api": "data-api.uat.webullbroker.com",
+           "events-api": "jp-openapi-events.uat.webullbroker.com"},
+    "sg": {"api": "sg-api.uat.webullbroker.com",
+           "quotes-api": "data-api.uat.webullbroker.com",
+           "events-api": "sg-events-api.uat.webullbroker.com"},
+    "th": {"api": "th-api.uat.webullbroker.com",
+           "quotes-api": "data-api.uat.webullbroker.com",
+           "events-api": "th-events-api.uat.webullbroker.com"},
+    "my": {"api": "my-api.uat.webullbroker.com",
+           "quotes-api": "data-api.uat.webullbroker.com",
+           "events-api": "my-events-api.uat.webullbroker.com"},
+    "uk": {"api": "uk-api.uat.webullbroker.com",
+           "quotes-api": "data-api.uat.webullbroker.com",
+           "events-api": "uk-events-api.uat.webullbroker.com"},
+    "mx": {"api": "us-openapi-alb.uat.webullbroker.com",
+           "quotes-api": "us-openapi-quotes-api.uat.webullbroker.com",
+           "events-api": "us-openapi-events.uat.webullbroker.com"},
+    "br": {"api": "us-openapi-alb.uat.webullbroker.com",
+           "quotes-api": "us-openapi-quotes-api.uat.webullbroker.com",
+           "events-api": "us-openapi-events.uat.webullbroker.com"},
+    "eu": {"api": "eu-api.uat.webullbroker.com",
+           "quotes-api": "eu-api.uat.webullbroker.com",
+           "events-api": "eu-events-api.uat.webullbroker.com"},
+    "za": {"api": "au-api.uat.webullbroker.com",
+           "quotes-api": "au-api.uat.webullbroker.com",
+           "events-api": "au-events-api.uat.webullbroker.com"},
+    "au": {"api": "au-api.uat.webullbroker.com",
+           "quotes-api": "au-api.uat.webullbroker.com",
+           "events-api": "au-events-api.uat.webullbroker.com"},
+}
+
+PAPER_ALIASES = {"uat", "sandbox", "paper", "simulated"}
+
+
+def is_paper_environment() -> bool:
+    """True when this process is pointed at Webull's simulated environment."""
+    return WEBULL_ENVIRONMENT.strip().lower() in PAPER_ALIASES
+
+
+def environment_label() -> str:
+    """A word for the surface being traded, for anywhere a human can see it."""
+    return "PAPER" if is_paper_environment() else "LIVE"
+
+
 # =====================================================================
 # DATA INTEGRITY ERRORS
 # =====================================================================
@@ -212,6 +278,87 @@ def _yf_period_for(yf_interval: str, count: int) -> str:
     return f"{days}d"
 
 
+class YahooThrottledError(RuntimeError):
+    """Yahoo returned nothing because we are being rate-limited, not because the symbol is unknown."""
+
+
+class SymbolNotFoundError(ValueError):
+    """Yahoo has no data for this symbol -- delisted, mistyped, or never listed."""
+
+
+# The canary is a symbol Yahoo will always have. If it answers, an empty result
+# for the requested symbol is about the symbol; if it is also empty, we are
+# throttled. Cached briefly so a watchlist sweep of dead tickers does not fire
+# one canary per name.
+_CANARY_SYMBOL = os.getenv("YF_CANARY_SYMBOL", "SPY")
+_CANARY_TTL_SECONDS = 30.0
+_canary_state = {"checked_at": 0.0, "alive": None}
+
+
+def _canary_is_alive() -> bool:
+    """Can Yahoo serve anything at all right now?"""
+    import time
+    now = time.monotonic()
+    if _canary_state["alive"] is not None and now - _canary_state["checked_at"] < _CANARY_TTL_SECONDS:
+        return _canary_state["alive"]
+    try:
+        probe = yahoo_ticker(_CANARY_SYMBOL).history(period="5d", interval="1d")
+        alive = not probe.empty
+    except Exception:
+        alive = False
+    _canary_state.update(checked_at=now, alive=alive)
+    return alive
+
+
+def _explain_empty_yahoo_result(symbol: str) -> Exception:
+    """Decide whether an empty Yahoo response means 'throttled' or 'no such symbol'."""
+    if _canary_is_alive():
+        return SymbolNotFoundError(
+            f"Yahoo Finance has no data for '{symbol}'. The feed is answering "
+            f"normally ({_CANARY_SYMBOL} resolved), so this is the symbol, not the "
+            "connection -- check the ticker, or the listing may have been delisted."
+        )
+    return YahooThrottledError(
+        f"Yahoo Finance returned no data for '{symbol}', and the {_CANARY_SYMBOL} "
+        "canary is also empty -- the feed is rate-limiting this address, not "
+        "missing the symbol. Retry shortly, or raise YF_MIN_REQUEST_INTERVAL."
+    )
+
+
+def yahoo_feed_delay(symbol: str) -> dict:
+    """
+    How far behind Yahoo's own clock is, measured rather than assumed.
+
+    Yahoo does not publish `exchangeDataDelayedBy` on the chart endpoint, but it
+    does return `regularMarketTime` -- the timestamp of the last regular-session
+    print it holds. Comparing that to now gives the real observed lag for this
+    symbol on this exchange, which is what matters when a fallback quote is
+    about to be used for a decision.
+
+    Returns {} when the metadata is unavailable rather than guessing a number.
+    """
+    try:
+        md = yahoo_ticker(symbol.upper()).history_metadata or {}
+        market_time = md.get("regularMarketTime")
+        if not market_time:
+            return {}
+        last = datetime.datetime.utcfromtimestamp(int(market_time))
+        lag = (datetime.datetime.utcnow() - last).total_seconds()
+        return {
+            "last_print_utc": last.strftime("%Y-%m-%d %H:%M:%S"),
+            "observed_lag_seconds": round(lag, 1),
+            "observed_lag_minutes": round(lag / 60.0, 1),
+            "exchange": md.get("fullExchangeName") or md.get("exchangeName"),
+            "exchange_timezone": md.get("exchangeTimezoneName"),
+            "currency": md.get("currency"),
+            # Outside trading hours the lag is dominated by the session gap, not
+            # by feed delay, so say which reading this is.
+            "market_open": lag < 900,
+        }
+    except Exception:
+        return {}
+
+
 def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.DataFrame:
     """Fetch historical data from Yahoo Finance as a robust fallback."""
     # Map Webull interval to Yahoo Finance interval
@@ -238,7 +385,11 @@ def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.
             resolved_symbol = ticker_symbol_bk
 
     if df.empty:
-        raise ValueError(f"No data returned from Yahoo Finance for ticker: {symbol}")
+        # An empty frame has two very different causes and Yahoo does not say
+        # which: the symbol does not exist, or we are being throttled and it
+        # answered 200 with nothing in it. Reporting the second as the first
+        # sends the caller off to check a ticker that was never the problem.
+        raise _explain_empty_yahoo_result(symbol)
 
     # Standardize columns to lowercase: datetime, open, high, low, close, volume
     # yfinance returns oldest-first, so .tail() keeps the most recent bars.
@@ -513,15 +664,22 @@ def get_api_client():
             if not any(isinstance(f, _RedactSecretsFilter) for f in handler.filters):
                 handler.addFilter(redactor)
 
-        # Setup UAT endpoints if necessary
-        if WEBULL_ENVIRONMENT.lower() == "uat":
-            from webull_openapi_mcp.sdk_client import UAT_ENDPOINTS, _API_TYPE_MAP
-            region_cfg = UAT_ENDPOINTS["region_mapping"].get(WEBULL_REGION_ID.lower())
-            if region_cfg:
-                for key, api_type in _API_TYPE_MAP.items():
-                    endpoint = region_cfg.get(key)
-                    if endpoint:
-                        api_client.add_endpoint(WEBULL_REGION_ID.lower(), endpoint, api_type)
+        # Point the client at the sandbox when asked. The SDK only ships
+        # production endpoints, so the hosts have to be injected by hand.
+        if is_paper_environment():
+            region = WEBULL_REGION_ID.lower()
+            region_cfg = SANDBOX_ENDPOINTS.get(region)
+            if not region_cfg:
+                raise RuntimeError(
+                    f"WEBULL_ENVIRONMENT={WEBULL_ENVIRONMENT} requests the sandbox, but "
+                    f"no sandbox endpoint is published for region '{region}'. "
+                    f"Known: {', '.join(sorted(SANDBOX_ENDPOINTS))}. "
+                    "Refusing to fall through to production."
+                )
+            for api_type, endpoint in region_cfg.items():
+                api_client.add_endpoint(region, endpoint, api_type)
+            print(f"Webull SANDBOX environment active (region {region}): "
+                  f"{region_cfg['api']} — orders are simulated.", file=sys.stderr)
 
         _API_CLIENT = api_client
         return _API_CLIENT
