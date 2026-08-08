@@ -204,16 +204,18 @@ def parse_form4(xml: str) -> dict:
 
 
 def insider_transactions(symbol: str, limit: int = 10, person: str = None,
-                         since: str = None) -> dict:
+                         since: str = None, forms=("4",)) -> dict:
     """
-    Parsed Form 4 activity for a company, newest first.
+    Parsed Form 3/4/5 activity for a company, newest first.
 
     Args:
-        limit: how many Form 4 filings to parse (each may hold several transactions).
+        limit: how many filings to parse (each may hold several transactions).
         person: case-insensitive substring match on the reporting owner's name.
         since: ISO date; drop transactions before it.
+        forms: which ownership forms to read — 4 (changes), 3 (initial), 5 (annual).
     """
-    filings = ec.company_filings(symbol, forms=["4"], limit=max(limit * 3, limit))
+    forms = [str(f).upper().strip() for f in forms]
+    filings = ec.company_filings(symbol, forms=forms, limit=max(limit * 3, limit))
     info = ec.ticker_to_cik(symbol)
 
     wanted_person = nz.to_ascii(person).lower() if person else None
@@ -224,7 +226,7 @@ def insider_transactions(symbol: str, limit: int = 10, person: str = None,
             break
         try:
             xml = fetch_form4_xml(info["cik"], f["accession"], f.get("primary_document"))
-            report = parse_form4(xml)
+            report = parse_ownership_form(xml, f.get("form", "4"))
         except Exception as e:
             errors.append(f"{f.get('accession', '?')}: {str(e)[:70]}")
             continue
@@ -235,7 +237,9 @@ def insider_transactions(symbol: str, limit: int = 10, person: str = None,
         if since:
             report["transactions"] = [t for t in report["transactions"]
                                       if (t.get("date") or "") >= since]
-            if not report["transactions"]:
+            # A Form 3 is entirely holdings; dropping it for having no
+            # transactions in range would hide the insider's opening position.
+            if not report["transactions"] and not report.get("holdings"):
                 continue
 
         report["accession"] = f.get("accession")
@@ -518,6 +522,243 @@ def institutional_holdings(symbol_or_cik: str, limit: int = 25) -> dict:
     return {"institution": name, "cik": cik, "filed": f.get("filing_date"),
             "period": f.get("report_date"), "positions": len(holdings),
             "total_value": total, "holdings": holdings[:limit]}
+
+
+# =====================================================================
+# FORM 3 / 5 — HOLDINGS RATHER THAN TRANSACTIONS
+# =====================================================================
+# Forms 3, 4 and 5 share the ownershipDocument schema, but a Form 3 (initial
+# statement on becoming an insider) and much of a Form 5 (annual statement of
+# exempt or deferred transactions) report *holdings* -- <nonDerivativeHolding>
+# -- with no transaction attached. Parsing only transactions returns an empty
+# report for a filing that is entirely position data.
+
+OWNERSHIP_FORMS = {
+    "3": "Initial statement of beneficial ownership",
+    "4": "Changes in beneficial ownership",
+    "5": "Annual statement of changes",
+}
+
+
+def parse_holdings(xml: str) -> list:
+    """Position rows from a Form 3/4/5 — what is held, not what was traded."""
+    footnotes = {fid: nz.normalize_text(re.sub(r"<[^>]+>", " ", body))
+                 for fid, body in re.findall(
+                     r'<footnote\s+id="([^"]+)"[^>]*>(.*?)</footnote>', xml, re.S | re.I)}
+
+    rows = []
+    for kind, derivative in (("nonDerivativeHolding", False),
+                             ("derivativeHolding", True)):
+        for block in _blocks(xml, kind):
+            refs = re.findall(r'footnoteId\s+id="([^"]+)"', block, re.I)
+            rows.append({
+                "security": _text(block, "securityTitle", ""),
+                "shares_held": nz.parse_number(_text(block, "sharesOwnedFollowingTransaction")),
+                "ownership": _text(block, "directOrIndirectOwnership", ""),
+                "nature": _text(block, "natureOfOwnership", ""),
+                "exercise_price": nz.parse_number(_text(block, "conversionOrExercisePrice")),
+                "expiry": _text(block, "expirationDate", ""),
+                "derivative": derivative,
+                "footnotes": [footnotes.get(r, "") for r in refs if footnotes.get(r)],
+            })
+    return rows
+
+
+def parse_ownership_form(xml: str, form: str = "4") -> dict:
+    """Parse any Form 3/4/5, reporting transactions and holdings together."""
+    report = parse_form4(xml)
+    report["form"] = str(form).upper().lstrip("SC ").strip()
+    report["form_meaning"] = OWNERSHIP_FORMS.get(report["form"], "Ownership statement")
+    report["holdings"] = parse_holdings(xml)
+    return report
+
+
+# =====================================================================
+# INLINE XBRL — EXECUTIVE COMPENSATION IN A DEF 14A
+# =====================================================================
+# Executive pay is not in the companyfacts API (that carries only dei, ffd and
+# us-gaap for most filers). It is tagged *inside* the proxy document as inline
+# XBRL under the `ecd` taxonomy introduced by the 2023 pay-versus-performance
+# rule -- a Micron DEF 14A carries ~500 such references.
+
+ECD_LABELS = {
+    "PeoTotalCompAmt": "CEO total compensation (Summary Compensation Table)",
+    "PeoActuallyPaidCompAmt": "CEO compensation actually paid",
+    "AdjToCompAmt": "Pay-versus-performance adjustment to reported comp",
+    "AdjToPeoCompAmt": "Adjustment to CEO reported compensation",
+    "AdjToNonPeoNeoCompAmt": "Adjustment to other officers' reported compensation",
+    "EquityValuationAssumptionDifferenceAmt": "Equity valuation assumption difference",
+    "NonPeoNeoAvgTotalCompAmt": "Other named officers — average total compensation",
+    "NonPeoNeoAvgCompActuallyPaidAmt": "Other named officers — average actually paid",
+    "TotalShareholderRtnAmt": "Total shareholder return (indexed $100)",
+    "PeerGroupTotalShareholderRtnAmt": "Peer group total shareholder return",
+    "NetIncomeLoss": "Net income",
+    "InsiderTrdPoliciesProcAdoptedFlag": "Insider trading policy adopted",
+    "AwardTmgMnpiCnsdrdFlag": "Award timing considered material non-public information",
+    "AwardTmgPredtrmndFlag": "Award timing predetermined",
+    "NonRule10b51ArrAdoptedFlag": "Non-Rule-10b5-1 arrangement adopted",
+    "Rule10b51ArrAdoptedFlag": "Rule 10b5-1 arrangement adopted",
+}
+
+_IX_FACT = re.compile(
+    r'<ix:(nonFraction|nonNumeric)\b([^>]*)>(.*?)</ix:\1>', re.S | re.I)
+
+
+def parse_inline_xbrl(html_text: str, taxonomy: str = "ecd") -> list:
+    """
+    Pull inline-XBRL facts of one taxonomy out of a filing document.
+
+    Values honour the `scale` and `sign` attributes, which is what separates
+    "3" from "3,000,000" and a positive from a negative.
+    """
+    facts = []
+    for kind, attrs, body in _IX_FACT.findall(html_text):
+        name = re.search(r'name="([^"]+)"', attrs)
+        if not name or not name.group(1).lower().startswith(taxonomy.lower() + ":"):
+            continue
+
+        concept = name.group(1).split(":", 1)[1]
+        raw = nz.normalize_text(re.sub(r"<[^>]+>", " ", body))
+
+        value = raw
+        if kind.lower() == "nonfraction":
+            num = nz.parse_number(raw)
+            if num is not None:
+                scale = re.search(r'scale="(-?\d+)"', attrs)
+                if scale:
+                    num *= 10 ** int(scale.group(1))
+                if re.search(r'sign="-"', attrs):
+                    num = -num
+                value = num
+
+        facts.append({
+            "concept": concept,
+            "label": ECD_LABELS.get(concept, concept),
+            "value": value,
+            "numeric": isinstance(value, float),
+            "context": (re.search(r'contextRef="([^"]+)"', attrs) or _NoMatch()).group(1),
+            "unit": (re.search(r'unitRef="([^"]+)"', attrs) or _NoMatch()).group(1),
+        })
+    return facts
+
+
+class _NoMatch:
+    def group(self, _n):
+        return ""
+
+
+def executive_compensation(html_text: str) -> dict:
+    """
+    Executive pay and award-timing disclosures from a proxy's inline XBRL.
+
+    Keeps the highest-value observation per concept — proxies tag several years
+    of the pay-versus-performance table, and the largest CEO figure is the most
+    recent fiscal year in every filing checked.
+    """
+    facts = parse_inline_xbrl(html_text, "ecd")
+    if not facts:
+        return {"found": False, "facts": {}, "flags": {}, "count": 0}
+
+    money, flags = {}, {}
+    for f in facts:
+        if f["numeric"]:
+            best = money.get(f["concept"])
+            if best is None or abs(f["value"]) > abs(best["value"]):
+                money[f["concept"]] = f
+        elif str(f["value"]).lower() in ("true", "false", "yes", "no"):
+            flags[f["concept"]] = {
+                "label": f["label"],
+                "value": str(f["value"]).lower() in ("true", "yes"),
+            }
+
+    return {"found": True, "facts": money, "flags": flags, "count": len(facts)}
+
+
+# =====================================================================
+# SCHEDULE 13D / 13G — ACTIVIST AND PASSIVE STAKES
+# =====================================================================
+# The SEC mandated XML for these in December 2024, but filings in practice are
+# still commonly HTML, so both paths are supported and the tool reports which
+# one produced the answer. The cover page is a fixed form either way: CUSIP,
+# the reporting person, voting and dispositive power, aggregate amount, and
+# percent of class.
+
+_13D_FIELDS = {
+    # A CUSIP is nine uppercase alphanumerics and always contains digits. The
+    # earlier pattern ran case-insensitively, so "CUSIP Number" matched and the
+    # word "Number" was captured as the identifier.
+    "cusip": [r"CUSIP\s*(?:No\.?|Number)?\s*[:#]?\s*(?-i:([0-9A-Z]{8,9}))(?![0-9A-Za-z])"],
+    # Cover-page rows are labelled with their own row number -- "PERCENT OF
+    # CLASS REPRESENTED BY AMOUNT IN ROW (11)   5.2%" -- so a gap pattern that
+    # stops at the first digit lands on the row reference and never reaches the
+    # value. Skip to the first percent sign instead.
+    "aggregate_amount": [
+        r"AGGREGATE\s+AMOUNT\s+BENEFICIALLY\s+OWNED[^%]{0,160}?([\d][\d,]{3,})",
+        r"Aggregate\s+Amount\s+Beneficially\s+Owned[^%]{0,160}?([\d][\d,]{3,})",
+    ],
+    "percent_of_class": [
+        r"PERCENT\s+OF\s+CLASS[^%]{0,200}?([\d]+(?:\.\d+)?)\s*%",
+        r"Percent\s+of\s+[Cc]lass[^%]{0,200}?([\d]+(?:\.\d+)?)\s*%",
+        r"represent(?:ing|s)?\s+approximately\s+([\d.]+)\s*%",
+        r"([\d.]+)\s*%\s+of\s+the\s+(?:outstanding\s+)?(?:shares|Common\s+Stock)",
+    ],
+    "sole_voting": [r"SOLE\s+VOTING\s+POWER[^%]{0,100}?([\d][\d,]{2,})"],
+    "shared_voting": [r"SHARED\s+VOTING\s+POWER[^%]{0,100}?([\d][\d,]{2,})"],
+    "sole_dispositive": [r"SOLE\s+DISPOSITIVE\s+POWER[^%]{0,100}?([\d][\d,]{2,})"],
+    "shared_dispositive": [r"SHARED\s+DISPOSITIVE\s+POWER[^%]{0,100}?([\d][\d,]{2,})"],
+}
+
+
+def parse_13dg(document: str, is_xml: bool = False) -> dict:
+    """
+    Cover-page facts from a Schedule 13D or 13G.
+
+    A 13D signals intent to influence control; a 13G is a passive stake. The
+    numbers that matter are the same on both, and Item 4 ("Purpose of
+    Transaction") is where a 13D states what the filer intends.
+    """
+    out = {"source": "xml" if is_xml else "html", "fields": {}, "confidence": "low"}
+
+    if is_xml:
+        mapping = {
+            "cusip": "issuerCUSIP", "aggregate_amount": "aggregateAmountOwned",
+            "percent_of_class": "percentOfClass", "sole_voting": "soleVotingPower",
+            "shared_voting": "sharedVotingPower", "sole_dispositive": "solePowerDisposition",
+            "shared_dispositive": "sharedPowerDisposition",
+        }
+        for key, tag in mapping.items():
+            val = _text(document, tag)
+            if val is not None:
+                out["fields"][key] = nz.parse_number(val) if key != "cusip" else val
+        out["issuer"] = _text(document, "issuerName", "")
+        out["filer"] = _text(document, "filerName", "") or _text(document, "reportingPersonName", "")
+        out["confidence"] = "high" if out["fields"] else "low"
+        return out
+
+    text = html_to_text(document) if "<" in document[:2000] else document
+    for key, patterns in _13D_FIELDS.items():
+        for pat in patterns:
+            m = re.search(pat, text, re.I | re.S)
+            if m:
+                raw = m.group(1)
+                if key == "cusip":
+                    # Must actually look like a CUSIP, not a stray word.
+                    if not re.search(r"\d", raw) or not raw.isupper():
+                        continue
+                    out["fields"][key] = raw
+                else:
+                    out["fields"][key] = nz.parse_number(raw)
+                break
+
+    purpose, meta = extract_section(text, "4", budget=2500)
+    if purpose and "purpose" in purpose[:120].lower():
+        out["purpose_of_transaction"] = purpose
+
+    # The cover page is only trustworthy if the two anchors both parsed.
+    got = out["fields"]
+    out["confidence"] = ("high" if got.get("aggregate_amount") and got.get("percent_of_class")
+                         else ("medium" if got else "low"))
+    return out
 
 
 def describe_8k_items(items: str) -> list:

@@ -1945,7 +1945,7 @@ def get_company_financials(symbol: str) -> str:
 
 @mcp.tool()
 def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
-                         since: str = None) -> str:
+                         since: str = None, forms: str = "4") -> str:
     """
     Parsed SEC Form 4 insider transactions — who traded, when, at what price, and
     crucially **whether the sale was made under a Rule 10b5-1 plan**.
@@ -1961,9 +1961,14 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
         limit: How many Form 4 filings to parse (default 10).
         person: Filter to one insider by name, case- and accent-insensitive (e.g. "Mehrotra").
         since: ISO date (YYYY-MM-DD); drop transactions before it.
+        forms: Which ownership forms to read — "4" (changes in ownership, the default),
+            "3" (initial statement filed on becoming an insider — all holdings, no trades),
+            "5" (annual statement of exempt or deferred transactions), or "3,4,5".
     """
     try:
-        res = edgar_forms.insider_transactions(symbol, limit=limit, person=person, since=since)
+        form_list = [f.strip() for f in str(forms).split(",") if f.strip()]
+        res = edgar_forms.insider_transactions(symbol, limit=limit, person=person,
+                                               since=since, forms=form_list)
         reports = res["filings"]
 
         if not reports:
@@ -1975,18 +1980,24 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
         out = f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
 
         flow = edgar_forms.summarise_insider_flow(reports)
-        out += (f"**Open-market decisions across {len(reports)} filing(s)**\n"
-                f"* Bought: `${flow['open_market_bought_value']:,.0f}` "
-                f"({flow['open_market_bought_shares']:,.0f} sh)\n"
-                f"* Sold: `${flow['open_market_sold_value']:,.0f}` "
-                f"({flow['open_market_sold_shares']:,.0f} sh)\n"
-                f"* **Net: `${flow['net_value']:,.0f}`**\n"
-                f"* Of those sales — under a 10b5-1 plan: **{flow['sales_under_10b5_1']}**, "
-                f"not under a plan: **{flow['sales_not_under_10b5_1']}**\n")
-        if flow["non_discretionary_value"]:
-            out += (f"* Excluded as compensation mechanics (grants, exercises, tax withholding): "
-                    f"`${flow['non_discretionary_value']:,.0f}` — not a view on the stock\n")
-        out += "\n"
+        any_transactions = any(r["transactions"] for r in reports)
+
+        # A Form 3 is holdings only. Printing "Bought $0 / Sold $0 / Net $0"
+        # over it reads as "no insider activity" when the filing is in fact an
+        # insider declaring an opening position.
+        if any_transactions:
+            out += (f"**Open-market decisions across {len(reports)} filing(s)**\n"
+                    f"* Bought: `${flow['open_market_bought_value']:,.0f}` "
+                    f"({flow['open_market_bought_shares']:,.0f} sh)\n"
+                    f"* Sold: `${flow['open_market_sold_value']:,.0f}` "
+                    f"({flow['open_market_sold_shares']:,.0f} sh)\n"
+                    f"* **Net: `${flow['net_value']:,.0f}`**\n"
+                    f"* Of those sales — under a 10b5-1 plan: **{flow['sales_under_10b5_1']}**, "
+                    f"not under a plan: **{flow['sales_not_under_10b5_1']}**\n")
+            if flow["non_discretionary_value"]:
+                out += (f"* Excluded as compensation mechanics (grants, exercises, tax withholding): "
+                        f"`${flow['non_discretionary_value']:,.0f}` — not a view on the stock\n")
+            out += "\n"
 
         rows = []
         for r in reports:
@@ -2004,11 +2015,33 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
                     "Discretionary": "yes" if t["is_open_market_decision"] else "no",
                 })
 
-        table = pd.DataFrame(rows)
-        try:
-            out += table.to_markdown(index=False)
-        except Exception:
-            out += table.to_string(index=False)
+        if rows:
+            table = pd.DataFrame(rows)
+            try:
+                out += table.to_markdown(index=False)
+            except Exception:
+                out += table.to_string(index=False)
+
+        # Forms 3 and 5 report positions rather than trades, so a filing can be
+        # entirely holdings. Omitting them would show an empty result for a
+        # form whose whole purpose is to state an opening position.
+        held = [(r, h) for r in reports for h in r.get("holdings", [])]
+        if held:
+            hrows = [{
+                "Insider": r["owner"][:26],
+                "Form": r.get("form", "?"),
+                "Security": h["security"][:30],
+                "Shares held": f"{h['shares_held']:,.0f}" if h["shares_held"] else "—",
+                "Ownership": h.get("ownership") or "—",
+                "Strike": f"${h['exercise_price']:,.2f}" if h.get("exercise_price") else "",
+                "Expires": h.get("expiry") or "",
+            } for r, h in held]
+            htable = pd.DataFrame(hrows)
+            try:
+                rendered = htable.to_markdown(index=False)
+            except Exception:
+                rendered = htable.to_string(index=False)
+            out += "\n\n**Positions held** *(Forms 3 and 5 report holdings, not trades)*\n\n" + rendered
 
         notes = [fn for r in reports for fn in r["footnotes"]]
         if notes:
@@ -2054,11 +2087,70 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
             raise ToolError(f"No {form} filing found for {symbol.upper()}.")
         f = filings[0]
         cik = econ_calendar.ticker_to_cik(symbol)["cik"]
-        text = edgar_forms.fetch_filing_text(cik, f["accession"], f.get("primary_document"))
+
+        # Fetch the raw document once: the structured extractors below need the
+        # markup (inline XBRL lives in attributes), while section extraction
+        # needs it flattened.
+        base = edgar_forms._filing_dir(cik, f["accession"])
+        doc_name = (f.get("primary_document") or "").rsplit("/", 1)[-1]
+        raw = edgar_forms._fetch(f"{base}/{doc_name}") if doc_name else ""
+        text = edgar_forms.html_to_text(raw) if raw else \
+            edgar_forms.fetch_filing_text(cik, f["accession"], f.get("primary_document"))
 
         head = (f"### {f['company']} — {f['form']} filed {f['filing_date']}\n"
                 f"*Accepted {f['acceptance'][:19].replace('T', ' ')} · "
                 f"[source]({f['url']}) · {len(text):,} chars of text*\n\n")
+
+        upper_form = f["form"].upper()
+
+        # ---- Structured extractors, when the form has one -------------
+        if not section and not query and upper_form.startswith("DEF 14A"):
+            comp = edgar_forms.executive_compensation(raw)
+            if comp["found"]:
+                out = head + f"#### Executive Compensation *(inline XBRL, {comp['count']} tagged facts)*\n\n"
+                rows = [{"Measure": v["label"], "Value": f"${v['value']:,.0f}"}
+                        for v in comp["facts"].values() if abs(v["value"]) > 1000]
+                if rows:
+                    t = pd.DataFrame(rows)
+                    try:
+                        out += t.to_markdown(index=False) + "\n"
+                    except Exception:
+                        out += t.to_string(index=False) + "\n"
+                if comp["flags"]:
+                    out += "\n**Governance disclosures**\n"
+                    for fl in comp["flags"].values():
+                        out += f"* {fl['label']}: **{'yes' if fl['value'] else 'no'}**\n"
+                out += ("\n*Tagged under the `ecd` taxonomy from the 2023 pay-versus-performance "
+                        "rule. These facts live inside the proxy, not in the XBRL companyfacts API. "
+                        "Pass `section` or `query` to read the surrounding narrative.*")
+                return out
+
+        if not section and not query and upper_form.startswith(("SC 13D", "SC 13G")):
+            stake = edgar_forms.parse_13dg(raw, is_xml=raw.lstrip().startswith("<?xml"))
+            fields = stake["fields"]
+            if fields:
+                kind = "13D — filed with intent to influence control" if "13D" in upper_form \
+                    else "13G — passive stake"
+                out = head + f"#### Beneficial Ownership ({kind})\n\n"
+                pretty = {"cusip": "CUSIP", "aggregate_amount": "Aggregate amount owned",
+                          "percent_of_class": "Percent of class", "sole_voting": "Sole voting power",
+                          "shared_voting": "Shared voting power",
+                          "sole_dispositive": "Sole dispositive power",
+                          "shared_dispositive": "Shared dispositive power"}
+                for k, label in pretty.items():
+                    if k in fields and fields[k] is not None:
+                        v = fields[k]
+                        out += (f"* **{label}**: `{v}`\n" if isinstance(v, str)
+                                else f"* **{label}**: `{v:,.2f}`\n" if k == "percent_of_class"
+                                else f"* **{label}**: `{v:,.0f}`\n")
+                if stake.get("purpose_of_transaction"):
+                    out += ("\n**Item 4 — Purpose of Transaction**\n\n"
+                            + stake["purpose_of_transaction"][:2000] + "\n")
+                out += (f"\n*Parsed from the {stake['source'].upper()} cover page, confidence "
+                        f"{stake['confidence']}. The SEC mandated XML for these in December 2024, "
+                        "but many filings remain HTML, so the cover page is read either way — "
+                        "verify against the source link when confidence is not high.*")
+                return out
 
         if query:
             hits = edgar_forms.search_filing(text, query, window=600, max_hits=6)

@@ -26,8 +26,8 @@ Two public sources sit alongside the broker feed, so Claude can see the events t
 | `get_economic_calendar` | Scheduled US releases — CPI, PPI, jobs, JOLTS and more — with date, time and reference period, plus the latest actual prints. |
 | `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. |
 | `get_edgar_filings` | SEC filings in three modes: one company's filings, the all-registrant live feed, or full-text search across filing bodies. |
-| `get_insider_activity` | Parsed Form 4 transactions — who traded, at what price, and **whether the sale was under a Rule 10b5-1 plan**. |
-| `read_filing` | Extract a named Item (Risk Factors, MD&A, Legal) from a 10-K/10-Q, or search the filing text. |
+| `get_insider_activity` | Parsed Form 3/4/5 — who traded, at what price, **whether the sale was under a Rule 10b5-1 plan**, and opening positions. |
+| `read_filing` | Form-aware: executive pay from a DEF 14A, the cover page of a 13D/13G, a named Item (Risk Factors, MD&A) from a 10-K, or a text search. |
 | `get_institutional_holdings` | Latest 13F-HR portfolio for a fund, positions merged across manager rows. |
 
 **Filings are parsed, not forwarded.** Most of what an analyst wants from a filing is already a machine-readable field. "Was that sale pre-scheduled?" is `<aff10b5One>` in the Form 4 XML — a boolean. So the server extracts and answers rather than handing over a document: one Form 4 is ~6,600 tokens of raw XML, and a single 10-K is ~610,000 tokens, which is three times a 200k context window. `get_insider_activity` also separates real decisions (codes P/S) from compensation mechanics — grants, option exercises, and shares withheld for tax — which are routinely misreported as "insiders sold $X".

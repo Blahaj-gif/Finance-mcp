@@ -319,3 +319,188 @@ def test_13f_parses_every_row():
     assert rows[0]["cusip"] == "037833100"
     assert rows[0]["value"] == pytest.approx(20_000_000)
     assert rows[0]["shares"] == pytest.approx(80_000_000)
+
+
+# =====================================================================
+# Form 3 / 5 — holdings rather than transactions
+# =====================================================================
+
+FORM3 = """<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2026-06-11</periodOfReport>
+  <issuer><issuerName>MICRON TECHNOLOGY INC</issuerName>
+          <issuerTradingSymbol>MU</issuerTradingSymbol></issuer>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Bjorlin Alexis</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeHolding>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>260</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>I</value></directOrIndirectOwnership>
+        <natureOfOwnership><value>By Trust</value></natureOfOwnership>
+      </ownershipNature>
+      <footnoteId id="F1"/>
+    </nonDerivativeHolding>
+  </nonDerivativeTable>
+  <derivativeTable>
+    <derivativeHolding>
+      <securityTitle><value>Stock Option</value></securityTitle>
+      <conversionOrExercisePrice><value>85.50</value></conversionOrExercisePrice>
+      <expirationDate><value>2032-01-15</value></expirationDate>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>5000</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+    </derivativeHolding>
+  </derivativeTable>
+  <footnotes><footnote id="F1">Shares held in a Trust.</footnote></footnotes>
+</ownershipDocument>"""
+
+
+def test_form3_holdings_are_parsed():
+    """
+    A Form 3 is an insider's opening position and contains no transactions.
+    Parsing only transactions returns nothing for a filing that is all data.
+    """
+    r = ef.parse_ownership_form(FORM3, form="3")
+    assert r["transactions"] == []
+    assert len(r["holdings"]) == 2
+    assert r["form"] == "3"
+    assert "Initial statement" in r["form_meaning"]
+
+
+def test_form3_holding_details():
+    holdings = ef.parse_ownership_form(FORM3, form="3")["holdings"]
+    common = [h for h in holdings if not h["derivative"]][0]
+    assert common["shares_held"] == pytest.approx(260)
+    assert common["ownership"] == "I"
+    assert common["nature"] == "By Trust"
+    assert "Trust" in common["footnotes"][0]
+
+
+def test_derivative_holdings_carry_strike_and_expiry():
+    option = [h for h in ef.parse_ownership_form(FORM3, form="3")["holdings"] if h["derivative"]][0]
+    assert option["exercise_price"] == pytest.approx(85.50)
+    assert option["expiry"] == "2032-01-15"
+    assert option["shares_held"] == pytest.approx(5000)
+
+
+def test_form4_still_reports_transactions_through_the_general_parser():
+    r = ef.parse_ownership_form(FORM4, form="4")
+    assert len(r["transactions"]) == 2
+    assert r["plan_10b5_1"] is True
+    assert r["holdings"] == []
+
+
+# =====================================================================
+# DEF 14A — executive compensation via inline XBRL
+# =====================================================================
+
+PROXY = """<html><body>
+<ix:nonFraction name="ecd:PeoTotalCompAmt" contextRef="c1" unitRef="usd" scale="0"
+ >30940146</ix:nonFraction>
+<ix:nonFraction name="ecd:PeoActuallyPaidCompAmt" contextRef="c1" unitRef="usd" scale="3"
+ >86570</ix:nonFraction>
+<ix:nonFraction name="ecd:NetIncomeLoss" contextRef="c1" unitRef="usd" sign="-" scale="0"
+ >1234000</ix:nonFraction>
+<ix:nonNumeric name="ecd:AwardTmgMnpiCnsdrdFlag" contextRef="c1">true</ix:nonNumeric>
+<ix:nonNumeric name="ecd:InsiderTrdPoliciesProcAdoptedFlag" contextRef="c1">true</ix:nonNumeric>
+<ix:nonFraction name="us-gaap:Revenues" contextRef="c1" unitRef="usd">999</ix:nonFraction>
+</body></html>"""
+
+
+def test_inline_xbrl_extracts_only_the_requested_taxonomy():
+    facts = ef.parse_inline_xbrl(PROXY, "ecd")
+    assert len(facts) == 5
+    assert all(not f["concept"].startswith("Revenues") for f in facts)
+
+
+def test_inline_xbrl_applies_scale():
+    """scale="3" means the printed number is in thousands."""
+    comp = ef.executive_compensation(PROXY)
+    assert comp["facts"]["PeoActuallyPaidCompAmt"]["value"] == pytest.approx(86_570_000)
+
+
+def test_inline_xbrl_applies_sign():
+    comp = ef.executive_compensation(PROXY)
+    assert comp["facts"]["NetIncomeLoss"]["value"] == pytest.approx(-1_234_000)
+
+
+def test_executive_compensation_labels_and_flags():
+    comp = ef.executive_compensation(PROXY)
+    assert comp["found"] is True
+    assert comp["facts"]["PeoTotalCompAmt"]["label"].startswith("CEO total compensation")
+    assert comp["flags"]["AwardTmgMnpiCnsdrdFlag"]["value"] is True
+    assert "material non-public" in comp["flags"]["AwardTmgMnpiCnsdrdFlag"]["label"]
+
+
+def test_no_inline_xbrl_is_reported_not_faked():
+    assert ef.executive_compensation("<html><p>Nothing tagged here.</p></html>")["found"] is False
+
+
+# =====================================================================
+# Schedule 13D / 13G
+# =====================================================================
+
+COVER = """
+SCHEDULE 13D
+CUSIP Number: 09857L108
+5. SOLE VOTING POWER  5,034,170
+6. SHARED VOTING POWER  0
+7. SOLE DISPOSITIVE POWER  5,034,170
+9. AGGREGATE AMOUNT BENEFICIALLY OWNED BY EACH REPORTING PERSON WITH (9)   5,034,170
+11. PERCENT OF CLASS REPRESENTED BY AMOUNT IN ROW (11)   5.2%
+ITEM 4. PURPOSE OF TRANSACTION
+The Reporting Person intends to engage with management regarding capital allocation.
+ITEM 5. INTEREST IN SECURITIES
+"""
+
+
+def test_13d_cover_page_fields():
+    s = ef.parse_13dg(COVER)
+    assert s["fields"]["aggregate_amount"] == pytest.approx(5_034_170)
+    assert s["fields"]["percent_of_class"] == pytest.approx(5.2)
+    assert s["fields"]["sole_voting"] == pytest.approx(5_034_170)
+    assert s["confidence"] == "high"
+
+
+def test_13d_percent_survives_the_row_reference():
+    """
+    The label reads "PERCENT OF CLASS REPRESENTED BY AMOUNT IN ROW (11)   5.2%".
+    A gap pattern that stops at the first digit lands on the row number.
+    """
+    assert ef.parse_13dg(COVER)["fields"]["percent_of_class"] == pytest.approx(5.2)
+
+
+def test_13d_rejects_a_word_as_a_cusip():
+    """"CUSIP Number)" followed by prose must not yield "Number" as an identifier."""
+    s = ef.parse_13dg("SCHEDULE 13D\nCUSIP Number)   David Maryles, Managing Director\n")
+    assert "cusip" not in s["fields"]
+
+
+def test_13d_extracts_purpose_of_transaction():
+    s = ef.parse_13dg(COVER)
+    assert "purpose_of_transaction" in s
+    assert "capital allocation" in s["purpose_of_transaction"]
+
+
+def test_13d_confidence_degrades_without_the_anchors():
+    partial = ef.parse_13dg("SCHEDULE 13G\n5. SOLE VOTING POWER  1,000\n")
+    assert partial["confidence"] == "medium"
+    assert ef.parse_13dg("nothing useful here")["confidence"] == "low"
+
+
+def test_13dg_xml_path():
+    xml = """<edgarSubmission><issuerName>ACME CORP</issuerName>
+      <issuerCUSIP>037833100</issuerCUSIP><aggregateAmountOwned>1234567</aggregateAmountOwned>
+      <percentOfClass>7.5</percentOfClass><soleVotingPower>1234567</soleVotingPower>
+      </edgarSubmission>"""
+    s = ef.parse_13dg(xml, is_xml=True)
+    assert s["source"] == "xml" and s["confidence"] == "high"
+    assert s["fields"]["aggregate_amount"] == pytest.approx(1_234_567)
+    assert s["fields"]["percent_of_class"] == pytest.approx(7.5)
+    assert s["issuer"] == "ACME CORP"
