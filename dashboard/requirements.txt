@@ -1,0 +1,6 @@
+pandas>=2.0.0
+numpy>=1.20.0
+plotly>=5.10.0
+streamlit>=1.25.0
+yfinance>=0.2.20
+webull-openapi-python-sdk

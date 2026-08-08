@@ -1,0 +1,23 @@
+[project]
+name = "replicant-quant-mcp"
+version = "0.2.0"
+description = "Webull OpenAPI + Yahoo Finance MCP server for market intelligence"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "fastmcp",
+    "yfinance",
+    "tabulate",
+    "lxml",
+    "html5lib",
+    "webull-openapi-python-sdk",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+dashboard = ["streamlit", "plotly"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

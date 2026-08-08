@@ -1,0 +1,26 @@
+# Credentials — never commit
+.env
+conf/token.txt
+
+# SDK logs: these have historically contained the app key, request signatures
+# and full response bodies. Keep them out of version control unconditionally.
+*.log
+*.log.*
+conf/*.log*
+
+# Local state written by the MCP tools
+dashboard/trading_journal.json
+dashboard/alerts.json
+dashboard/order_drafts.json
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Windows folder metadata
+desktop.ini
+Thumbs.db

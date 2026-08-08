@@ -1,0 +1,822 @@
+import os
+import sys
+import threading
+import datetime
+import pandas as pd
+import numpy as np
+
+try:
+    from dashboard import market_calendar
+except ImportError:  # when imported as a top-level module from dashboard/
+    import market_calendar
+
+# Load local .env variables manually to avoid extra dependencies
+def load_env(env_path=None):
+    if env_path is None:
+        # Resolve relative to this file so the package is not pinned to C:/mcp-servers
+        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        os.environ[parts[0].strip()] = parts[1].strip()
+
+load_env()
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
+WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
+WEBULL_REGION_ID = os.getenv("WEBULL_REGION_ID", "th")
+WEBULL_ENVIRONMENT = os.getenv("WEBULL_ENVIRONMENT", "prod")
+WEBULL_TOKEN_DIR = os.getenv("WEBULL_TOKEN_DIR", os.path.join(BASE_DIR, "conf"))
+
+
+# =====================================================================
+# DATA INTEGRITY ERRORS
+# =====================================================================
+# These deliberately propagate out of the MCP tools as real errors instead of
+# being flattened into a returned string. Silently handing back untrustworthy
+# market data is worse than a hard failure, because it reads as authoritative.
+
+class DataIntegrityError(RuntimeError):
+    """Market data failed a structural sanity check (ordering, NaN, OHLC bounds)."""
+
+
+class StaleDataError(DataIntegrityError):
+    """The newest bar is older than the tolerance for its interval."""
+
+
+# Mapping interval between Webull and Yahoo Finance
+INTERVAL_WEBULL_TO_YF = {
+    "M1": "1m",
+    "M5": "5m",
+    "M15": "15m",
+    "M30": "30m",
+    "H1": "1h",
+    "D": "1d",
+    "W": "1wk",
+    "M": "1mo"
+}
+
+INTERVAL_YF_TO_WEBULL = {v: k for k, v in INTERVAL_WEBULL_TO_YF.items()}
+
+# Staleness thresholds.
+#
+# Daily and slower intervals are measured in *trading sessions* using the
+# exchange calendar (see market_calendar.py), which is far tighter than a
+# calendar-day heuristic: a 5-day window had to be wide enough to absorb a
+# holiday weekend, and was therefore wide enough to hide a real 3-day outage.
+STALENESS_TOLERANCE_SESSIONS = {
+    "D": 1,    # newest completed session; today's bar does not exist until close
+    "W": 6,    # a little over one week
+    "M": 25,   # a little over one month
+}
+
+# Intraday still uses wall-clock hours -- session-counting says nothing useful
+# about a 15-minute bar. Kept loose enough to absorb a long holiday weekend.
+STALENESS_TOLERANCE_HOURS = {
+    "M1": 96,
+    "M5": 96,
+    "M15": 96,
+    "M30": 96,
+    "H1": 96,
+}
+DEFAULT_STALENESS_TOLERANCE_HOURS = 120
+
+
+def _parse_bar_times(raw: pd.Series) -> pd.Series:
+    """
+    Parse a bar-time column into tz-naive datetimes.
+
+    Handles ISO-8601 strings (what the Webull OpenAPI returns, e.g.
+    "2026-08-06T04:00:00.000+0000") and epoch milliseconds. Raises rather than
+    returning partial results: unparseable timestamps mean unorderable bars,
+    and unorderable bars are exactly how stale prices got reported as current.
+    """
+    if pd.api.types.is_numeric_dtype(raw):
+        # Epoch seconds vs milliseconds: anything past ~1e11 is milliseconds.
+        unit = "ms" if float(pd.to_numeric(raw, errors="coerce").max() or 0) > 1e11 else "s"
+        parsed = pd.to_datetime(raw, unit=unit, errors="coerce", utc=True)
+    else:
+        parsed = pd.to_datetime(raw, errors="coerce", utc=True)
+
+    if parsed.isna().any():
+        bad = raw[parsed.isna()].head(3).tolist()
+        raise DataIntegrityError(
+            f"Could not parse {int(parsed.isna().sum())} bar timestamp(s); samples: {bad}"
+        )
+
+    # Drop tz so Webull (UTC) and Yahoo (exchange-local) frames share one dtype.
+    return parsed.dt.tz_localize(None)
+
+
+def _validate_frame(df: pd.DataFrame, symbol: str, interval: str, source: str) -> pd.DataFrame:
+    """
+    Structural gate that every price frame passes through, whatever its source.
+
+    Webull and Yahoo are treated as interchangeable by every caller, but they do
+    not agree on row order or session coverage. This is the one place that
+    guarantees the contract callers actually rely on: oldest-first, newest last,
+    fresh, and numerically sane.
+    """
+    required = ["time", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise DataIntegrityError(f"{symbol}: missing column(s) {missing} from {source}")
+
+    if df.empty:
+        raise DataIntegrityError(f"{symbol}: {source} returned zero bars")
+
+    times = _parse_bar_times(df["time"])
+
+    # ---- Ordering invariant --------------------------------------------
+    # The bug this whole module exists to prevent: Webull returns bars
+    # newest-first, every consumer reads .iloc[-1] as "latest".
+    if not times.is_monotonic_increasing:
+        raise DataIntegrityError(
+            f"{symbol}: bars from {source} are not in ascending time order "
+            f"(first={times.iloc[0]}, last={times.iloc[-1]}). "
+            "Refusing to serve -- .iloc[-1] would not be the most recent bar."
+        )
+
+    # ---- Staleness ------------------------------------------------------
+    newest = times.iloc[-1]
+    iv = interval.upper()
+
+    if iv in STALENESS_TOLERANCE_SESSIONS:
+        # Session-based: exact, and immune to weekends and holidays.
+        max_sessions = STALENESS_TOLERANCE_SESSIONS[iv]
+        stale_by = market_calendar.sessions_stale(newest.date())
+        if stale_by > max_sessions:
+            raise StaleDataError(
+                f"{symbol}: newest {interval} bar is {newest:%Y-%m-%d} — "
+                f"{stale_by} trading session(s) behind, exceeding the "
+                f"{max_sessions}-session tolerance. Source: {source}. "
+                "Refusing to return stale prices."
+            )
+    else:
+        tolerance_h = STALENESS_TOLERANCE_HOURS.get(iv, DEFAULT_STALENESS_TOLERANCE_HOURS)
+        age_h = (datetime.datetime.utcnow() - newest.to_pydatetime()).total_seconds() / 3600.0
+        if age_h > tolerance_h:
+            raise StaleDataError(
+                f"{symbol}: newest {interval} bar is {newest:%Y-%m-%d %H:%M} "
+                f"({age_h / 24:.1f} days old), exceeding the {tolerance_h / 24:.1f}-day "
+                f"tolerance for this interval. Source: {source}. "
+                "Refusing to return stale prices."
+            )
+
+    # ---- Numeric sanity on the bar callers will quote -------------------
+    latest = df.iloc[-1]
+    for col in ("open", "high", "low", "close"):
+        if pd.isna(latest[col]):
+            raise DataIntegrityError(f"{symbol}: newest bar has NaN '{col}' from {source}")
+    if not (float(latest["low"]) <= float(latest["close"]) <= float(latest["high"])):
+        raise DataIntegrityError(
+            f"{symbol}: newest bar violates low<=close<=high "
+            f"(l={latest['low']}, c={latest['close']}, h={latest['high']}) from {source}"
+        )
+
+    out = df.copy()
+    out["time"] = times.dt.strftime("%Y-%m-%d %H:%M:%S")
+    return out[required].reset_index(drop=True)
+
+
+# Calendar days of history needed per bar, per interval, plus Yahoo's hard caps.
+# (Trading days are ~5/7 of calendar days, hence the 1.45x padding on intraday
+# and daily; weekly/monthly are padded generously since they are cheap.)
+_YF_PERIOD_RULES = {
+    "1m":  (1 / (60 * 6.5), "7d", 7),
+    "5m":  (5 / (60 * 6.5), "60d", 59),
+    "15m": (15 / (60 * 6.5), "60d", 59),
+    "30m": (30 / (60 * 6.5), "60d", 59),
+    "1h":  (1 / 6.5, "730d", 729),
+    "1d":  (1.45, "max", None),
+    "1wk": (7.4, "max", None),
+    "1mo": (31.5, "max", None),
+}
+
+
+def _yf_period_for(yf_interval: str, count: int) -> str:
+    """Smallest Yahoo `period` that still covers `count` bars of `yf_interval`."""
+    per_bar, max_period, cap_days = _YF_PERIOD_RULES.get(yf_interval, (1.45, "max", None))
+    # +5 bars of headroom so indicator warm-up never lands one bar short.
+    days = int((count + 5) * per_bar) + 5
+    if cap_days is not None:
+        return f"{min(days, cap_days)}d"
+    if days > 3650:
+        return max_period
+    return f"{days}d"
+
+
+def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.DataFrame:
+    """Fetch historical data from Yahoo Finance as a robust fallback."""
+    import yfinance as yf
+
+    # Map Webull interval to Yahoo Finance interval
+    yf_interval = INTERVAL_WEBULL_TO_YF.get(interval, "1d")
+
+    # Size the download to what was actually asked for. A fixed period="1y"
+    # pulled ~250 daily bars to answer a 26-bar heatmap request, and weekly and
+    # monthly asked for "max" -- full listing history -- every time.
+    period = _yf_period_for(yf_interval, count)
+
+    ticker_symbol = symbol.upper()
+    ticker = yf.Ticker(ticker_symbol)
+    df = ticker.history(period=period, interval=yf_interval)
+
+    resolved_symbol = ticker_symbol
+    if df.empty and not ticker_symbol.endswith(".BK") and WEBULL_REGION_ID.lower() == "th":
+        # Thai listings need a .BK suffix on Yahoo. Only attempt this when the
+        # account is actually a Thai one -- otherwise a mistyped US ticker can
+        # silently resolve to an unrelated Bangkok listing.
+        ticker_symbol_bk = f"{ticker_symbol}.BK"
+        ticker = yf.Ticker(ticker_symbol_bk)
+        df = ticker.history(period=period, interval=yf_interval)
+        if not df.empty:
+            resolved_symbol = ticker_symbol_bk
+
+    if df.empty:
+        raise ValueError(f"No data returned from Yahoo Finance for ticker: {symbol}")
+
+    # Standardize columns to lowercase: datetime, open, high, low, close, volume
+    # yfinance returns oldest-first, so .tail() keeps the most recent bars.
+    df = df.tail(count).reset_index()
+    df.columns = [col.lower() for col in df.columns]
+
+    if "date" in df.columns:
+        df = df.rename(columns={"date": "time"})
+    elif "datetime" in df.columns:
+        df = df.rename(columns={"datetime": "time"})
+
+    out = df[["time", "open", "high", "low", "close", "volume"]].copy()
+    # Surfaced by fetch_data so a ticker substitution is never silent.
+    out.attrs["resolved_symbol"] = resolved_symbol
+    return out
+
+
+# ---------------------------------------------------------------------
+# Webull SDK client (built once, not per request)
+# ---------------------------------------------------------------------
+# Previously an ApiClient was constructed and its loggers re-registered on every
+# single call. That re-added handlers each time, which is why conf/webull_sdk.log
+# reached 10.7 MB with lines duplicated ~20x -- and at the SDK's default DEBUG
+# level those lines contained the app key, request signatures and full response
+# bodies. One client, one handler registration, WARNING level.
+# RLock, not Lock: get_data_client() acquires this and then calls
+# get_api_client(), which acquires it again on the same thread.
+_CLIENT_LOCK = threading.RLock()
+_API_CLIENT = None
+_DATA_CLIENT = None
+
+# ---------------------------------------------------------------------
+# Request pacing
+# ---------------------------------------------------------------------
+# Tools that sweep a list -- get_sector_heatmap (11 ETFs), scan_watchlist,
+# get_multi_timeframe (3 intervals) -- fire their calls back to back and trip
+# Webull's rate limit. A 429 is not harmless here: it drops the request to the
+# Yahoo fallback, so the primary feed silently stops being the source of truth.
+# Pacing plus a bounded retry keeps requests on Webull instead.
+WEBULL_MIN_REQUEST_INTERVAL = float(os.getenv("WEBULL_MIN_REQUEST_INTERVAL", "0.25"))  # seconds
+WEBULL_MAX_RETRIES = int(os.getenv("WEBULL_MAX_RETRIES", "3"))
+WEBULL_RETRY_BACKOFF = float(os.getenv("WEBULL_RETRY_BACKOFF", "0.75"))  # seconds, doubled each retry
+
+
+class _RateLimiter:
+    """Serialises calls so that consecutive requests are at least `min_interval` apart."""
+
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self):
+        import time
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_allowed - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._next_allowed = now + self.min_interval
+
+    def penalise(self, seconds: float):
+        """Push the next allowed slot out after a rate-limit rejection."""
+        import time
+        with self._lock:
+            self._next_allowed = max(self._next_allowed, time.monotonic() + seconds)
+
+
+_RATE_LIMITER = _RateLimiter(WEBULL_MIN_REQUEST_INTERVAL)
+
+
+def _is_rate_limited(exc) -> bool:
+    if getattr(exc, "http_status", None) == 429:
+        return True
+    if str(getattr(exc, "error_code", "")).upper() == "TOO_MANY_REQUESTS":
+        return True
+    return "TOO_MANY_REQUESTS" in str(exc).upper()
+
+
+def call_webull(fn, *args, **kwargs):
+    """
+    Invoke a Webull SDK call under the shared pacing budget, retrying on 429.
+
+    Raises the final exception if every attempt is rate-limited, so the caller's
+    fallback still works -- this reduces fallbacks, it does not hide failures.
+    """
+    import time
+
+    last_exc = None
+    for attempt in range(WEBULL_MAX_RETRIES):
+        _RATE_LIMITER.acquire()
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if not _is_rate_limited(e):
+                raise
+            last_exc = e
+            backoff = WEBULL_RETRY_BACKOFF * (2 ** attempt)
+            _RATE_LIMITER.penalise(backoff)
+            print(f"Webull rate limit hit; retrying in {backoff:.2f}s "
+                  f"(attempt {attempt + 1}/{WEBULL_MAX_RETRIES})", file=sys.stderr)
+            time.sleep(backoff)
+    raise last_exc
+
+# Header values the SDK prints verbatim when it logs a request.
+_SENSITIVE_HEADERS = ("x-app-key", "x-signature", "x-access-token", "x-signature-nonce")
+
+
+class _RedactSecretsFilter:
+    """
+    Scrub credentials out of SDK log records.
+
+    Lowering the log level alone is not enough: the SDK dumps the entire signed
+    request -- app key, HMAC signature and access token -- at ERROR level
+    whenever a call fails, and routine 429s make that a frequent event.
+    """
+
+    def __init__(self, secrets=()):
+        import re
+        self._literals = [s for s in secrets if s and len(s) >= 8]
+        self._header_re = re.compile(
+            r'("(?:%s)"\s*:\s*")([^"]+)(")' % "|".join(_SENSITIVE_HEADERS),
+            re.IGNORECASE,
+        )
+
+    def _redact(self, text: str) -> str:
+        for secret in self._literals:
+            text = text.replace(secret, "***REDACTED***")
+        return self._header_re.sub(r"\1***REDACTED***\3", text)
+
+    def filter(self, record):
+        try:
+            record.msg = self._redact(record.getMessage())
+            record.args = ()
+        except Exception:
+            # Never let redaction failure drop a log record silently.
+            record.args = ()
+        return True
+
+
+def get_api_client():
+    """Build (once) and return the shared Webull ApiClient."""
+    global _API_CLIENT
+    if _API_CLIENT is not None:
+        return _API_CLIENT
+
+    with _CLIENT_LOCK:
+        if _API_CLIENT is not None:
+            return _API_CLIENT
+
+        from webull.core.client import ApiClient
+        import logging
+
+        if not WEBULL_APP_KEY or not WEBULL_APP_SECRET:
+            raise ValueError("Webull App Key and App Secret must be set in .env")
+
+        api_client = ApiClient(
+            WEBULL_APP_KEY,
+            WEBULL_APP_SECRET,
+            WEBULL_REGION_ID.lower(),
+            token_check_duration_seconds=10,
+            token_check_interval_seconds=2,
+        )
+        if WEBULL_TOKEN_DIR:
+            api_client.set_token_dir(WEBULL_TOKEN_DIR)
+
+        # WARNING, not the SDK default of DEBUG: DEBUG logs credentials.
+        api_client.set_stream_logger(log_level=logging.WARNING, stream=sys.stderr)
+        log_file = os.path.join(WEBULL_TOKEN_DIR or os.path.join(BASE_DIR, "conf"), "webull_sdk.log")
+        api_client.set_file_logger(path=log_file, log_level=logging.WARNING)
+
+        # ...and redact, because the SDK logs the signed request at ERROR too.
+        redactor = _RedactSecretsFilter((WEBULL_APP_KEY, WEBULL_APP_SECRET))
+        sdk_logger = logging.getLogger("webull.core")
+        if not any(isinstance(f, _RedactSecretsFilter) for f in sdk_logger.filters):
+            sdk_logger.addFilter(redactor)
+        for handler in sdk_logger.handlers:
+            if not any(isinstance(f, _RedactSecretsFilter) for f in handler.filters):
+                handler.addFilter(redactor)
+
+        # Setup UAT endpoints if necessary
+        if WEBULL_ENVIRONMENT.lower() == "uat":
+            from webull_openapi_mcp.sdk_client import UAT_ENDPOINTS, _API_TYPE_MAP
+            region_cfg = UAT_ENDPOINTS["region_mapping"].get(WEBULL_REGION_ID.lower())
+            if region_cfg:
+                for key, api_type in _API_TYPE_MAP.items():
+                    endpoint = region_cfg.get(key)
+                    if endpoint:
+                        api_client.add_endpoint(WEBULL_REGION_ID.lower(), endpoint, api_type)
+
+        _API_CLIENT = api_client
+        return _API_CLIENT
+
+
+def get_data_client():
+    """Shared DataClient. Constructing one per request re-runs client init and burns rate budget."""
+    global _DATA_CLIENT
+    if _DATA_CLIENT is None:
+        with _CLIENT_LOCK:
+            if _DATA_CLIENT is None:
+                from webull.data.data_client import DataClient
+                _DATA_CLIENT = DataClient(get_api_client())
+    return _DATA_CLIENT
+
+
+def get_webull_data(symbol: str, interval: str = "D", count: int = 200) -> pd.DataFrame:
+    """
+    Fetch historical data from Webull OpenAPI using SDK.
+
+    Returns bars sorted OLDEST FIRST. The API itself returns them newest-first;
+    normalising here is load-bearing, because every downstream consumer reads
+    .iloc[-1] / .tail(n) as the most recent bar.
+    """
+    data_client = get_data_client()
+
+    sym_upper = symbol.upper()
+    if sym_upper.endswith(".HK"):
+        category = "HK_STOCK"
+    elif sym_upper.endswith(".SS") or sym_upper.endswith(".SZ"):
+        category = "CN_STOCK"
+    else:
+        category = "US_STOCK"
+
+    kwargs = {
+        "symbol": sym_upper.replace(".HK", "").replace(".SS", "").replace(".SZ", ""),
+        "category": category,
+        "timespan": interval,
+        "count": str(count)
+    }
+
+    res = call_webull(data_client.market_data.get_history_bar, **kwargs)
+
+    # Extract data from SDK response wrapper or requests.Response
+    bars = None
+    if hasattr(res, "json"):
+        try:
+            bars = res.json()
+        except Exception:
+            pass
+
+    if bars is None:
+        if hasattr(res, "data") and res.data:
+            bars = res.data
+        elif isinstance(res, dict) and "data" in res:
+            bars = res["data"]
+        elif isinstance(res, list):
+            bars = res
+
+    if isinstance(bars, dict) and "data" in bars:
+        bars = bars["data"]
+
+    if not bars or not isinstance(bars, list):
+        raise ValueError(f"Failed to fetch K-Line data from Webull API: {res}")
+
+    # Format to DataFrame
+    df = pd.DataFrame(bars)
+
+    # Standardize columns to lowercase
+    df.columns = [col.lower() for col in df.columns]
+
+    # Convert numerical columns
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    required_cols = ["time", "open", "high", "low", "close", "volume"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise KeyError(f"Missing required K-Line column: {col}")
+
+    # ---- The fix -------------------------------------------------------
+    # Webull returns newest-first. Sort ascending on parsed datetimes (not on
+    # the formatted string) so that .iloc[-1] genuinely is the latest bar.
+    df["_ts"] = _parse_bar_times(df["time"])
+    df = df.sort_values("_ts", kind="mergesort").reset_index(drop=True)
+    df["time"] = df["_ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return df[required_cols]
+
+
+# Local Cache in-memory structure: { (symbol, interval, count): (timestamp, dataframe, source_name) }
+DATA_CACHE = {}
+CACHE_EXPIRATION_SECONDS = 60  # Cache lasts for 60 seconds
+
+
+def fetch_data(symbol: str, interval: str = "D", count: int = 200) -> tuple[pd.DataFrame, str]:
+    """
+    Main function to retrieve K-Line data.
+    Implements a local caching layer to avoid duplicate/frequent API pings.
+    Tries Webull OpenAPI first; if it fails (due to lack of subscription or auth),
+    automatically falls back to Yahoo Finance.
+
+    Every frame returned is guaranteed oldest-first, fresh, and numerically sane
+    (see _validate_frame). Integrity failures raise instead of returning.
+
+    Returns:
+        tuple: (DataFrame containing time/open/high/low/close/volume, data_source_name)
+    """
+    import time
+
+    cache_key = (symbol.upper(), interval.upper(), count)
+    current_time = time.time()
+
+    if cache_key in DATA_CACHE:
+        cached_time, cached_df, cached_source = DATA_CACHE[cache_key]
+        if current_time - cached_time < CACHE_EXPIRATION_SECONDS:
+            return cached_df.copy(), cached_source + " (Cached)"
+
+    # Each source is validated on its own before being accepted, so a stale or
+    # malformed Webull response can still fall back to Yahoo rather than failing
+    # the whole request. We only raise once every source has been exhausted --
+    # and if staleness is what killed them, we raise StaleDataError specifically.
+    errors = []
+
+    def _try(loader, source_label):
+        frame = loader()
+        label = source_label
+        resolved = frame.attrs.get("resolved_symbol", symbol.upper())
+        if resolved != symbol.upper():
+            label += f" [resolved as {resolved}]"
+        return _validate_frame(frame, symbol.upper(), interval, label), label
+
+    try:
+        df, source = _try(lambda: get_webull_data(symbol, interval, count), "Webull OpenAPI")
+    except Exception as e:
+        errors.append(("Webull OpenAPI", e))
+        print(f"Webull API failed for {symbol} (falling back to Yahoo Finance): {e}", file=sys.stderr)
+        try:
+            df, source = _try(lambda: get_yfinance_data(symbol, interval, count),
+                              "Yahoo Finance (Fallback)")
+        except Exception as ex:
+            errors.append(("Yahoo Finance", ex))
+            detail = "; ".join(f"{name}: {err}" for name, err in errors)
+            if any(isinstance(err, StaleDataError) for _, err in errors):
+                raise StaleDataError(
+                    f"No source returned fresh {interval} data for {symbol.upper()}. {detail}"
+                ) from ex
+            raise RuntimeError(
+                f"Both Webull API and Yahoo Finance fallback failed for {symbol}. {detail}"
+            ) from ex
+
+    # Only frames that passed validation are cached.
+    DATA_CACHE[cache_key] = (current_time, df, source)
+    return df, source
+
+
+def unwrap(res):
+    """Return the decoded payload from an SDK response wrapper."""
+    if hasattr(res, "json"):
+        try:
+            return res.json()
+        except Exception:
+            pass
+    if hasattr(res, "data"):
+        return res.data
+    return res
+
+
+# Pin a specific account when the login has more than one. Without this, a
+# second account appearing would silently change which account gets traded.
+WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID", "").strip()
+
+
+def list_accounts(trade_client) -> list:
+    """All accounts visible to these credentials, normalised to a list of dicts."""
+    accounts = unwrap(call_webull(trade_client.account_v2.get_account_list))
+    if isinstance(accounts, dict):
+        accounts = accounts.get("data", accounts.get("accounts", []))
+    return accounts or []
+
+
+def _account_id_of(account) -> str:
+    if not isinstance(account, dict):
+        return ""
+    return str(account.get("account_id") or account.get("accountId") or "")
+
+
+def get_primary_account_id(trade_client) -> str:
+    """
+    Resolve the account_id every trade endpoint requires.
+
+    The SDK's account and order methods are all account-scoped --
+    get_account_position(account_id), get_account_balance(account_id),
+    get_order_open(account_id). Calling them with no argument raises TypeError,
+    which is why the position, balance and open-order tools never worked.
+
+    With multiple accounts, refuse to guess: picking accounts[0] would quietly
+    route orders to whichever account the API happened to list first.
+    """
+    accounts = list_accounts(trade_client)
+    if not accounts:
+        raise RuntimeError("Webull returned no accounts for these credentials")
+
+    if WEBULL_ACCOUNT_ID:
+        for acct in accounts:
+            if _account_id_of(acct) == WEBULL_ACCOUNT_ID:
+                return WEBULL_ACCOUNT_ID
+        available = [_account_id_of(a) for a in accounts]
+        raise RuntimeError(
+            f"WEBULL_ACCOUNT_ID={WEBULL_ACCOUNT_ID} is not among this login's "
+            f"accounts: {available}"
+        )
+
+    if len(accounts) > 1:
+        described = ", ".join(
+            f"{_account_id_of(a)} ({a.get('account_label') or a.get('account_type', '?')})"
+            for a in accounts
+        )
+        raise RuntimeError(
+            f"This login has {len(accounts)} accounts and none is pinned. "
+            f"Set WEBULL_ACCOUNT_ID in .env to one of: {described}"
+        )
+
+    account_id = _account_id_of(accounts[0])
+    if not account_id:
+        raise RuntimeError(f"Could not find an account_id in the account list: {accounts[0]!r}")
+    return account_id
+
+
+def get_buying_power(balance, currency: str = "USD") -> float:
+    """
+    Extract buying power for a currency from an account balance payload.
+
+    Buying power is reported per currency under `account_currency_assets`; a
+    THB-denominated account holding US equities has a separate USD line. The
+    old code read a top-level `buyingPower` key that does not exist in this
+    API, so it always saw 0.
+    """
+    if not isinstance(balance, dict):
+        raise ValueError(f"Unexpected balance payload: {type(balance).__name__}")
+
+    for asset in balance.get("account_currency_assets", []) or []:
+        if str(asset.get("currency", "")).upper() == currency.upper():
+            return float(asset.get("buying_power", 0) or 0)
+
+    raise ValueError(
+        f"No {currency} buying power line in the account balance "
+        f"(currencies present: {[a.get('currency') for a in balance.get('account_currency_assets', []) or []]})"
+    )
+
+
+def get_position_quantity(positions, symbol: str) -> float:
+    """Shares held of `symbol`, from a get_account_position payload."""
+    if not isinstance(positions, list):
+        return 0.0
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        p_symbol = p.get("symbol") or (p.get("ticker") or {}).get("symbol") or ""
+        if str(p_symbol).upper() == symbol.upper():
+            return float(p.get("quantity", p.get("position", p.get("assetQuantity", 0))) or 0)
+    return 0.0
+
+
+# =====================================================================
+# ORDER CONSTRUCTION / PREVIEW / PLACEMENT
+# =====================================================================
+# The order payload below was validated field-by-field against the live
+# Webull TH preview endpoint. Notes that cost real time to discover:
+#   * order_v3 is the correct API for TH. order_v2.place_order is documented
+#     as HK/US only, and `place_stock_order` (which the dashboard called)
+#     does not exist on this SDK at all.
+#   * `entrust_type: "QTY"` is required. Omitting it returns an opaque
+#     "System error", not a helpful parameter error.
+#   * `support_trading_session` is required; "N" (regular session) is valid.
+#   * Preview does NOT enforce buying power -- it happily prices a $450,000
+#     order against a $333 account. Our own pre-trade checks are load-bearing.
+
+_ORDER_TYPE_ALIASES = {
+    "LMT": "LIMIT", "LIMIT": "LIMIT",
+    "MKT": "MARKET", "MARKET": "MARKET",
+    "STP": "STOP", "STOP": "STOP",
+}
+
+
+def build_order(symbol: str, action: str, quantity, order_type: str = "LMT",
+                limit_price=None, market: str = "US", instrument_type: str = "EQUITY",
+                time_in_force: str = "DAY", client_order_id: str = None) -> dict:
+    """Build a Webull v3 order payload. Raises ValueError on anything unsendable."""
+    import uuid
+
+    norm_type = _ORDER_TYPE_ALIASES.get(str(order_type).upper())
+    if not norm_type:
+        raise ValueError(f"Unsupported order_type {order_type!r}; use LMT/LIMIT or MKT/MARKET")
+
+    side = str(action).upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"action must be BUY or SELL, got {action!r}")
+
+    qty = float(quantity)
+    if qty <= 0:
+        raise ValueError(f"quantity must be positive, got {quantity!r}")
+
+    order = {
+        "client_order_id": client_order_id or uuid.uuid4().hex,
+        "symbol": str(symbol).upper(),
+        "instrument_type": instrument_type,
+        "market": market,
+        "order_type": norm_type,
+        "quantity": str(quantity),
+        "side": side,
+        "time_in_force": str(time_in_force).upper(),
+        "support_trading_session": "N",
+        "entrust_type": "QTY",
+    }
+
+    if norm_type == "LIMIT":
+        if limit_price is None:
+            raise ValueError("A LIMIT order requires a limit_price")
+        order["limit_price"] = f"{float(limit_price):.2f}"
+
+    return order
+
+
+def preview_order(trade_client, account_id: str, order: dict) -> dict:
+    """
+    Ask the broker to price and validate an order without placing it.
+
+    Non-binding. This is the gate every submission passes through: if the broker
+    will not preview it, we do not send it.
+    """
+    return unwrap(call_webull(trade_client.order_v3.preview_order, account_id, [order]))
+
+
+def place_order(trade_client, account_id: str, order: dict) -> dict:
+    """Submit an order for execution. Callers must preview first."""
+    return unwrap(call_webull(trade_client.order_v3.place_order, account_id, [order]))
+
+
+def get_provenance(symbol: str, interval: str = "D") -> dict:
+    """
+    Where a price came from and how fresh it was, captured at the moment of use.
+
+    Anything that records a price for later reading -- a journal thesis, an
+    alert, a triggered notification -- should store this alongside it. Had these
+    fields existed, the reversed-bar bug would have been obvious from the
+    journal alone: entries would have shown a `bar_time` ten months in the past
+    sitting next to a timestamp from today.
+    """
+    try:
+        df, source = fetch_data(symbol, interval, 5)
+        latest = df.iloc[-1]
+        return {
+            "source": base_source(source),
+            "bar_time": str(latest["time"]),
+            "bar_close": round(float(latest["close"]), 4),
+            "captured_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "interval": interval.upper(),
+        }
+    except Exception as e:
+        # Provenance is metadata; failing to capture it must never block the
+        # write it annotates. Record the failure honestly instead.
+        return {
+            "source": "UNAVAILABLE",
+            "error": str(e)[:200],
+            "captured_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "interval": interval.upper(),
+        }
+
+
+def base_source(source: str) -> str:
+    """Source label without the cache marker, so banners dedupe across cached/live hits."""
+    return source.replace(" (Cached)", "")
+
+
+def fallback_warning(source: str) -> str:
+    """
+    Banner for results not served by the primary feed.
+
+    Callers that drop the source string are how a silent source substitution
+    goes unnoticed, so make it impossible to render the data without it.
+    """
+    if source.startswith("Webull OpenAPI"):
+        return ""
+    return (
+        f"> ⚠️ **Data source: {source}** — the primary Webull feed did not serve this "
+        "request. Values may differ from the broker's own quotes.\n\n"
+    )

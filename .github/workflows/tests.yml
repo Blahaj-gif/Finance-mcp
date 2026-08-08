@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # The suite is deliberately offline: every test runs against recorded
+      # payloads or stubs, so CI never needs Webull credentials and never
+      # places an order. If a test starts needing the network, that is a bug
+      # in the test.
+      - name: Run tests
+        run: pytest -q --maxfail=1
+
+      - name: Check no credentials are committed
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|token\.txt$'; then
+            echo "::error::Credential file is tracked by git"
+            exit 1
+          fi
+          if git grep -nIE '[a-f0-9]{32}' -- '*.py' | grep -viE 'hexdigest|md5|sha|test|fixture'; then
+            echo "::error::Possible hardcoded 32-char secret in source"
+            exit 1
+          fi
+          echo "No credential files or literals tracked."
