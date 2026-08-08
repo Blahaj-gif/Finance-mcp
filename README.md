@@ -2,13 +2,13 @@
 
 A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
 
-Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 38 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 37 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
 ## ✨ Features
 * **🧠 Comprehensive AI Market Brain:** Live OHLCV, 50+ technical indicators, short interest, unusual options activity, news, earnings, insider trades, and SEC filings.
-* **⚡ Master Payload Endpoint:** `get_comprehensive_profile` fetches technicals, fundamentals, news and consensus in a single round-trip, cutting LLM latency.
+* **⚡ One-Call Company Profile:** `get_company_profile` fetches the business, filed financials, SEC filings, insider activity, short interest, price and news **concurrently** (2.3x faster than sequential), each section labelled with how much weight its numbers carry.
 * **📐 Risk Tooling:** `calculate_position_size` sizes trades from an account risk budget and an ATR-aware stop; `get_portfolio_risk` reports concentration, portfolio volatility, beta and correlated clusters; `get_options_analytics` adds IV rank, implied move, skew and Black-Scholes greeks.
 * **🛡️ Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
 * **📉 Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
@@ -24,7 +24,7 @@ Two public sources sit alongside the broker feed, so Claude can see the events t
 | Tool | What it gives you |
 |---|---|
 | `get_economic_calendar` | Scheduled US releases — CPI, PPI, jobs, JOLTS and more — with date, time and reference period, plus the latest actual prints. |
-| `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. |
+| `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. `source="markets"` gives policy rates, the yield curve and financial conditions from FRED, the ECB and the Bank of England. |
 | `get_edgar_filings` | SEC filings in three modes: one company's filings, the all-registrant live feed, or full-text search across filing bodies. |
 | `get_insider_activity` | Parsed Form 3/4/5 — who traded, at what price, **whether the sale was under a Rule 10b5-1 plan**, and opening positions. `forms="144"` gives *proposed* sales, filed ahead of the trade, with the plan-adoption date. |
 | `read_filing` | Form-aware: executive pay from a DEF 14A, the cover page of a 13D/13G, the press release from an 8-K, a named Item (Risk Factors, MD&A) from a 10-K, or a text search. |

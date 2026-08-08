@@ -3,6 +3,7 @@ import sys
 import pandas as pd
 import json
 import math
+import time
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -15,6 +16,7 @@ import dashboard.indicators as indicators
 import dashboard.econ_calendar as econ_calendar
 import dashboard.iv_history as iv_history
 import dashboard.edgar_forms as edgar_forms
+import dashboard.central_banks as central_banks
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -71,7 +73,7 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
     signal line, inside / outside its band).
 
     This is the usual starting point for a single symbol. For the full picture including
-    fundamentals, news and filings, call get_comprehensive_profile instead of chaining calls.
+    fundamentals, filings and insider activity, call get_company_profile instead of chaining calls.
 
     No BUY/SELL score is produced unless you ask for one. The composite verdict is a
     fixed-weight heuristic that underperformed buy-and-hold in backtest, and an
@@ -1279,11 +1281,8 @@ def cancel_order(order_id: str) -> str:
     except Exception as e:
         raise ToolError(f"Error cancelling order {order_id}: {e}") from e
 
-@mcp.tool()
-def get_company_profile(symbol: str) -> str:
-    """
-    Gets business description, sector, and industry background for an asset (crucial for narrative context).
-    """
+def _business_description(symbol: str) -> str:
+    """Sector, industry and business summary. A section of get_company_profile."""
     import yfinance as yf
     try:
         ticker = yf.Ticker(symbol.upper())
@@ -1408,70 +1407,145 @@ def get_sec_filings(symbol: str) -> str:
         raise ToolError(f"Error fetching SEC filings for {symbol}: {e}") from e
 
 
-PROFILE_SECTIONS = {
-    "profile":   ("Company Profile",                 lambda s: get_company_profile(s)),
-    "technicals":("Technical Indicators & Price Data", lambda s: get_technical_indicators(s)),
-    "consensus": ("Market Consensus & Adaptive Signals", lambda s: get_market_analysis(s)),
-    "short":     ("Short Interest",                  lambda s: get_short_interest(s)),
-    "news":      ("Recent News",                     lambda s: get_news(s)),
-    "earnings":  ("Earnings Calendar & Surprises",   lambda s: get_earnings(s)),
-    "insiders":  ("Insider Trading Activity",        lambda s: get_insider_trades(s)),
-    "filings":   ("SEC Filings",                     lambda s: get_sec_filings(s)),
-    "options":   ("Options Analytics",               lambda s: get_options_analytics(s)),
-    "risk":      ("Portfolio Risk",                  lambda s: get_portfolio_risk()),
-    "edgar":     ("Live SEC Filings",                lambda s: get_edgar_filings(symbol=s, form_type="8-K,10-Q,10-K", limit=8)),
-    "macro":     ("Economic Calendar & Macro",       lambda s: get_economic_calendar(21, 7)),
+# How much weight a section's numbers carry. Merging many sources into one
+# answer is only safe if this survives the merge -- otherwise a filed figure and
+# a scraped headline read identically, which is the failure the whole data
+# integrity effort exists to prevent.
+PROVENANCE = {
+    "filed":       ("📗", "Filed with the SEC — authoritative"),
+    "exact":       ("📘", "Exact parse of a filed form"),
+    "market":      ("📊", "Market data, integrity-checked"),
+    "official":    ("🏛️", "Official government statistics"),
+    "third_party": ("📙", "Third-party feed, not independently verified"),
+    "heuristic":   ("📕", "Computed estimate — verify before relying on it"),
 }
 
-DEFAULT_PROFILE_SECTIONS = ["profile", "technicals", "consensus", "short",
-                            "news", "earnings", "insiders", "filings"]
+# (title, fetch, provenance). Ordered as an analyst reads: what the company is,
+# what it reported, what insiders and owners are doing, then the market view.
+PROFILE_SECTIONS = {
+    "business":    ("Business & Description", lambda s: _business_description(s), "third_party"),
+    "financials":  ("Filed Financials", lambda s: get_company_financials(s), "filed"),
+    "earnings":    ("Earnings History & Surprises", lambda s: get_earnings(s), "third_party"),
+    "filings":     ("Recent SEC Filings", lambda s: get_edgar_filings(symbol=s, form_type="8-K,10-Q,10-K", limit=6), "exact"),
+    "insiders":    ("Insider Transactions (Form 4)", lambda s: get_insider_activity(s, limit=6), "exact"),
+    "proposed":    ("Proposed Insider Sales (Form 144)", lambda s: get_insider_activity(s, limit=5, forms="144"), "exact"),
+    "short":       ("Short Interest", lambda s: get_short_interest(s), "third_party"),
+    "price":       ("Price & Technical Indicators", lambda s: get_market_analysis(s), "market"),
+    "options":     ("Options — IV Rank & Expected Move", lambda s: get_options_analytics(s), "market"),
+    "news":        ("Recent News", lambda s: get_news(s, count=6), "third_party"),
+    "consensus":   ("Composite Verdict (heuristic)", lambda s: get_market_analysis(s, include_verdict=True), "heuristic"),
+    "technicals":  ("Raw Indicator Table", lambda s: get_technical_indicators(s), "market"),
+    "risk":        ("Your Portfolio Exposure", lambda s: get_portfolio_risk(), "market"),
+    "macro":       ("Economic Calendar", lambda s: get_economic_calendar(21, 7), "official"),
+}
+
+# "Tell me about this company" — what the company is, what it filed, what the
+# people closest to it are doing, and where it trades. Deliberately excludes
+# the heuristic verdict, the raw indicator dump, and anything about the
+# caller's own account.
+DEFAULT_PROFILE_SECTIONS = ["business", "financials", "earnings", "filings",
+                            "insiders", "short", "price", "news"]
+
+
+def _run_sections(keys, symbol, timeout=45):
+    """
+    Fetch sections concurrently.
+
+    They are independent HTTP calls to different hosts, so running them in
+    sequence spends the whole profile waiting. The per-host rate limiters stay
+    authoritative -- SEC calls still serialise at 10/s and Webull at its own
+    pace -- concurrency only overlaps the waiting between different sources.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(keys)))) as pool:
+        futures = {}
+        for key in keys:
+            title, fn, prov = PROFILE_SECTIONS[key]
+            futures[pool.submit(fn, symbol)] = key
+        for future in as_completed(futures, timeout=timeout):
+            key = futures[future]
+            try:
+                results[key] = (True, future.result())
+            except Exception as e:
+                results[key] = (False, str(e))
+    return results
 
 
 @mcp.tool()
-def get_comprehensive_profile(symbol: str, sections: str | list[str] = None) -> str:
+def get_company_profile(symbol: str, sections: str | list[str] = None,
+                        detail: str = "standard") -> str:
     """
-    Fetches a master payload for a stock in a single round-trip, instead of 8 separate calls.
-    Use this to open any analysis; reach for the individual tools only when you need
-    one specific thing or a non-default parameter.
+    Everything worth knowing about a company, in one call. Start here.
+
+    Answers "tell me about X" without the caller needing to know which of the other
+    tools to reach for: what the business is, what it filed with the SEC, what
+    insiders and the market are doing, and where the stock trades. Sections are
+    fetched concurrently, and each is labelled with how much weight its numbers
+    carry — a figure taken from a filing is not the same kind of fact as one
+    scraped from a third-party feed.
 
     Args:
-        symbol: Ticker symbol (e.g. AAPL, TSLA).
-        sections: Which sections to include, as a comma-separated string or list.
-            Defaults to the 8 core sections. Available:
-            profile, technicals, consensus, short, news, earnings, insiders,
-            filings, options (IV rank/greeks), risk (live account exposure),
-            edgar (real-time SEC filings), macro (economic calendar).
+        symbol: Ticker symbol (e.g. MU, AAPL).
+        sections: Override which sections to include, comma-separated. Available:
+            business, financials, earnings, filings, insiders, proposed, short,
+            price, options, news, consensus, technicals, risk, macro.
+        detail: "brief" (business, financials, price), "standard" (the default eight),
+            or "full" (everything, including the heuristic verdict and macro calendar).
     """
-    if sections is None:
-        wanted = list(DEFAULT_PROFILE_SECTIONS)
-    else:
-        raw = sections.split(",") if isinstance(sections, str) else list(sections)
-        wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
+    try:
+        if sections:
+            raw = sections.split(",") if isinstance(sections, str) else list(sections)
+            wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
+        elif str(detail).lower() == "brief":
+            wanted = ["business", "financials", "price"]
+        elif str(detail).lower() == "full":
+            wanted = list(PROFILE_SECTIONS)
+        else:
+            wanted = list(DEFAULT_PROFILE_SECTIONS)
 
-    unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
-    if unknown:
-        raise ToolError(
-            f"Unknown section(s) {unknown}. Available: {', '.join(PROFILE_SECTIONS)}")
+        unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
+        if unknown:
+            raise ToolError(f"Unknown section(s) {unknown}. "
+                            f"Available: {', '.join(PROFILE_SECTIONS)}")
 
-    out = f"# COMPREHENSIVE PROFILE: {symbol.upper()}\n\n"
-    failed = []
+        started = time.time()
+        results = _run_sections(wanted, symbol)
+        elapsed = time.time() - started
 
-    for n, key in enumerate(wanted, start=1):
-        title, fn = PROFILE_SECTIONS[key]
-        out += f"## {n}. {title}\n"
-        try:
-            out += fn(symbol) + "\n\n"
-        except Exception as e:
-            # Per-section isolation. The sub-tools raise ToolError now, so
-            # without this one bad section would abort the whole profile --
-            # which is the opposite of what a bundle is for.
-            failed.append(key)
-            out += f"*Unavailable: {e}*\n\n"
+        out = f"# {symbol.upper()} — Company Profile\n\n"
+        failed, used = [], []
 
-    if failed:
-        out += (f"---\n**⚠️ {len(failed)} of {len(wanted)} section(s) unavailable: "
-                f"{', '.join(failed)}.** The rest of this profile is unaffected.\n")
-    return out
+        for n, key in enumerate(wanted, start=1):
+            title, _fn, prov = PROFILE_SECTIONS[key]
+            icon, _meaning = PROVENANCE[prov]
+            ok, body = results.get(key, (False, "section did not return"))
+            out += f"## {n}. {title} {icon}\n"
+            if ok:
+                used.append(prov)
+                out += body.strip() + "\n\n"
+            else:
+                failed.append(key)
+                out += f"*Unavailable: {body}*\n\n"
+
+        # The legend covers only what actually appears above, so it stays short
+        # and every symbol in it is one the reader has just seen.
+        out += "---\n**How to weigh these figures**\n"
+        for prov in [p for p in PROVENANCE if p in used]:
+            icon, meaning = PROVENANCE[prov]
+            out += f"* {icon} {meaning}\n"
+
+        out += (f"\n*{len(wanted) - len(failed)} of {len(wanted)} sections in "
+                f"{elapsed:.1f}s, fetched concurrently.*")
+        if failed:
+            out += (f"\n\n**⚠️ Unavailable: {', '.join(failed)}.** "
+                    "The rest of this profile is unaffected.")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error building profile for {symbol}: {e}") from e
 
 
 # =====================================================================
@@ -2532,19 +2606,94 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
         raise ToolError(f"Error building economic calendar: {e}") from e
 
 
+def _render_market_series(series, count: int) -> str:
+    """Policy rates, the curve and financial conditions — FRED, ECB, BoE."""
+    keys = series.split(",") if isinstance(series, str) else list(series)
+    keys = [str(k).strip().lower() for k in keys if str(k).strip()]
+    if not keys or keys == ["cpi", "core_cpi", "unemployment"]:
+        keys = ["fed_funds", "us_2y", "us_10y", "curve_10y_2y", "ecb_deposit", "boe_bank_rate"]
+
+    unknown = [k for k in keys if k not in central_banks.SERIES]
+    if unknown:
+        raise ToolError(f"Unknown series {unknown}. "
+                        f"Available: {', '.join(central_banks.SERIES)}")
+
+    data = central_banks.fetch_series(keys, observations=max(2, count))
+
+    rows, notes, sources = [], [], set()
+    for key in keys:
+        d = data[key]
+        if d.get("error"):
+            notes.append(f"`{key}` — {d['error']}")
+            continue
+        sources.add(d["source"])
+        latest = d["latest"]
+        suffix = "%" if d["unit"] == "percent" else ""
+        rows.append({
+            "Series": d["label"][:38],
+            "Latest": f"{latest['value']:,.4g}{suffix}" if latest else "—",
+            "As of": latest["date"][:10] if latest else "—",
+            "Change": (f"{d['change']:+.4g}{suffix}" if d["change"] is not None else "—"),
+            "Source": d["source"].upper(),
+            "": "⚠️ stale" if d["stale"] else "",
+        })
+
+    if not rows:
+        raise ToolError("No series could be retrieved. " + "; ".join(notes))
+
+    table = pd.DataFrame(rows)
+    try:
+        rendered = table.to_markdown(index=False)
+    except Exception:
+        rendered = table.to_string(index=False)
+
+    out = "### Policy Rates, Curve & Financial Conditions\n\n" + rendered + "\n"
+
+    stale = [d["label"] for d in data.values() if d.get("stale")]
+    if stale:
+        out += ("\n**⚠️ Stale series:** " + "; ".join(stale) +
+                ". A discontinued series keeps returning its last value with nothing "
+                "in the response to say so — FRED still serves the Bank of England's "
+                "BOERUKM, retired in 2017.\n")
+    if notes:
+        out += "\n**Unavailable:** " + "; ".join(notes) + "\n"
+
+    out += "\n*Sources: " + ", ".join(
+        central_banks.SOURCE_LABELS.get(s, s) for s in sorted(sources)) + ".*"
+
+    status = central_banks.source_status()
+    if not central_banks.FRED_API_KEY and "fred" in sources:
+        out += f"\n*FRED: {status['fred']['note']}*"
+    if "boj_call_rate" in keys:
+        out += f"\n*Bank of Japan: {status['boj']['note']}*"
+    return out
+
+
 @mcp.tool()
 def get_macro_data(series: str | list[str] = "cpi,core_cpi,unemployment",
-                   months: int = 13) -> str:
+                   months: int = 13, source: str = "bls") -> str:
     """
     Historical macroeconomic series from the BLS with month-over-month and
     year-over-year changes — the numbers behind the inflation and labour narrative.
 
     Args:
-        series: Comma-separated keys or a list. Available: cpi, cpi_sa, core_cpi,
-            unemployment, payrolls, ppi, avg_hourly_pay, labor_force.
-        months: How many months of history to show per series (default 13, giving a full YoY view).
+        series: Comma-separated keys or a list.
+            BLS (default source): cpi, cpi_sa, core_cpi, unemployment, payrolls,
+            ppi, avg_hourly_pay, labor_force.
+            Central banks and markets (source="markets"): fed_funds,
+            fed_target_upper, ecb_deposit, ecb_refi, boe_bank_rate, boe_sonia,
+            boj_call_rate, us_2y, us_10y, us_30y, curve_10y_2y, curve_10y_3m,
+            breakeven_10y, us_cpi, us_core_pce, us_gdp_real, us_unemployment,
+            euro_hicp, dollar_index, vix, hy_spread, mortgage_30y.
+        months: How many observations to show per series (default 13).
+        source: "bls" for US labour statistics (default), or "markets" for policy
+            rates, the yield curve and financial conditions via FRED, the ECB and
+            the Bank of England.
     """
     try:
+        if str(source).lower().startswith(("market", "fred", "cb", "central")):
+            return _render_market_series(series, months)
+
         keys = series.split(",") if isinstance(series, str) else list(series)
         keys = [str(k).strip().lower() for k in keys if str(k).strip()]
 
