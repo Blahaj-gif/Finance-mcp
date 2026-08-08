@@ -27,7 +27,7 @@ from dashboard.webull_client import DataIntegrityError, StaleDataError, fallback
 HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over five indicators, not a validated edge — backtested over 250 daily bars it underperformed buy & hold on MU, SPY and NVDA. Read it as a summary of what the indicators currently say.*')
 
 # Initialize FastMCP Server
-mcp = FastMCP("Webull Enriched Market Intelligence")
+mcp = FastMCP("Finance MCP")
 
 @mcp.tool()
 def check_connection() -> str:

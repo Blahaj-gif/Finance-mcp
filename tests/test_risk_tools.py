@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import webull_enriched_mcp as srv
+import finance_mcp as srv
 from dashboard import webull_client as wc
 from fastmcp.exceptions import ToolError
 

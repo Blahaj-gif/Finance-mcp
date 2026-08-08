@@ -1,7 +1,7 @@
 [project]
-name = "replicant-quant-mcp"
+name = "finance-mcp"
 version = "0.2.0"
-description = "Webull OpenAPI + Yahoo Finance MCP server for market intelligence"
+description = "Finance MCP — market data, macro calendar, SEC filings and risk tooling for Claude"
 requires-python = ">=3.10"
 dependencies = [
     "pandas",
@@ -22,7 +22,7 @@ dashboard = ["streamlit", "plotly"]
 # `tests` into the distribution.
 [tool.setuptools]
 packages = ["dashboard"]
-py-modules = ["webull_enriched_mcp"]
+py-modules = ["finance_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

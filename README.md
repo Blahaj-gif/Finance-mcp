@@ -1,8 +1,8 @@
-# 🚀 Replicant Quant MCP
+# 📈 Finance MCP
 
-An **institutional-grade, Human-In-The-Loop (HITL) AI Quantitative Trading System** built natively for Claude Desktop. 
+A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
 
-Replicant Quant bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 35 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 35 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 

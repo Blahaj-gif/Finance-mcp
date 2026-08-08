@@ -1,7 +1,7 @@
 @echo off
-title Replicant Quant MCP Server - Automated 1-Click Installer
+title Finance MCP Server - Automated 1-Click Installer
 echo ===================================================================
-echo    Replicant Quantitative Market Intelligence & MCP Server
+echo    Finance MCP - Market Data, Macro Calendar ^& SEC Filings
 echo                   1-Click Automated Installer
 echo ===================================================================
 echo.

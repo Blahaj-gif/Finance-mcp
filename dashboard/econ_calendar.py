@@ -335,7 +335,7 @@ def fetch_release_schedule(slug):
 
     BLS_WEB_LIMITER.acquire()
     html_text = _http(BLS_SCHEDULE.format(slug=slug),
-                      headers={"User-Agent": SEC_USER_AGENT or "Replicant Quant MCP"})
+                      headers={"User-Agent": SEC_USER_AGENT or "Finance MCP"})
 
     entries = []
     for row in _ROW.findall(html_text):

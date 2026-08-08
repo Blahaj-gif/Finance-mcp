@@ -1,8 +1,8 @@
-# Replicant Quant MCP Server 1-Click Installer
+# Finance MCP Server 1-Click Installer
 $ErrorActionPreference = "Stop"
 
 Write-Host "===================================================================" -ForegroundColor Cyan
-Write-Host "   Replicant Quantitative AI Financial Intelligence Installer" -ForegroundColor Cyan
+Write-Host "   Finance MCP - Market Data, Macro & Filings Installer" -ForegroundColor Cyan
 Write-Host "===================================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -42,7 +42,7 @@ if (-not $config.mcpServers) {
 }
 
 $scriptDir = $PSScriptRoot -replace '\\','/'
-$webullConfig = [ordered]@{
+$financeConfig = [ordered]@{
     command = "uv"
     args = @(
         "run",
@@ -54,11 +54,16 @@ $webullConfig = [ordered]@{
         "--with", "lxml",
         "--with", "html5lib",
         "--with", "webull-openapi-python-sdk",
-        "$scriptDir/webull_enriched_mcp.py"
+        "$scriptDir/finance_mcp.py"
     )
 }
 
-$config.mcpServers | Add-Member -MemberType NoteProperty -Name "webull" -Value $webullConfig -Force
+# Remove the pre-rename key so the old entry does not linger alongside the new one.
+if ($config.mcpServers.PSObject.Properties.Name -contains "webull") {
+    $config.mcpServers.PSObject.Properties.Remove("webull")
+    Write-Host "  -> Removed legacy 'webull' server entry." -ForegroundColor DarkGray
+}
+$config.mcpServers | Add-Member -MemberType NoteProperty -Name "finance" -Value $financeConfig -Force
 $config | ConvertTo-Json -Depth 100 | Set-Content $claudeConfigFile -Encoding UTF8
 Write-Host "  -> Successfully configured Claude Desktop config: $claudeConfigFile" -ForegroundColor Green
 
@@ -72,8 +77,19 @@ WEBULL_APP_KEY=YOUR_WEBULL_APP_KEY_HERE
 WEBULL_APP_SECRET=YOUR_WEBULL_APP_SECRET_HERE
 WEBULL_REGION_ID=th
 WEBULL_ENVIRONMENT=prod
+# Pin this if your login has more than one account; the server refuses to guess.
+# WEBULL_ACCOUNT_ID=
+
+# --- Public data sources ---
+# SEC EDGAR has no API key, but its fair-access policy requires a real contact
+# address. The filings tools will not send requests without this.
+SEC_USER_AGENT=Your Name (you@example.com)
+
+# Optional. BLS allows 25 queries/day with no key; a free key at
+# https://data.bls.gov/registrationEngine/ raises it to 500/day.
+BLS_API_KEY=
 "@ | Set-Content $envFile -Encoding UTF8
-    Write-Host "  -> Created $envFile template. Please add your Webull keys here." -ForegroundColor Green
+    Write-Host "  -> Created $envFile template. Add your Webull keys and SEC_USER_AGENT contact address here." -ForegroundColor Green
 } else {
     Write-Host "[2.5] .env configuration file already exists. Skipping." -ForegroundColor Green
 }
@@ -96,7 +112,7 @@ Write-Host ""
 Write-Host "===================================================================" -ForegroundColor Green
 Write-Host " 🎉 INSTALLATION SUCCESSFUL!" -ForegroundColor Green
 Write-Host "===================================================================" -ForegroundColor Green
-Write-Host " 1. Restart your Claude Desktop app to load all 25 MCP tools." -ForegroundColor White
+Write-Host " 1. Restart your Claude Desktop app to load all 35 MCP tools." -ForegroundColor White
 Write-Host " 2. Double-click 'MCP Dashboard' on Desktop." -ForegroundColor White
 Write-Host "    (Includes interactive charts, forecasts, backtester & background alerts)." -ForegroundColor Gray
 Write-Host " ☕ Support Open Source: https://github.com/sponsors" -ForegroundColor Cyan
