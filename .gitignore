@@ -25,3 +25,6 @@ venv/
 desktop.ini
 Thumbs.db
 iv_history.json
+
+# Streamlit local secrets (config.toml is committed; secrets.toml never is)
+.streamlit/secrets.toml

@@ -166,9 +166,20 @@ with st.sidebar.expander("Bands & Channels"):
     dc_len = st.number_input("Donchian Channels Period", min_value=1, max_value=100, value=20)
     vwap_std = st.number_input("VWAP Band Std Dev", min_value=0.5, max_value=5.0, value=2.0, step=0.1)
 
-with st.sidebar.expander("SuperTrend & Trend"):
-    st_len = st.number_input("SuperTrend Period", min_value=1, max_value=100, value=10)
+# NOTE: a second "SuperTrend & Trend" expander used to sit here with the same
+# two widgets as the "SuperTrend & Ichimoku" block below. Streamlit derives a
+# widget's identity from its type and parameters, so two identical number_inputs
+# collide on the same auto-generated ID and raise StreamlitDuplicateElementId --
+# which crashed the whole dashboard on load, before a single tab rendered. The
+# duplicate also shadowed st_len/st_mult, so the first pair never took effect.
+
+
+with st.sidebar.expander("SuperTrend & Ichimoku"):
+    st_len = st.number_input("SuperTrend ATR Period", min_value=1, max_value=50, value=10)
     st_mult = st.number_input("SuperTrend Multiplier", min_value=0.5, max_value=10.0, value=3.0, step=0.1)
+    ich_conv = st.number_input("Ichimoku Conversion Period", min_value=1, max_value=50, value=9)
+    ich_base = st.number_input("Ichimoku Base Period", min_value=1, max_value=100, value=26)
+    ich_span_b = st.number_input("Ichimoku Span B Period", min_value=1, max_value=200, value=52)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
@@ -184,12 +195,6 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
-with st.sidebar.expander("SuperTrend & Ichimoku"):
-    st_len = st.number_input("SuperTrend ATR Period", min_value=1, max_value=50, value=10)
-    st_mult = st.number_input("SuperTrend Multiplier", min_value=0.5, max_value=10.0, value=3.0, step=0.1)
-    ich_conv = st.number_input("Ichimoku Conversion Period", min_value=1, max_value=50, value=9)
-    ich_base = st.number_input("Ichimoku Base Period", min_value=1, max_value=100, value=26)
-    ich_span_b = st.number_input("Ichimoku Span B Period", min_value=1, max_value=200, value=52)
 
 # Load Data
 try:
@@ -888,45 +893,64 @@ with tab_portfolio:
         import webull_client
         import sys
         
-        api_client = ApiClient(
-            webull_client.WEBULL_APP_KEY,
-            webull_client.WEBULL_APP_SECRET,
-            webull_client.WEBULL_REGION_ID.lower(),
-        )
-        if webull_client.WEBULL_TOKEN_DIR:
-            api_client.set_token_dir(webull_client.WEBULL_TOKEN_DIR)
-            
-        trade_client = TradeClient(api_client)
-        
+        # Shared, paced, credential-redacting client — the same one the MCP
+        # server uses, rather than a second ApiClient built per page render.
+        trade_client = TradeClient(webull_client.get_api_client())
+
+        # Every one of these endpoints is account-scoped. The bare calls that
+        # used to be here raised TypeError, so this panel only ever showed
+        # "Failed to fetch Webull account data".
+        account_id = webull_client.get_primary_account_id(trade_client)
+        acc_list = webull_client.unwrap(webull_client.call_webull(
+            trade_client.account_v2.get_account_list))
+        balances = webull_client.unwrap(webull_client.call_webull(
+            trade_client.account_v2.get_account_balance, account_id))
+        positions = webull_client.unwrap(webull_client.call_webull(
+            trade_client.account_v2.get_account_position, account_id))
+
+        # Balances are reported per currency; `buyingPower` never existed on
+        # this API. Net liquidation is market value plus cash.
+        net_liq = float(balances.get("total_market_value", 0) or 0) + \
+            float(balances.get("total_cash_balance", 0) or 0)
+        day_pnl = float(balances.get("total_unrealized_profit_loss", 0) or 0)
         try:
-            # Try newer SDK methods
-            acc_list = trade_client.account_v2.get_account_list()
-            balances = trade_client.account_v2.get_account_balance()
-            positions = trade_client.account_v2.get_account_positions()
-        except AttributeError:
-            # Fallback to older SDK
-            acc_list = trade_client.account.get_account_list()
-            balances = trade_client.account.get_account_balance()
-            positions = trade_client.account.get_account_positions()
-            
-        # Extract metrics safely (keys vary heavily between versions, so we use string representation dumping or safe gets)
-        net_liq = balances.get("netLiquidation", 0) if isinstance(balances, dict) else getattr(balances, "netLiquidation", "N/A")
-        day_pnl = balances.get("dayPnL", 0) if isinstance(balances, dict) else getattr(balances, "dayPnL", "N/A")
-        buying_power = balances.get("buyingPower", 0) if isinstance(balances, dict) else getattr(balances, "buyingPower", "N/A")
+            buying_power = webull_client.get_buying_power(balances, "USD")
+        except Exception:
+            buying_power = 0.0
+        currency = balances.get("total_asset_currency", "")
         
         mcol1, mcol2, mcol3 = st.columns(3)
         with mcol1:
-            st.metric("Net Liquidation", f"${net_liq}")
+            st.metric(f"Net Liquidation ({currency})", f"{net_liq:,.2f}")
         with mcol2:
-            st.metric("Day P&L", f"${day_pnl}")
+            st.metric("Unrealised P&L", f"{day_pnl:,.2f}",
+                      delta=f"{day_pnl:,.2f}", delta_color="normal")
         with mcol3:
-            st.metric("Buying Power", f"${buying_power}")
-            
+            st.metric("Buying Power (USD)", f"${buying_power:,.2f}",
+                      help="Buying power is reported per currency; this is the USD line.")
+
         st.markdown("#### Open Positions")
         if not positions:
-            st.info("No open positions found in this account.")
+            st.info("No open positions in this account.")
         else:
-            st.json(positions)
+            # A table beats a JSON dump for something read at a glance.
+            prows = []
+            for p in positions:
+                qty = float(p.get("quantity", 0) or 0)
+                cost = float(p.get("cost_price", 0) or 0)
+                last = float(p.get("last_price", 0) or 0)
+                prows.append({
+                    "Symbol": p.get("symbol", "—"),
+                    "Quantity": qty,
+                    "Cost": cost,
+                    "Last": last,
+                    "Value": qty * last,
+                    "P&L": (last - cost) * qty,
+                    "P&L %": ((last - cost) / cost * 100) if cost else 0.0,
+                })
+            st.dataframe(pd.DataFrame(prows), use_container_width=True, hide_index=True)
+            with st.expander("Raw broker payload"):
+                st.json(positions)
             
     except Exception as e:
         st.error(f"Failed to fetch Webull account data: {str(e)}")

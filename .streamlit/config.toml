@@ -1,0 +1,19 @@
+# Without this the app renders half-dark: the custom CSS in app.py styles the
+# main pane, but Streamlit's own chrome — the sidebar, widget labels, inputs —
+# falls back to the default light theme. Setting the base here makes the whole
+# surface consistent instead of leaving a white sidebar against a navy body.
+
+[theme]
+base = "dark"
+primaryColor = "#38BDF8"          # cyan accent, matches the headings
+backgroundColor = "#0F172A"       # slate-900, the main pane
+secondaryBackgroundColor = "#1E293B"  # slate-800, sidebar and cards
+textColor = "#E2E8F0"
+font = "sans serif"
+
+[server]
+headless = true
+fileWatcherType = "auto"
+
+[browser]
+gatherUsageStats = false
