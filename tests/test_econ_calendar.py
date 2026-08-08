@@ -451,3 +451,58 @@ def test_cross_check_ignores_fields_with_nothing_to_compare(monkeypatch):
     _stub_xbrl(monkeypatch)
     assert ec.cross_check_fundamentals("MU", {"revenue": 123}) == []
     assert ec.cross_check_fundamentals("MU", {"shares_outstanding": None}) == []
+
+
+# =====================================================================
+# Transient upstream failures
+# =====================================================================
+
+def test_transient_5xx_is_retried(monkeypatch):
+    """
+    BLS, FRED and EDGAR all return an occasional 503. One attempt makes a sound
+    tool look unreliable -- a live probe lost an entire economic calendar to one.
+    """
+    import urllib.error
+    calls = {"n": 0}
+
+    class FakeResp:
+        headers = {}
+        def read(self): return b'{"ok":true}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", None, None)
+        return FakeResp()
+
+    monkeypatch.setattr(ec.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+    assert ec._http("https://example.gov/x") == '{"ok":true}'
+    assert calls["n"] == 3
+
+
+def test_client_errors_are_not_retried(monkeypatch):
+    """A 404 is our mistake and will fail identically three times."""
+    import urllib.error
+    calls = {"n": 0}
+
+    def not_found(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(ec.urllib.request, "urlopen", not_found)
+    with pytest.raises(urllib.error.HTTPError):
+        ec._http("https://example.gov/missing")
+    assert calls["n"] == 1
+
+
+def test_retries_give_up_and_raise(monkeypatch):
+    import urllib.error
+    def always_down(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "down", None, None)
+    monkeypatch.setattr(ec.urllib.request, "urlopen", always_down)
+    monkeypatch.setattr(ec.time, "sleep", lambda s: None)
+    with pytest.raises(urllib.error.HTTPError):
+        ec._http("https://example.gov/x")

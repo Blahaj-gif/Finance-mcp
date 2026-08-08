@@ -2571,8 +2571,17 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
             out += "*No scheduled releases in this window.*\n"
 
         if include_latest_data:
-            data = econ_calendar.fetch_bls_series(
-                ["cpi", "core_cpi", "unemployment", "payrolls", "ppi"])
+            # Isolated from the schedule above. A transient 503 on the data API
+            # used to discard a calendar that had already been fetched
+            # successfully -- one flaky call taking down an unrelated answer.
+            try:
+                data = econ_calendar.fetch_bls_series(
+                    ["cpi", "core_cpi", "unemployment", "payrolls", "ppi"])
+            except Exception as e:
+                data = None
+                out += f"\n*Latest prints unavailable: {str(e)[:120]}*\n"
+
+        if include_latest_data and data:
             out += "\n**Latest prints**\n\n"
             drows = []
             for key, series in data.items():

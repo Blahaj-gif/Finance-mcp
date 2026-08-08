@@ -133,9 +133,28 @@ def _http(url, data=None, headers=None, timeout=30):
     import zlib
 
     req = urllib.request.Request(url, data=data, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-        encoding = (resp.headers.get("Content-Encoding") or "").lower()
+
+    # Public statistical endpoints flap. BLS, FRED and EDGAR all return a
+    # transient 5xx often enough that a single attempt makes an otherwise sound
+    # tool look unreliable. Retry those; never retry a 4xx, which is our fault
+    # and will fail identically.
+    last_error = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                encoding = (resp.headers.get("Content-Encoding") or "").lower()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise
+            last_error = e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_error = e
+        if attempt < 2:
+            time.sleep(0.6 * (2 ** attempt))
+    else:
+        raise last_error
 
     if "gzip" in encoding:
         raw = gzip.decompress(raw)
