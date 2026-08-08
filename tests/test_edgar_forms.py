@@ -214,3 +214,108 @@ def test_8k_item_codes_are_named():
     described = ef.describe_8k_items("2.02,9.01")
     assert any("Results of operations" in d for d in described)
     assert any("Financial statements" in d for d in described)
+
+
+# =====================================================================
+# Prose sections: boundaries are heuristic, and must say so
+# =====================================================================
+
+TENK = """
+TABLE OF CONTENTS
+Item 1. Business 3
+Item 1A. Risk Factors 12
+Item 3. Legal Proceedings 40
+Item 7. Management's Discussion 50
+
+ITEM 1. BUSINESS
+We make memory. """ + ("Business detail. " * 200) + """
+See Item 1A. Risk Factors for a discussion of these potential impacts.
+
+ITEM 1A. RISK FACTORS
+""" + ("A risk we face. " * 500) + """
+
+ITEM 3. LEGAL PROCEEDINGS
+For a discussion see Item 8.
+
+ITEM 7. MANAGEMENT'S DISCUSSION
+""" + ("Revenue rose. " * 300)
+
+
+def test_section_extraction_finds_the_real_heading_not_a_cross_reference():
+    """
+    "See Item 1A. Risk Factors for a discussion..." sits mid-sentence inside
+    Item 1. Latching onto it starts the section in the wrong place.
+    """
+    body, meta = ef.extract_section(TENK, "1A", budget=50_000)
+    assert meta["found"] and meta["confidence"] == "high"
+    assert body.startswith("ITEM 1A. RISK FACTORS")
+    assert "A risk we face." in body
+    assert "We make memory" not in body
+
+
+def test_section_stops_at_the_next_item():
+    body, _ = ef.extract_section(TENK, "1A", budget=50_000)
+    assert "LEGAL PROCEEDINGS" not in body
+
+
+def test_table_of_contents_entries_are_not_chosen():
+    body, _ = ef.extract_section(TENK, "7", budget=50_000)
+    assert body.startswith("ITEM 7.")
+    assert "Revenue rose." in body
+
+
+def test_budget_truncates_and_reports_it():
+    body, meta = ef.extract_section(TENK, "1A", budget=300)
+    assert len(body) <= 300
+    assert meta["truncated"] is True
+    assert meta["full_length"] > 300
+
+
+def test_short_section_is_flagged_low_confidence():
+    """Item 3 here is a one-line cross-reference — real, but worth a caveat."""
+    _, meta = ef.extract_section(TENK, "3", budget=5000)
+    assert meta["found"] and meta["confidence"] == "low"
+
+
+def test_missing_section_is_reported_not_guessed():
+    body, meta = ef.extract_section(TENK, "9A")
+    assert body is None and meta["found"] is False
+
+
+def test_search_returns_bounded_windows():
+    hits = ef.search_filing(TENK, "memory", window=100, max_hits=3)
+    assert hits and len(hits) <= 3
+    assert all(len(h["excerpt"]) <= 140 for h in hits)
+
+
+def test_html_flattening_drops_markup_and_scripts():
+    raw = "<html><script>var x=1;</script><style>p{}</style><p>Hello&nbsp;World</p></html>"
+    out = ef.html_to_text(raw)
+    assert "Hello World" in out
+    assert "var x" not in out and "p{}" not in out
+
+
+# =====================================================================
+# 13F
+# =====================================================================
+
+INFOTABLE = """<informationTable>
+ <infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
+  <cusip>037833100</cusip><value>20000000</value>
+  <shrsOrPrnAmt><sshPrnamt>80000000</sshPrnamt></shrsOrPrnAmt></infoTable>
+ <infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
+  <cusip>037833100</cusip><value>15000000</value>
+  <shrsOrPrnAmt><sshPrnamt>61000000</sshPrnamt></shrsOrPrnAmt></infoTable>
+ <infoTable><nameOfIssuer>COCA COLA CO</nameOfIssuer><titleOfClass>COM</titleOfClass>
+  <cusip>191216100</cusip><value>30000000</value>
+  <shrsOrPrnAmt><sshPrnamt>400000000</sshPrnamt></shrsOrPrnAmt></infoTable>
+</informationTable>"""
+
+
+def test_13f_parses_every_row():
+    rows = ef.parse_13f(INFOTABLE)
+    assert len(rows) == 3
+    assert rows[0]["issuer"] == "APPLE INC"
+    assert rows[0]["cusip"] == "037833100"
+    assert rows[0]["value"] == pytest.approx(20_000_000)
+    assert rows[0]["shares"] == pytest.approx(80_000_000)

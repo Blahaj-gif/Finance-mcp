@@ -2031,6 +2031,124 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
 
 
 @mcp.tool()
+def read_filing(symbol: str, form: str = "10-K", section: str = None,
+                query: str = None, budget: int = 6000) -> str:
+    """
+    Read a named section out of a company's latest filing, or search its text.
+
+    Filings are far too large to hand over whole — a Micron 10-K is ~610,000 tokens
+    raw and ~97,000 after stripping markup — so this locates what you asked for and
+    returns it under a character budget.
+
+    Args:
+        symbol: Ticker symbol (e.g. MU, AAPL).
+        form: Filing type — 10-K, 10-Q, 8-K, S-1, DEF 14A.
+        section: Item number to extract: 1 (Business), 1A (Risk Factors), 3 (Legal),
+            7 (MD&A), 7A (Market Risk), 8 (Financial Statements), 9A (Controls).
+        query: Instead of a section, return excerpts around each match of this phrase.
+        budget: Maximum characters of section text to return (default 6000).
+    """
+    try:
+        filings = econ_calendar.company_filings(symbol, forms=[form], limit=1)
+        if not filings:
+            raise ToolError(f"No {form} filing found for {symbol.upper()}.")
+        f = filings[0]
+        cik = econ_calendar.ticker_to_cik(symbol)["cik"]
+        text = edgar_forms.fetch_filing_text(cik, f["accession"], f.get("primary_document"))
+
+        head = (f"### {f['company']} — {f['form']} filed {f['filing_date']}\n"
+                f"*Accepted {f['acceptance'][:19].replace('T', ' ')} · "
+                f"[source]({f['url']}) · {len(text):,} chars of text*\n\n")
+
+        if query:
+            hits = edgar_forms.search_filing(text, query, window=600, max_hits=6)
+            if not hits:
+                return head + f"*No occurrence of \"{query}\" in this filing.*"
+            out = head + f"**{len(hits)} excerpt(s) around \"{query}\"**\n\n"
+            for i, h in enumerate(hits, 1):
+                out += f"{i}. …{h['excerpt']}…\n\n"
+            return out
+
+        if not section:
+            if f["form"].upper().startswith("8-K"):
+                items = edgar_forms.describe_8k_items(f.get("items", ""))
+                out = head + ("**Reported items**\n" + "\n".join(f"* {i}" for i in items) + "\n\n"
+                              if items else "")
+                return out + "**Opening text**\n\n" + text[:budget]
+            available = ", ".join(f"{k} ({v})" for k, v in edgar_forms.FILING_SECTIONS.items())
+            return head + f"*Pass `section` to extract one, or `query` to search.*\n\nAvailable: {available}"
+
+        body, meta = edgar_forms.extract_section(text, section, budget=budget)
+        if not meta["found"]:
+            return head + (f"*{meta['reason']}. Available sections in a 10-K: "
+                           f"{', '.join(edgar_forms.FILING_SECTIONS)}*")
+
+        title = edgar_forms.FILING_SECTIONS.get(section.upper(), "")
+        out = head + f"#### Item {section.upper()} — {title}\n\n{body}\n"
+        if meta["truncated"]:
+            out += (f"\n*Truncated: showing {budget:,} of {meta['full_length']:,} characters. "
+                    "Raise `budget` or use `query` to search within it.*")
+        if meta["confidence"] == "low":
+            out += ("\n\n*⚠️ Low confidence in the section boundary — this filer's headings did not "
+                    f"match cleanly ({meta['candidates']} candidate heading(s), "
+                    f"basis: {meta['boundary_basis']}). Verify against the source link.*")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error reading {form} for {symbol}: {e}") from e
+
+
+@mcp.tool()
+def get_institutional_holdings(institution: str, limit: int = 25) -> str:
+    """
+    Latest 13F-HR portfolio for an institutional manager — every reported position,
+    largest first. Accepts a ticker (BRK-B) or a raw CIK (1067983).
+
+    Positions are merged across the manager rows a fund files separately: Berkshire
+    reports Apple across 12 rows, and reading only the first understates the holding
+    threefold.
+
+    Args:
+        institution: Ticker or CIK of the filer (e.g. 1067983 for Berkshire Hathaway).
+        limit: How many positions to show (default 25).
+    """
+    try:
+        data = edgar_forms.institutional_holdings(institution, limit=limit)
+        if not data["holdings"]:
+            return f"### {data['institution']}\n\n*No holdings in the latest 13F-HR.*"
+
+        total = data["total_value"] or 1
+        rows = [{
+            "Issuer": h["issuer"][:30],
+            "Value": f"${h['value']:,.0f}" if h["value"] else "—",
+            "Weight": f"{(h['value'] or 0) / total * 100:.2f}%",
+            "Shares": f"{h['shares']:,.0f}" if h["shares"] else "—",
+            "Type": h.get("put_call") or "common",
+            "CUSIP": h["cusip"],
+        } for h in data["holdings"]]
+
+        table = pd.DataFrame(rows)
+        try:
+            table_str = table.to_markdown(index=False)
+        except Exception:
+            table_str = table.to_string(index=False)
+
+        shown = sum(h["value"] or 0 for h in data["holdings"])
+        return (f"### 13F Holdings — {data['institution']}\n"
+                f"*Quarter ending {data['period']} · filed {data['filed']} · "
+                f"{data['positions']} positions · **${data['total_value']:,.0f}** total*\n\n"
+                + table_str
+                + f"\n\n*Top {len(rows)} shown = {shown / total * 100:.1f}% of reported value. "
+                  "13F covers US-listed long equity and options only — it excludes cash, bonds, "
+                  "shorts and foreign listings, so it is not the whole portfolio.*")
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error fetching 13F holdings for {institution}: {e}") from e
+
+
+@mcp.tool()
 def get_data_sources() -> str:
     """
     Configuration and remaining quota for every external data source, plus how to

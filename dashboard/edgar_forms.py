@@ -290,6 +290,236 @@ def summarise_insider_flow(reports: list) -> dict:
     }
 
 
+# =====================================================================
+# PROSE FILINGS — SECTION EXTRACTION
+# =====================================================================
+# 10-K and 10-Q bodies are HTML, not data. A Micron 10-K is 2.4 MB raw and
+# still ~97,000 tokens once tags are stripped -- half a context window for one
+# document. So sections are located and returned under a character budget.
+#
+# Boundary detection is genuinely heuristic and is reported as such: "Item 1A"
+# occurs eight times in a typical 10-K (table of contents, the section itself,
+# and cross-references), and filers punctuate the headings inconsistently.
+
+FILING_SECTIONS = {
+    "1":   "Business",
+    "1A":  "Risk Factors",
+    "1B":  "Unresolved Staff Comments",
+    "2":   "Properties",
+    "3":   "Legal Proceedings",
+    "5":   "Market for Registrant's Common Equity",
+    "7":   "Management's Discussion and Analysis",
+    "7A":  "Quantitative and Qualitative Disclosures About Market Risk",
+    "8":   "Financial Statements and Supplementary Data",
+    "9A":  "Controls and Procedures",
+}
+
+_ITEM_ORDER = ["1", "1A", "1B", "2", "3", "4", "5", "6", "7", "7A", "8", "9", "9A", "9B", "10", "11", "12", "13", "14", "15"]
+
+
+def html_to_text(raw: str) -> str:
+    """Flatten filing HTML to readable text, dropping scripts, styles and markup."""
+    import html as _html
+    txt = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.S | re.I)
+    txt = re.sub(r"<(br|/p|/div|/tr|/h\d)[^>]*>", "\n", txt, flags=re.I)
+    txt = re.sub(r"<[^>]+>", " ", txt)
+    txt = _html.unescape(txt)
+    txt = txt.replace(" ", " ")
+    txt = re.sub(r"[ \t]+", " ", txt)
+    return re.sub(r"\n\s*\n+", "\n\n", txt).strip()
+
+
+def _item_positions(text: str, code: str, headings_only: bool = False):
+    """
+    Offsets where 'Item <code>' appears, punctuation-agnostic.
+
+    With `headings_only`, keep just the occurrences that look like a real
+    heading: at the start of a line and set in capitals. Filings cross-reference
+    each other constantly ("see Item 1A. Risk Factors for a discussion..."), and
+    those references sit mid-sentence in mixed case.
+    """
+    pattern = rf"item\s*{re.escape(code)}\s*[\.\)\:\-–—]?\s"
+    out = []
+    for m in re.finditer(pattern, text, re.I):
+        if headings_only:
+            line_start = text.rfind("\n", 0, m.start())
+            if m.start() - line_start > 3:          # not at the start of a line
+                continue
+            if not m.group(0).strip().startswith(("ITEM", "Item")):
+                continue
+            if m.group(0)[:4] != "ITEM":            # real headings are capitalised
+                continue
+        out.append(m.start())
+    return out
+
+
+def extract_section(text: str, code: str, budget: int = 8000):
+    """
+    Pull one Item out of a flattened filing.
+
+    Chooses between candidate headings by span: table-of-contents entries sit
+    adjacent to one another, while the real section runs for thousands of
+    characters before the next Item. The longest span wins.
+
+    Returns (section_text, meta) where meta records how confident that choice
+    is and whether the text was truncated.
+    """
+    code = code.upper().strip()
+
+    # Prefer true headings; fall back to any mention if the filer does not
+    # capitalise them, and say which was used.
+    starts = _item_positions(text, code, headings_only=True)
+    strict = bool(starts)
+    if not starts:
+        starts = _item_positions(text, code)
+    if not starts:
+        return None, {"found": False, "reason": f"No 'Item {code}' heading found"}
+
+    try:
+        following = _ITEM_ORDER[_ITEM_ORDER.index(code) + 1:]
+    except ValueError:
+        following = []
+
+    best, best_span = None, -1
+    for s in starts:
+        # The guard only needs to clear the heading line itself. Setting it too
+        # wide (200 chars) discarded a genuinely adjacent next Item, so a short
+        # section -- a one-line legal cross-reference, say -- ran on to the end
+        # of the document.
+        ends = [p for nxt in following
+                for p in _item_positions(text, nxt, headings_only=strict) if p > s + 40]
+        end = min(ends) if ends else min(s + budget * 4, len(text))
+        if end - s > best_span:
+            best, best_span = (s, end), end - s
+
+    if best is None:
+        return None, {"found": False, "reason": "Could not bound the section"}
+
+    start, end = best
+    body = text[start:end].strip()
+    truncated = len(body) > budget
+    return (body[:budget], {
+        "found": True,
+        "candidates": len(starts),
+        "full_length": len(body),
+        "truncated": truncated,
+        "matched_heading": nz.normalize_text(body[:70]),
+        "boundary_basis": "capitalised headings" if strict else "any mention (filer did not capitalise headings)",
+        "confidence": "high" if (strict and best_span > 3000) else "low",
+    })
+
+
+def search_filing(text: str, query: str, window: int = 500, max_hits: int = 6):
+    """Keyword windows out of a filing, for questions a section boundary will not answer."""
+    hits = []
+    for m in re.finditer(re.escape(query), text, re.I):
+        a = max(0, m.start() - window // 2)
+        hits.append({"offset": m.start(),
+                     "excerpt": nz.normalize_text(text[a:a + window])})
+        if len(hits) >= max_hits:
+            break
+    return hits
+
+
+def fetch_filing_text(cik: str, accession: str, primary_document: str) -> str:
+    """Download a filing's primary document and flatten it to text."""
+    base = _filing_dir(cik, accession)
+    name = (primary_document or "").rsplit("/", 1)[-1]
+    if not name:
+        listing = _fetch(f"{base}/")
+        docs = re.findall(r'href="([^"]+\.(?:htm|html|txt))"', listing, re.I)
+        if not docs:
+            raise ValueError(f"No readable document in {base}")
+        name = docs[0].rsplit("/", 1)[-1]
+    return html_to_text(_fetch(f"{base}/{name}"))
+
+
+# =====================================================================
+# 13F — INSTITUTIONAL HOLDINGS
+# =====================================================================
+
+def parse_13f(xml: str) -> list:
+    """Holdings from a 13F information table. Fully structured; no guessing needed."""
+    rows = []
+    for block in _blocks(xml, "infoTable"):
+        rows.append({
+            "issuer": _text(block, "nameOfIssuer", ""),
+            "class": _text(block, "titleOfClass", ""),
+            "cusip": _text(block, "cusip", ""),
+            "value": nz.parse_number(_text(block, "value")),
+            "shares": nz.parse_number(_text(block, "sshPrnamt")),
+            "share_type": _text(block, "sshPrnamtType", ""),
+            "put_call": _text(block, "putCall", ""),
+            "discretion": _text(block, "investmentDiscretion", ""),
+        })
+    return rows
+
+
+def institutional_holdings(symbol_or_cik: str, limit: int = 25) -> dict:
+    """
+    Latest 13F-HR holdings for an institution, largest position first.
+
+    `value` is reported in whole dollars on modern filings; older ones used
+    thousands, so the total is sanity-checked rather than assumed.
+    """
+    ident = str(symbol_or_cik).strip()
+    if ident.isdigit():
+        cik, name = ident.zfill(10), f"CIK {ident}"
+    else:
+        info = ec.ticker_to_cik(ident)
+        cik, name = info["cik"], info["title"]
+
+    filings = ec.company_filings(ident if not ident.isdigit() else ident,
+                                 forms=["13F-HR"], limit=1) if not ident.isdigit() else []
+    if not filings:
+        ec.SEC_LIMITER.acquire()
+        payload = json.loads(ec._http(
+            f"https://data.sec.gov/submissions/CIK{cik}.json", headers=ec._sec_headers()))
+        name = nz.normalize_text(payload.get("name", name))
+        recent = payload.get("filings", {}).get("recent", {})
+        filings = []
+        for i in range(len(recent.get("form", []))):
+            if recent["form"][i].upper() == "13F-HR":
+                filings = [{"accession": recent["accessionNumber"][i],
+                            "filing_date": recent["filingDate"][i],
+                            "report_date": recent.get("reportDate", [""] * (i + 1))[i]}]
+                break
+
+    if not filings:
+        raise ValueError(f"No 13F-HR filing found for {symbol_or_cik}")
+
+    f = filings[0]
+    base = _filing_dir(cik, f["accession"])
+    listing = _fetch(f"{base}/")
+    xmls = [x for x in re.findall(r'href="([^"]+\.xml)"', listing)
+            if "primary_doc" not in x.lower() and "xsl" not in x.lower()]
+    if not xmls:
+        raise ValueError(f"No information table in {base}")
+
+    href = xmls[0]
+    holdings = parse_13f(_fetch(href if href.startswith("http") else "https://www.sec.gov" + href))
+
+    # A 13F may report one issuer across several rows -- different managers or
+    # investment-discretion categories. Summing them gives the fund's actual
+    # position; leaving them split understates every holding it affects.
+    merged = {}
+    for h in holdings:
+        key = (h["cusip"], h.get("put_call") or "")
+        if key in merged:
+            merged[key]["value"] = (merged[key]["value"] or 0) + (h["value"] or 0)
+            merged[key]["shares"] = (merged[key]["shares"] or 0) + (h["shares"] or 0)
+            merged[key]["rows"] += 1
+        else:
+            h = dict(h); h["rows"] = 1
+            merged[key] = h
+    holdings = sorted(merged.values(), key=lambda h: h.get("value") or 0, reverse=True)
+    total = sum(h.get("value") or 0 for h in holdings)
+
+    return {"institution": name, "cik": cik, "filed": f.get("filing_date"),
+            "period": f.get("report_date"), "positions": len(holdings),
+            "total_value": total, "holdings": holdings[:limit]}
+
+
 def describe_8k_items(items: str) -> list:
     """Turn an 8-K's comma-separated item codes into their meanings."""
     out = []
