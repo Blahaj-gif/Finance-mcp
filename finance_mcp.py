@@ -447,10 +447,9 @@ def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> 
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest.
         strikes: How many strikes either side of spot to show (default 6).
     """
-    import yfinance as yf
     import datetime as _dt
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         options_dates = ticker.options
         if not options_dates:
             return f"No options data available for {symbol}."
@@ -807,9 +806,8 @@ def get_earnings(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
-    import yfinance as yf
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         dates_df = ticker.earnings_dates
         
         if dates_df is None or dates_df.empty:
@@ -971,9 +969,8 @@ def get_unusual_options(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
-    import yfinance as yf
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         opts = ticker.options
         if not opts:
             return f"No options chain data for {symbol}."
@@ -1026,9 +1023,8 @@ def get_short_interest(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. GME, TSLA, NVDA).
     """
-    import yfinance as yf
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         info = ticker.info
         
         short_pct = info.get("shortPercentOfFloat")
@@ -1123,9 +1119,8 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
 
                 est_price = limit_price
                 if est_price is None:
-                    import yfinance as yf
                     try:
-                        est_price = float(yf.Ticker(symbol).fast_info.last_price)
+                        est_price = float(webull_client.yahoo_ticker(symbol).fast_info.last_price)
                     except Exception as price_err:
                         # Previously this swallowed the error and set est_price = 0,
                         # which combined with the `est_price > 0` guard below to
@@ -1283,9 +1278,8 @@ def cancel_order(order_id: str) -> str:
 
 def _business_description(symbol: str) -> str:
     """Sector, industry and business summary. A section of get_company_profile."""
-    import yfinance as yf
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         info = ticker.info
         
         sector = info.get("sector", "N/A")
@@ -1316,9 +1310,8 @@ def get_news(symbol: str, count: int = 10) -> str:
         symbol: Ticker symbol (e.g. AAPL, TSLA).
         count: Number of headlines to return (default 10).
     """
-    import yfinance as yf
     try:
-        ticker = yf.Ticker(symbol.upper())
+        ticker = webull_client.yahoo_ticker(symbol.upper())
         news = ticker.news
         if not news:
             return f"No recent news found for {symbol.upper()}."
@@ -1369,9 +1362,8 @@ def get_insider_trades(symbol: str) -> str:
     Fetches recent insider transactions (executive buying/selling) for the ticker.
     Useful for gauging the 'smart money' sentiment of the company's leadership.
     """
-    import yfinance as yf
     try:
-        tk = yf.Ticker(symbol)
+        tk = webull_client.yahoo_ticker(symbol)
         df = tk.insider_transactions
         if df is None or df.empty:
             return f"No recent insider transactions found for {symbol}."
@@ -1388,9 +1380,8 @@ def get_sec_filings(symbol: str) -> str:
     Fetches the most recent SEC filings (10-K, 10-Q, 8-K) and their URLs.
     Provides raw access to corporate regulatory documents.
     """
-    import yfinance as yf
     try:
-        tk = yf.Ticker(symbol)
+        tk = webull_client.yahoo_ticker(symbol)
         filings = tk.sec_filings
         if not filings:
             return f"No SEC filings found for {symbol}."
@@ -1762,7 +1753,6 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         symbol: Ticker symbol (e.g. MU, NVDA).
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest expiry.
     """
-    import yfinance as yf
     import numpy as np
     import datetime as _dt
     from math import log, sqrt, exp, erf, pi
@@ -1788,7 +1778,7 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         return {"delta": delta, "gamma": gamma, "vega": vega, "theta": theta_year / 365}
 
     try:
-        tk = yf.Ticker(symbol.upper())
+        tk = webull_client.yahoo_ticker(symbol.upper())
         expiries = tk.options
         if not expiries:
             raise ToolError(f"No options listed for {symbol.upper()}.")

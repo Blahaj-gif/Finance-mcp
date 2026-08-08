@@ -214,8 +214,6 @@ def _yf_period_for(yf_interval: str, count: int) -> str:
 
 def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.DataFrame:
     """Fetch historical data from Yahoo Finance as a robust fallback."""
-    import yfinance as yf
-
     # Map Webull interval to Yahoo Finance interval
     yf_interval = INTERVAL_WEBULL_TO_YF.get(interval, "1d")
 
@@ -225,7 +223,7 @@ def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.
     period = _yf_period_for(yf_interval, count)
 
     ticker_symbol = symbol.upper()
-    ticker = yf.Ticker(ticker_symbol)
+    ticker = yahoo_ticker(ticker_symbol)
     df = ticker.history(period=period, interval=yf_interval)
 
     resolved_symbol = ticker_symbol
@@ -234,7 +232,7 @@ def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.
         # account is actually a Thai one -- otherwise a mistyped US ticker can
         # silently resolve to an unrelated Bangkok listing.
         ticker_symbol_bk = f"{ticker_symbol}.BK"
-        ticker = yf.Ticker(ticker_symbol_bk)
+        ticker = yahoo_ticker(ticker_symbol_bk)
         df = ticker.history(period=period, interval=yf_interval)
         if not df.empty:
             resolved_symbol = ticker_symbol_bk
@@ -345,6 +343,99 @@ def call_webull(fn, *args, **kwargs):
                   f"(attempt {attempt + 1}/{WEBULL_MAX_RETRIES})", file=sys.stderr)
             time.sleep(backoff)
     raise last_exc
+
+
+# ---------------------------------------------------------------------
+# Yahoo pacing
+# ---------------------------------------------------------------------
+# Yahoo was the one feed with no pacing at all, which made it the weakest link
+# rather than the safety net: it is the fallback for every Webull failure *and*
+# the primary source for ten fundamentals tools, so a profile sweep could fire
+# a dozen unpaced requests. Yahoo answers a burst with HTTP 429, and yfinance
+# surfaces that as YFRateLimitError -- or, worse, as an empty frame, which the
+# validator then reports as "no data" rather than "throttled".
+#
+# Deliberately slower than the Webull budget (0.35s vs 0.25s): Yahoo's limit is
+# undocumented and IP-scoped, so there is no quota to reason about, only
+# observed behaviour.
+YF_MIN_REQUEST_INTERVAL = float(os.getenv("YF_MIN_REQUEST_INTERVAL", "0.35"))  # seconds
+YF_MAX_RETRIES = int(os.getenv("YF_MAX_RETRIES", "3"))
+YF_RETRY_BACKOFF = float(os.getenv("YF_RETRY_BACKOFF", "1.5"))  # seconds, doubled each retry
+
+_YF_LIMITER = _RateLimiter(YF_MIN_REQUEST_INTERVAL)
+
+
+def _is_yahoo_rate_limited(exc) -> bool:
+    try:
+        from yfinance.exceptions import YFRateLimitError
+        if isinstance(exc, YFRateLimitError):
+            return True
+    except ImportError:
+        pass
+    text = str(exc).upper()
+    return "TOO MANY REQUESTS" in text or "RATE LIMIT" in text or "429" in text
+
+
+def call_yahoo(fn, *args, **kwargs):
+    """
+    Invoke a yfinance call under the shared Yahoo pacing budget, retrying on 429.
+
+    Mirrors `call_webull`. Re-raises the final exception once retries are spent
+    so the caller still fails loudly -- this reduces throttling, it does not
+    convert a throttled request into a silent empty result.
+    """
+    import time
+
+    last_exc = None
+    for attempt in range(YF_MAX_RETRIES):
+        _YF_LIMITER.acquire()
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if not _is_yahoo_rate_limited(e):
+                raise
+            last_exc = e
+            backoff = YF_RETRY_BACKOFF * (2 ** attempt)
+            _YF_LIMITER.penalise(backoff)
+            print(f"Yahoo rate limit hit; retrying in {backoff:.2f}s "
+                  f"(attempt {attempt + 1}/{YF_MAX_RETRIES})", file=sys.stderr)
+            time.sleep(backoff)
+    raise last_exc
+
+
+class _PacedTicker:
+    """
+    A `yfinance.Ticker` whose network access goes through `call_yahoo`.
+
+    yfinance does its I/O behind lazy properties -- `.info`, `.options`, `.news`
+    all fetch on first access -- so pacing the constructor would pace nothing.
+    Properties are paced when read; methods (`.history`, `.option_chain`) are
+    paced when called, not when looked up, so a bound-method reference costs
+    nothing.
+    """
+
+    __slots__ = ("_ticker",)
+
+    def __init__(self, ticker):
+        object.__setattr__(self, "_ticker", ticker)
+
+    def __getattr__(self, name):
+        import functools
+        target = self._ticker
+        class_attr = getattr(type(target), name, None)
+        if callable(class_attr) and not isinstance(class_attr, property):
+            return functools.partial(call_yahoo, getattr(target, name))
+        return call_yahoo(getattr, target, name)
+
+    def __repr__(self):
+        return f"<PacedTicker {getattr(self._ticker, 'ticker', '?')}>"
+
+
+def yahoo_ticker(symbol: str):
+    """Rate-limited replacement for `yfinance.Ticker(symbol)`."""
+    import yfinance as yf
+    return _PacedTicker(yf.Ticker(symbol))
+
 
 # Header values the SDK prints verbatim when it logs a request.
 _SENSITIVE_HEADERS = ("x-app-key", "x-signature", "x-access-token", "x-signature-nonce")

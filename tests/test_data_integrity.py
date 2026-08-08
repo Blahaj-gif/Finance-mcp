@@ -429,6 +429,141 @@ def test_yf_period_covers_the_bars_requested():
 
 
 # =====================================================================
+# Yahoo pacing
+# =====================================================================
+# Yahoo is both the fallback for every Webull failure and the primary source
+# for the fundamentals tools, so it was the one feed that could be hit a dozen
+# times in a single profile sweep -- with no pacing at all.
+
+class FakeYFRateLimitError(Exception):
+    def __init__(self):
+        super().__init__("Too Many Requests. Rate limited. Try after a while.")
+
+
+def test_yahoo_rate_limit_is_recognised():
+    from yfinance.exceptions import YFRateLimitError
+    assert wc._is_yahoo_rate_limited(YFRateLimitError()) is True
+    assert wc._is_yahoo_rate_limited(FakeYFRateLimitError()) is True
+    assert wc._is_yahoo_rate_limited(Exception("HTTP 429")) is True
+    assert wc._is_yahoo_rate_limited(ValueError("No data found for this ticker")) is False
+
+
+def test_call_yahoo_retries_a_throttled_request_then_succeeds(monkeypatch):
+    monkeypatch.setattr(wc, "YF_RETRY_BACKOFF", 0.01)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise FakeYFRateLimitError()
+        return "ok"
+
+    assert wc.call_yahoo(flaky) == "ok"
+    assert calls["n"] == 3
+
+
+def test_call_yahoo_re_raises_once_retries_are_spent(monkeypatch):
+    """Throttling must stay visible; a swallowed 429 becomes a phantom 'no data'."""
+    monkeypatch.setattr(wc, "YF_RETRY_BACKOFF", 0.01)
+    monkeypatch.setattr(wc, "YF_MAX_RETRIES", 2)
+
+    def always():
+        raise FakeYFRateLimitError()
+
+    with pytest.raises(FakeYFRateLimitError):
+        wc.call_yahoo(always)
+
+
+def test_call_yahoo_does_not_retry_other_errors(monkeypatch):
+    calls = {"n": 0}
+
+    def missing():
+        calls["n"] += 1
+        raise ValueError("No data returned from Yahoo Finance for ticker: NOPE")
+
+    with pytest.raises(ValueError):
+        wc.call_yahoo(missing)
+    assert calls["n"] == 1, "a delisted ticker must fail immediately, not after 3 waits"
+
+
+class _StubTicker:
+    """Stands in for yfinance.Ticker: `.info` fetches on read, `.history` on call."""
+    def __init__(self):
+        self.reads = 0
+        self.calls = 0
+
+    @property
+    def info(self):
+        self.reads += 1
+        return {"sector": "Technology"}
+
+    def history(self, period=None):
+        self.calls += 1
+        return f"bars:{period}"
+
+
+def test_paced_ticker_paces_properties_on_read(monkeypatch):
+    seen = []
+    monkeypatch.setattr(wc._YF_LIMITER, "acquire", lambda: seen.append(1))
+    stub = _StubTicker()
+
+    assert wc._PacedTicker(stub).info == {"sector": "Technology"}
+    assert stub.reads == 1
+    assert len(seen) == 1
+
+
+def test_paced_ticker_paces_methods_at_call_not_at_lookup(monkeypatch):
+    """
+    yfinance does its I/O behind lazy properties and methods. Looking a method
+    up must cost nothing; invoking it must go through the budget.
+    """
+    seen = []
+    monkeypatch.setattr(wc._YF_LIMITER, "acquire", lambda: seen.append(1))
+    stub = _StubTicker()
+    paced = wc._PacedTicker(stub)
+
+    fn = paced.history                     # lookup only
+    assert seen == [] and stub.calls == 0
+
+    assert fn(period="5d") == "bars:5d"     # invocation
+    assert stub.calls == 1 and len(seen) == 1
+
+
+def test_paced_ticker_retries_a_throttled_property(monkeypatch):
+    monkeypatch.setattr(wc, "YF_RETRY_BACKOFF", 0.01)
+
+    class Throttled:
+        def __init__(self):
+            self.n = 0
+
+        @property
+        def info(self):
+            self.n += 1
+            if self.n < 2:
+                raise FakeYFRateLimitError()
+            return {"ok": True}
+
+    assert wc._PacedTicker(Throttled()).info == {"ok": True}
+
+
+def test_no_yfinance_call_site_bypasses_the_pacing_layer():
+    """
+    Ten tools built their own `yf.Ticker(...)`. A new one must not quietly
+    reintroduce an unpaced path.
+    """
+    import glob
+    offenders = []
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in [os.path.join(root, "finance_mcp.py")] + glob.glob(os.path.join(root, "dashboard", "*.py")):
+        for i, line in enumerate(open(path, encoding="utf-8"), 1):
+            # The factory itself is the one place allowed to build a raw Ticker.
+            if "yf.Ticker(" in line and "_PacedTicker(" not in line:
+                offenders.append(f"{os.path.basename(path)}:{i}")
+    assert not offenders, ("construct tickers via webull_client.yahoo_ticker(); "
+                           f"unpaced at {offenders}")
+
+
+# =====================================================================
 # Credentials must never reach the log file
 # =====================================================================
 

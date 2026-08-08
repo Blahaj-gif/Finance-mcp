@@ -18,7 +18,7 @@ import forecaster
 
 # Set Page Config
 st.set_page_config(
-    page_title="Webull Market Intelligence & Quantitative Dashboard",
+    page_title="Finance MCP — Market Intelligence Dashboard",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -92,6 +92,24 @@ st.markdown("""
     .pill-sell { background: rgba(239, 68, 68, 0.2); color: #FCA5A5; border: 1px solid #EF4444; }
     .pill-strong-sell { background: rgba(220, 38, 38, 0.3); color: #F87171; border: 1px solid #DC2626; }
     
+    /* Tab strip: wrap rather than scroll. Short labels fit on one row at any
+       sensible width, but a wrap is the failure mode that stays discoverable --
+       a horizontal scroll arrow hides tabs with no indication they exist. */
+    [data-testid="stTabs"] div:has(> [data-testid="stTab"]) {
+        flex-wrap: wrap;
+        row-gap: 0.15rem;
+        overflow-x: visible !important;
+    }
+    [data-testid="stTab"] { white-space: nowrap; }
+
+    /* Digits in a column must share a width, or the eye cannot compare them. */
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricDelta"],
+    [data-testid="stDataFrame"] {
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+    }
+
     /* Journal layout styling */
     .journal-entry {
         background: rgba(30, 41, 59, 0.3);
@@ -210,7 +228,7 @@ with st.spinner("Calculating technical indicators..."):
     res = indicators.calculate_all_indicators(df)
 
 # Header Section
-st.markdown(f"<div class='dashboard-title'>📈 Webull Market Intelligence</div>", unsafe_allow_html=True)
+st.markdown("<div class='dashboard-title'>📈 Finance MCP</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='dashboard-subtitle'>Analyzing {symbol} • Source: {source} • Interval: {interval}</div>", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
@@ -330,15 +348,19 @@ if "watcher_thread_started" not in st.session_state:
 # ------------------------------------------------------------------
 # Dashboard Tab Selection
 # ------------------------------------------------------------------
+# Short labels, not descriptions. The descriptive names measured 1481px of tab
+# strip against 1140px of container, so two tabs sat behind a scroll arrow at
+# 1600px and four at 1280px -- half the app reachable only by finding an arrow.
+# Every tab already states its full name in the heading inside it.
 tab_charts, tab_backtest, tab_journal, tab_signals, tab_execution, tab_portfolio, tab_alerts, tab_data = st.tabs([
-    "📊 Technical & Forecast Charts", 
-    "📈 Quantitative Backtester", 
-    "📝 Local Trading Journal",
-    "⚡ Adaptive Consensus Signal Breakdown", 
-    "🛒 Order Execution Desk",
-    "💼 Portfolio Analytics",
-    "🚨 Live Alerts & Watcher Daemon",
-    "📋 Calculated Values Table"
+    "📊 Charts",
+    "📈 Backtest",
+    "📝 Journal",
+    "⚡ Signals",
+    "🛒 Execution",
+    "💼 Portfolio",
+    "🚨 Alerts",
+    "📋 Data"
 ])
 
 # Tab 1: Charts
