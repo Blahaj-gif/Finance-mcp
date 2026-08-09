@@ -39,7 +39,13 @@ def check_connection() -> str:
     """Tests connection to Webull API and Yahoo Finance fallback."""
     try:
         df, source = webull_client.fetch_data("AAPL", "D", 10)
-        return f"Successfully connected! Test symbol AAPL loaded from {source} (10 bars)."
+        age = webull_client.bar_age(df, "D")
+        # A connection check that says "connected" without saying how fresh the
+        # data is answers the wrong question -- the feed was reachable during
+        # the original staleness bug too.
+        verdict = "live" if age["current"] else f"REACHABLE BUT {age['age'].upper()} BEHIND"
+        return (f"Connected — {verdict}. Test symbol AAPL loaded from {source} "
+                f"(10 bars, newest {age['as_of']}, {age['age']}).")
     except Exception as e:
         return f"Connection test FAILED: {e}"
 
@@ -532,11 +538,14 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
     results = []
     failures = []
     sources = set()
+    ages = []
 
     for sym in ticker_list:
         try:
             df, src = webull_client.fetch_data(sym, interval, 250)
             sources.add(webull_client.base_source(src))
+            age = webull_client.bar_age(df, interval)
+            ages.append(age)
             res_df = indicators.calculate_all_indicators(df)
             regime_df = indicators.classify_market_regime(res_df)
             regime = str(regime_df["regime"].iloc[-1])
@@ -564,6 +573,11 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
             results.append({
                 "Symbol": sym,
                 "Price": round(last_close, 2),
+                # Per row, because one stale name among twenty fresh ones is
+                # invisible in a header line -- and a scan is exactly where a
+                # symbol that quietly stopped updating would hide.
+                "As of": age["as_of"],
+                "Age": age["age"],
                 "Consensus Score": round(score, 2),
                 "Verdict": verdict,
                 "Regime": regime
@@ -586,6 +600,7 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
         table_str = res_table.to_string(index=False)
 
     out = f"### Watchlist Technical Scan ({interval} Interval)\n\n"
+    out += webull_client.freshness_summary(ages, interval, "symbols")
     for src in sorted(sources):
         out += fallback_warning(src)
     out += table_str + HEURISTIC_NOTE
@@ -608,10 +623,12 @@ def get_multi_timeframe(symbol: str) -> str:
     total_confluence = 0.0
     covered_weight = 0.0
     sources = set()
+    ages = []
 
     for tf, weight in tf_weights.items():
         try:
             df, src = webull_client.fetch_data(symbol, tf, 250)
+            ages.append(webull_client.bar_age(df, tf))
             sources.add(webull_client.base_source(src))
             res_df = indicators.calculate_all_indicators(df)
             regime_df = indicators.classify_market_regime(res_df)
@@ -632,6 +649,10 @@ def get_multi_timeframe(symbol: str) -> str:
             rows.append({
                 "Timeframe": tf,
                 "Weight": f"{int(weight*100)}%",
+                # Confluence across timeframes is only meaningful if the legs
+                # end at the same place; a weekly leg three sessions behind the
+                # hourly one is agreeing about a different week.
+                "As of": ages[-1]["as_of"],
                 "Score": round(score, 2),
                 "Regime": regime,
                 "Weighted Score": round(weighted_contrib, 2)
@@ -669,6 +690,7 @@ def get_multi_timeframe(symbol: str) -> str:
         confluence_verdict = "MODERATE BEARISH"
         
     out = f"### Multi-Timeframe Confluence Analysis: {symbol.upper()}\n\n"
+    out += webull_client.freshness_summary(ages, "D", "timeframes")
     for src in sorted(sources):
         out += fallback_warning(src)
     out += table_str
@@ -710,11 +732,16 @@ def compare_symbols(symbol1: str, symbol2: str, period_bars: int = 60) -> str:
         corr = float(c1.corr(c2))
         ratio = float(c1.iloc[-1] / c2.iloc[-1])
         
+        # Both legs stamped separately: a relative return is meaningless if one
+        # side stopped updating, and a shared header line would hide which.
+        age1 = webull_client.bar_age(df1, "D")
+        age2 = webull_client.bar_age(df2, "D")
         out = (
             f"### Relative Performance & Correlation ({period_bars} Days)\n"
+            + webull_client.freshness_summary([age1, age2], "D", "legs")
             + "".join(fallback_warning(s) for s in sorted({webull_client.base_source(src1), webull_client.base_source(src2)})) +
-            f"* **{symbol1.upper()} Return**: `{ret1:+.2f}%` (Current Price: ${c1.iloc[-1]:.2f})\n"
-            f"* **{symbol2.upper()} Return**: `{ret2:+.2f}%` (Current Price: ${c2.iloc[-1]:.2f})\n"
+            f"* **{symbol1.upper()} Return**: `{ret1:+.2f}%` (Current Price: ${c1.iloc[-1]:.2f}, as of {age1['as_of']} — {age1['age']})\n"
+            f"* **{symbol2.upper()} Return**: `{ret2:+.2f}%` (Current Price: ${c2.iloc[-1]:.2f}, as of {age2['as_of']} — {age2['age']})\n"
             f"* **Outperformer**: **{symbol1.upper() if ret1 > ret2 else symbol2.upper()}** (Spread: `{abs(ret1 - ret2):.2f}%`)\n"
             f"* **Price Correlation**: `{corr:.2f}`\n"
             f"* **Relative Ratio ({symbol1.upper()}/{symbol2.upper()})**: `{ratio:.4f}`\n"
@@ -870,11 +897,14 @@ def get_sector_heatmap() -> str:
     rows = []
     failures = []
     sources = set()
+    ages = []
     for etf, name in sectors.items():
         try:
             # 26 bars so the 20-day lookback has a bar to reference.
             df, src = webull_client.fetch_data(etf, "D", 26)
             sources.add(webull_client.base_source(src))
+            age = webull_client.bar_age(df, "D")
+            ages.append(age)
             close = df["close"]
 
             # Requires oldest-first ordering. On the raw newest-first Webull
@@ -893,6 +923,9 @@ def get_sector_heatmap() -> str:
                 "ETF": etf,
                 "Sector Name": name,
                 "Price": round(float(close.iloc[-1]), 2),
+                # Rotation is a comparison, so a sector whose last bar is older
+                # than the others is being ranked against a different day.
+                "As of": age["as_of"],
                 "1-Day %": f"{ret_1d:+.2f}%",
                 "5-Day %": f"{ret_5d:+.2f}%",
                 "20-Day %": f"{ret_20d:+.2f}%",
@@ -916,6 +949,7 @@ def get_sector_heatmap() -> str:
         table_str = df_sec.to_string(index=False)
 
     out = "### S&P Sector Rotation & Momentum Heatmap\n\n"
+    out += webull_client.freshness_summary(ages, "D", "sectors")
     for src in sorted(sources):
         out += fallback_warning(src)
     out += table_str
@@ -1622,6 +1656,9 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
 
         out = (
             f"### Position Sizing — {direction} {symbol.upper()}\n"
+            # This number sizes an actual order. The bar it came from belongs
+            # next to it, not implied by the absence of a warning.
+            f"{webull_client.freshness_line(df, source, 'D')}"
             f"{fallback_warning(source)}"
             f"* **Entry**: `${entry:,.2f}`{'' if entry_price is not None else ' (latest close)'}\n"
             f"* **Stop loss**: `${stop:,.2f}`  →  risk/share `${risk_per_share:,.2f}` ({stop_pct:.2f}%)\n"
@@ -1749,7 +1786,7 @@ def get_portfolio_risk() -> str:
         if not positions:
             return f"### Portfolio Risk\n\nNo open positions in account {account_id}."
 
-        rows, returns, warnings = [], {}, []
+        rows, returns, warnings, ages = [], {}, [], []
         gross = 0.0
         for p in positions:
             sym = str(p.get("symbol", "")).upper()
@@ -1761,8 +1798,11 @@ def get_portfolio_risk() -> str:
             pnl_pct = ((last - cost) / cost * 100) if cost else 0.0
 
             vol = None
+            age = None
             try:
                 df, _ = webull_client.fetch_data(sym, "D", 90)
+                age = webull_client.bar_age(df, "D")
+                ages.append(age)
                 r = df["close"].pct_change().dropna()
                 returns[sym] = r.reset_index(drop=True)
                 vol = float(r.std() * (252 ** 0.5) * 100)
@@ -1776,6 +1816,9 @@ def get_portfolio_risk() -> str:
                 "Last": round(last, 2),
                 "Value": round(value, 2),
                 "P&L %": f"{pnl_pct:+.2f}%",
+                # The broker supplies the mark; the volatility comes from our
+                # own history, and those can be different ages.
+                "Vol as of": age["as_of"] if age else "n/a",
                 "Ann. Vol %": f"{vol:.1f}%" if vol is not None else "n/a",
             })
 
@@ -1793,7 +1836,8 @@ def get_portfolio_risk() -> str:
             table_str = table.to_string(index=False)
 
         out = (f"### Portfolio Risk — account {account_id}\n\n"
-               f"**Gross exposure**: `${gross:,.2f}` across {len(rows)} position(s)\n\n"
+               + webull_client.freshness_summary(ages, "D", "position histories")
+               + f"**Gross exposure**: `${gross:,.2f}` across {len(rows)} position(s)\n\n"
                + table_str + "\n")
 
         # Portfolio-level volatility and beta, weighted by position value.
@@ -1966,6 +2010,9 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
 
         out = (
             f"### Options Analytics — {symbol.upper()} @ {expiry} ({days}d)\n"
+            # Spot comes from the validated price feed, so it carries the feed's
+            # as-of. The option quotes have their own staleness, reported below.
+            f"{webull_client.freshness_line(df, source, 'D')}"
             f"{fallback_warning(source)}"
             f"* **Spot**: `${spot:,.2f}` ({webull_client.base_source(source)})\n"
             f"* **ATM implied volatility**: `{atm_iv * 100:.1f}%`\n"

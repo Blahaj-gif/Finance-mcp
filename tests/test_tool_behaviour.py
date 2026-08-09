@@ -414,3 +414,82 @@ def test_indicator_readings_stay_descriptive_without_the_verdict(monkeypatch):
     assert "RSI (14)" in out
     for directive in ("**BUY**", "**SELL**", "**NEUTRAL**"):
         assert directive not in out
+
+
+# =====================================================================
+# Every price-bearing answer states when it is as of
+# =====================================================================
+# From a reviewer, after a night when everything happened to return live:
+# "Thursday's silent staleness is the failure mode I can't detect from the
+# output alone." That is the original bug's signature exactly -- the feed was
+# reachable, the numbers looked authoritative, and nothing in the response said
+# which bar they came from. The staleness gate refuses old bars, but a refusal
+# is invisible in an answer that succeeded; only a stamp on the output lets a
+# reader tell a live number from a merely acceptable one.
+
+def _tool_bodies():
+    """(name, source) for every registered tool, split on the decorator."""
+    import re
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "finance_mcp.py"), encoding="utf-8").read()
+    out = []
+    for chunk in re.split(r"\n@mcp\.tool\(\)\n", src)[1:]:
+        m = re.match(r"def (\w+)", chunk)
+        if m:
+            out.append((m.group(1), chunk.split("\n@mcp.tool()")[0]))
+    return out
+
+
+def test_every_tool_that_reads_prices_stamps_when_they_are_as_of():
+    """
+    The check the reviewer's request reduces to. Any tool calling fetch_data is
+    quoting a bar, and must say which one -- via freshness_line for a single
+    series, freshness_summary for a sweep, or bar_age for a per-row column.
+    """
+    stampers = ("freshness_line", "freshness_summary", "bar_age")
+    unstamped = [name for name, body in _tool_bodies()
+                 if "fetch_data(" in body and not any(s in body for s in stampers)]
+    assert not unstamped, (
+        f"{len(unstamped)} price tools return no as-of stamp: {unstamped}. "
+        "A reader cannot distinguish live data from stale data in the output alone.")
+
+
+def test_multi_symbol_sweeps_stamp_each_row_not_just_the_header():
+    """
+    A single header line is not enough where several series are compared: one
+    symbol that quietly stopped updating disappears among the fresh ones, and
+    the ranking is then across different days.
+    """
+    sweeps = {"scan_watchlist", "get_sector_heatmap", "get_multi_timeframe",
+              "compare_symbols", "get_portfolio_risk"}
+    bodies = dict(_tool_bodies())
+    for name in sweeps:
+        assert name in bodies, f"{name} is no longer a registered tool"
+        assert "bar_age(" in bodies[name], f"{name} has no per-row as-of"
+
+
+def test_the_sweep_summary_quotes_the_stalest_member():
+    """An average or a first-row stamp would let one stale name hide in twenty."""
+    import pandas as pd
+    fresh = pd.DataFrame({"time": ["2026-08-07 00:00:00"], "close": [1.0]})
+    stale = pd.DataFrame({"time": ["2026-07-01 00:00:00"], "close": [1.0]})
+    ages = [srv.webull_client.bar_age(fresh, "D"), srv.webull_client.bar_age(stale, "D")]
+
+    line = srv.webull_client.freshness_summary(ages, "D", "symbols")
+    assert "2026-07-01" in line, "the summary must quote the stalest bar"
+    assert "stalest" in line and "freshest" in line
+
+
+def test_a_sweep_with_no_dated_bars_says_so_rather_than_omitting_the_line():
+    line = srv.webull_client.freshness_summary([], "D", "symbols")
+    assert "no dated bars" in line
+
+
+def test_check_connection_reports_freshness_not_merely_reachability():
+    """
+    The feed was reachable throughout the original staleness bug. "Connected"
+    on its own answers a question nobody needed answered.
+    """
+    body = dict(_tool_bodies())["check_connection"]
+    assert "bar_age(" in body
+    assert "REACHABLE BUT" in body, "a stale-but-connected result must say so"

@@ -588,6 +588,43 @@ def yahoo_ticker(symbol: str):
     return _PacedTicker(yf.Ticker(symbol))
 
 
+def _quieten_rotation_errors():
+    """
+    Stop a locked log file from printing a traceback on every log call.
+
+    The SDK logs through a TimedRotatingFileHandler, which rotates by renaming.
+    On Windows a rename fails while another process holds the file — and the
+    normal configuration here is exactly that: the MCP server and the dashboard
+    both import this module and both open the same conf/webull_sdk.log. At the
+    rollover boundary every subsequent log call then printed a full
+    PermissionError traceback to stderr, which for a stdio MCP server is noise
+    on the same channel a user reads errors from.
+
+    The rotation genuinely cannot happen while the file is held, so there is
+    nothing to fix in the logging itself; what is wrong is reporting it once per
+    record. Failed rotations are swallowed, everything else still reports.
+    """
+    import logging.handlers
+
+    for logger_name in ("webull.core", "webull"):
+        for handler in logging.getLogger(logger_name).handlers:
+            if not isinstance(handler, logging.handlers.BaseRotatingHandler):
+                continue
+            if getattr(handler, "_fm_quietened", False):
+                continue
+
+            original = handler.handleError
+
+            def handle(record, _h=handler, _orig=original):
+                exc = sys.exc_info()[1]
+                if isinstance(exc, (PermissionError, OSError)):
+                    return          # a locked file cannot be rotated; say it once, in code
+                _orig(record)
+
+            handler.handleError = handle
+            handler._fm_quietened = True
+
+
 # Header values the SDK prints verbatim when it logs a request.
 _SENSITIVE_HEADERS = ("x-app-key", "x-signature", "x-access-token", "x-signature-nonce")
 
@@ -661,6 +698,7 @@ def get_api_client():
         api_client.set_stream_logger(log_level=logging.WARNING, stream=sys.stderr)
         log_file = os.path.join(token_dir, "webull_sdk.log")
         api_client.set_file_logger(path=log_file, log_level=logging.WARNING)
+        _quieten_rotation_errors()
 
         # ...and redact, because the SDK logs the signed request at ERROR too.
         redactor = _RedactSecretsFilter((WEBULL_APP_KEY, WEBULL_APP_SECRET))
@@ -1084,6 +1122,62 @@ def freshness_line(df: pd.DataFrame, source: str, interval: str = "D") -> str:
     cached = " · from 60s cache" if "(Cached)" in source else ""
     return (f"`Latest {iv} bar: {newest:%Y-%m-%d %H:%M} ({age}) · "
             f"source: {base_source(source)}{cached} · "
+            f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
+
+
+def bar_age(df: pd.DataFrame, interval: str = "D") -> dict:
+    """
+    How old the newest bar is, in a form small enough for a table cell.
+
+    `freshness_line` answers this for a single-symbol response. A sweep needs it
+    per row: one stale name among twenty fresh ones is invisible in a summary
+    line, and a watchlist scan or sector heatmap is exactly where that hides.
+
+    Returns {"bar", "as_of", "age", "behind", "current"} — `behind` is trading
+    sessions for daily and slower, hours otherwise, so callers can sort or flag
+    on it rather than parsing the label.
+    """
+    try:
+        newest = pd.to_datetime(df["time"].iloc[-1])
+    except Exception:
+        return {"bar": None, "as_of": "unknown", "age": "unknown",
+                "behind": float("inf"), "current": False}
+
+    iv = (interval or "D").upper()
+    if iv in STALENESS_TOLERANCE_SESSIONS:
+        behind = market_calendar.sessions_stale(newest.date())
+        age = "current" if behind == 0 else f"{behind} session{'s' if behind != 1 else ''}"
+        return {"bar": newest, "as_of": f"{newest:%Y-%m-%d}", "age": age,
+                "behind": float(behind), "current": behind == 0}
+
+    hours = (datetime.datetime.utcnow() - newest.to_pydatetime()).total_seconds() / 3600
+    age = f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
+    return {"bar": newest, "as_of": f"{newest:%Y-%m-%d %H:%M}", "age": age,
+            "behind": hours, "current": hours < 24}
+
+
+def freshness_summary(ages, interval: str = "D", label: str = "series") -> str:
+    """
+    One as-of line for a multi-symbol sweep, stated as the WORST case.
+
+    A sweep is only as current as its stalest member, so the header quotes that
+    rather than an average or the first row — an average would let one
+    three-session-old name disappear into nineteen fresh ones. Per-row ages
+    still appear in the table; this is the line a reader sees without scanning.
+    """
+    usable = [a for a in ages if a and a.get("bar") is not None]
+    if not usable:
+        return "`As of: no dated bars in this result`\n\n"
+
+    stalest = max(usable, key=lambda a: a["behind"])
+    freshest = min(usable, key=lambda a: a["behind"])
+    n = len(usable)
+
+    if stalest["behind"] == freshest["behind"]:
+        return (f"`As of {stalest['as_of']} ({stalest['age']}) — all {n} {label} · "
+                f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
+    return (f"`As of {stalest['as_of']} ({stalest['age']}) at the stalest, "
+            f"{freshest['as_of']} ({freshest['age']}) at the freshest, over {n} {label} · "
             f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
 
 
