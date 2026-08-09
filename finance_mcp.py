@@ -16,6 +16,7 @@ import dashboard.indicators as indicators
 import dashboard.econ_calendar as econ_calendar
 import dashboard.iv_history as iv_history
 import dashboard.options_math as options_math
+import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 
@@ -1641,6 +1642,94 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
         raise
     except Exception as e:
         raise ToolError(f"Error calculating position size: {e}") from e
+
+
+@mcp.tool()
+def get_volume_profile(symbol: str, interval: str = "D", lookback: int = 100,
+                       buckets: int = 20, value_area_pct: float = 0.70) -> str:
+    """
+    Volume-by-price for a symbol: point of control, value area, and the high and
+    low volume nodes around the current price.
+
+    Answers "where did this market previously agree on value, and where did it
+    refuse to trade" — the auction-theory reading that price and oscillators
+    cannot give. High volume nodes are shelves the market accepted and tends to
+    revisit; low volume nodes are thin prices it rejected, and price usually
+    travels through them quickly, so they act as breakout levels.
+
+    Args:
+        symbol: Stock ticker (e.g. AAPL, NVDA).
+        interval: Bar size — D, W, M, H1, M30, M15, M5, M1 (default D).
+        lookback: Bars in the profile window (default 100).
+        buckets: Price bins; higher is a finer profile (default 20).
+        value_area_pct: Fraction of volume inside the value area (default 0.70).
+    """
+    try:
+        # Fetch a little beyond the window so the profile is never built from a
+        # truncated one -- a short window silently reports a different auction.
+        df, source = webull_client.fetch_data(symbol, interval, max(lookback + 20, 60))
+        if len(df) < lookback:
+            raise ToolError(
+                f"{symbol.upper()}: only {len(df)} {interval} bars available, "
+                f"fewer than the {lookback}-bar window requested.")
+
+        highs = df["high"].tolist()
+        lows = df["low"].tolist()
+        volumes = df["volume"].tolist()
+        spot = float(df["close"].iloc[-1])
+
+        va = volume_profile.value_area(highs, lows, volumes, lookback=int(lookback),
+                                       buckets=int(buckets), fraction=float(value_area_pct))
+        if va is None:
+            raise ToolError(
+                f"No volume profile could be built for {symbol.upper()}: the window "
+                "has no price range or no volume.")
+
+        hvn = volume_profile.high_volume_nodes(highs, lows, volumes,
+                                               lookback=int(lookback), buckets=int(buckets))
+        lvn = volume_profile.low_volume_nodes(highs, lows, volumes,
+                                              lookback=int(lookback), buckets=int(buckets))
+
+        out = f"### Volume Profile — {symbol.upper()} ({interval}, {lookback} bars)\n"
+        out += webull_client.freshness_line(df, source, interval) + "\n"
+        out += webull_client.fallback_warning(source)
+        out += (f"* **Last**: `{spot:,.2f}`\n"
+                f"* **Point of control**: `{va['poc']:,.2f}` — the single price with the "
+                "most traded volume in the window\n"
+                f"* **Value area**: `{va['val']:,.2f}` – `{va['vah']:,.2f}` "
+                f"({va['coverage'] * 100:.1f}% of volume)\n\n")
+
+        out += f"**{volume_profile.describe_position(spot, hvn, lvn, va)}**\n\n"
+
+        if hvn:
+            rows = [{"Price": round(n["price"], 2),
+                     "% of window volume": round(n["volume_share"] * 100, 2),
+                     "POC": "yes" if n["is_poc"] else ""}
+                    for n in sorted(hvn, key=lambda n: -n["price"])]
+            out += "**High volume nodes** — prices the market accepted\n\n"
+            out += pd.DataFrame(rows).to_markdown(index=False) + "\n\n"
+
+        if lvn:
+            rows = [{"Price": round(n["price"], 2),
+                     "% of window volume": round(n["volume_share"] * 100, 2)}
+                    for n in sorted(lvn, key=lambda n: -n["price"])]
+            out += "**Low volume nodes** — thin prices the market rejected\n\n"
+            out += pd.DataFrame(rows).to_markdown(index=False) + "\n\n"
+        else:
+            out += ("*No low volume nodes: the rule requires a bucket strictly thinner "
+                    "than both neighbours, so a continuously-traded profile or a fully "
+                    "untraded gap both return none.*\n\n")
+
+        icon, meaning = PROVENANCE["market"]
+        out += (f"{icon} {meaning}. Volume is spread uniformly across each bar's "
+                "high-low range — real intrabar volume clusters at the open and close, "
+                "so treat node prices as approximate to within a bucket "
+                f"(`{(va['profile']['bucket_width']):,.2f}` wide here).\n")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error building volume profile for {symbol}: {e}") from e
 
 
 @mcp.tool()

@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dashboard import indicators as ind
+from dashboard import ta_core
 
 
 def frame(closes, intraday=False, volume=None):
@@ -50,9 +51,45 @@ def test_rsi_is_0_when_there_are_no_gains():
     assert ind.calculate_rsi(frame([200 - i for i in range(30)])).iloc[-1] == pytest.approx(0.0)
 
 
-def test_rsi_is_50_on_a_flat_series():
-    """Genuinely undefined — no gains and no losses — so neutral is right here."""
-    assert ind.calculate_rsi(frame([100] * 30)).iloc[-1] == pytest.approx(50.0)
+def test_rsi_is_undefined_not_neutral_on_a_flat_series():
+    """
+    This used to return 50.0. That reads as a measured neutral reading, and the
+    alert daemon would evaluate it as one — an RSI_BELOW 30 alert on a halted or
+    untraded symbol would report "condition not met" as though it had looked.
+    NaN is the honest answer, and `_finite()` in alert_watcher already raises on
+    it rather than treating it as a no.
+    """
+    import math
+    assert math.isnan(ind.calculate_rsi(frame([100] * 30)).iloc[-1])
+
+
+def test_rsi_is_100_on_an_uninterrupted_uptrend():
+    """
+    Preserved across the swap to the pinned core. A blanket "undefined -> 50"
+    once reported neutral for an asset that had never had a down day, and RSI
+    feeds both the market-analysis verdict and the consensus score.
+    """
+    assert ind.calculate_rsi(frame([100 + i for i in range(40)])).iloc[-1] == pytest.approx(100.0)
+
+
+def test_rsi_uses_wilder_seeding_not_a_bar_zero_seed():
+    """
+    The correction that came with the pinned core. `ewm(com=period-1,
+    adjust=False)` seeds from bar 0; Wilder seeds from SMA(first period) at
+    index period-1, which is what every charting platform reports. Measured
+    18.8 RSI points apart at bar 14 on a 400-bar series, converging to zero
+    past bar 200 — right where the chart looks, wrong across the warm-up that
+    short windows and the backtester's early trades live in.
+    """
+    d = noisy(400)
+    close = d["close"]
+    old = (lambda g, l: 100 - 100 / (1 + g / l))(
+        close.diff().clip(lower=0).ewm(com=13, adjust=False).mean(),
+        (-close.diff().clip(upper=0)).ewm(com=13, adjust=False).mean())
+    new = ind.calculate_rsi(d)
+
+    assert abs(new.iloc[14] - old.iloc[14]) > 1.0, "seeding should differ during warm-up"
+    assert new.iloc[-1] == pytest.approx(old.iloc[-1], abs=1e-6), "and converge afterwards"
 
 
 def test_rsi_stays_within_bounds():
@@ -76,30 +113,62 @@ def test_bollinger_uses_population_std():
     assert bb["bb_upper"].iloc[-1] == pytest.approx(expected)
 
 
-def test_adx_matches_an_independent_wilder_implementation():
+def test_adx_delegates_to_the_conformance_pinned_core():
+    """
+    This used to hand-roll a Wilder reference with pandas' `ewm`, which seeds
+    from bar 0 — so once ATR was corrected the reference was the thing that was
+    wrong. Rewriting it by hand missed twice more: ADX is smoothed three times
+    over (+DM/-DM, TR, then DX), and DX cannot exist until both DI lines do, so
+    its average seeds from DX's own first valid bar rather than at period-1.
+
+    A fourth guess would be no more trustworthy than the third. `adx` is one of
+    the 96 callables pinned by conformance/ta golden vectors, which a second
+    independent runtime must also satisfy — that fixture is the authority on the
+    arithmetic now, checked by test_ta_conformance.py. What is worth asserting
+    here is that this wrapper actually routes to it and preserves index
+    alignment.
+    """
     d = noisy(150)
-    n = 14
-    h, l, c = d["high"], d["low"], d["close"]
-    up, dn = h.diff(), -l.diff()
-    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=d.index)
-    ndm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=d.index)
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
-    pdi = 100 * pdm.ewm(alpha=1 / n, adjust=False).mean() / atr
-    ndi = 100 * ndm.ewm(alpha=1 / n, adjust=False).mean() / atr
-    dx = 100 * (pdi - ndi).abs() / (pdi + ndi)
-    expected = dx.ewm(alpha=1 / n, adjust=False).mean().iloc[-1]
+    got = ind.calculate_adx(d, 14)
+    reference = ta_core.REGISTRY["adx"](
+        d["high"].to_numpy(dtype=float), d["low"].to_numpy(dtype=float),
+        d["close"].to_numpy(dtype=float), period=14)
 
-    assert ind.calculate_adx(d)["adx"].iloc[-1] == pytest.approx(expected)
+    for key in ("adx", "plus_di", "minus_di"):
+        assert got[key].to_numpy() == pytest.approx(reference[key], nan_ok=True), key
+    assert list(got.index) == list(d.index), "index alignment broken"
 
 
-def test_atr_uses_wilder_smoothing():
+def test_adx_and_its_directional_lines_stay_in_range():
+    """Properties the golden vector does not state: ADX and DI are percentages."""
+    got = ind.calculate_adx(noisy(150), 14).dropna()
+    for key in ("adx", "plus_di", "minus_di"):
+        assert got[key].between(0, 100).all(), f"{key} left 0..100"
+
+
+def test_atr_uses_wilder_seeding():
+    """
+    True range is unchanged; the smoothing seed is what moved. Wilder seeds the
+    average from SMA(first period) at index period-1, not from bar 0 — measured
+    0.198 apart at bar 13 (10% relative) before the swap. ATR sizes every stop
+    in calculate_position_size, so the warm-up region is not cosmetic.
+    """
     d = noisy(60)
     n = 14
     h, l, c = d["high"], d["low"], d["close"]
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    expected = tr.ewm(alpha=1 / n, adjust=False).mean().iloc[-1]
-    assert ind.calculate_atr(d).iloc[-1] == pytest.approx(expected)
+
+    got = ind.calculate_atr(d, n)
+    # Wilder: seed at index n-1 is the mean of the first n true ranges. TR[0] is
+    # NaN (no previous close), so the core's own TR seeding governs index n-1;
+    # assert the recursion from there, which is the part that was wrong.
+    for i in range(n + 1, len(d)):
+        expected = (1.0 / n) * tr.iloc[i] + (1 - 1.0 / n) * got.iloc[i - 1]
+        assert got.iloc[i] == pytest.approx(expected, rel=1e-9)
+
+    # And it must NOT match the old bar-zero-seeded form during warm-up.
+    old = tr.ewm(alpha=1 / n, adjust=False).mean()
+    assert abs(got.iloc[n] - old.iloc[n]) > 1e-6
 
 
 # =====================================================================

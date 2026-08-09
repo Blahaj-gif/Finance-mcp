@@ -31,3 +31,8 @@ iv_history.json
 
 # Streamlit local secrets (config.toml is committed; secrets.toml never is)
 .streamlit/secrets.toml
+
+# Read-only extraction from Powerstation for review. 421 files, 4.1 MB, with a
+# sha256 manifest; it does not build and is not a dependency. The pieces we
+# adopted are vendored explicitly (dashboard/ta_core.py, tests/fixtures/).
+extract-chart-dsl/

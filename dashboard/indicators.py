@@ -1,4 +1,9 @@
 import numpy as np
+
+try:
+    from dashboard import ta_core
+except ImportError:  # imported as a top-level module from dashboard/
+    import ta_core
 import pandas as pd
 
 def calculate_sma(df: pd.DataFrame, period: int = 14, column: str = "close") -> pd.Series:
@@ -41,26 +46,29 @@ def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int
     return pd.DataFrame({"macd": macd_val, "macd_signal": signal_val, "macd_hist": hist}, index=df.index)
 
 def calculate_rsi(df: pd.DataFrame, period: int = 14, column: str = "close") -> pd.Series:
-    """Wilder's RSI."""
-    delta = df[column].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
-    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+    """
+    Wilder's RSI, delegated to the conformance-pinned core.
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
+    This was `ewm(com=period-1, adjust=False)`, which seeds the average from
+    bar 0. Wilder seeds from SMA(first period) at index period-1, which is what
+    every charting platform reports. Measured against the pinned core on a
+    400-bar series: **18.8 RSI points apart at bar 14**, 1.9 by bar 50, 0.04 by
+    bar 100, identical past bar 200. Converged where the chart looks, wrong
+    across the warm-up that short windows and the backtester's early trades
+    live in -- and 1.9 points is enough to flip a 30/70 threshold at the edge.
 
-    # avg_loss == 0 means there were no down moves at all, so RSI is 100 --
-    # maximally overbought. Blanket-filling it with 50 reported "neutral" for
-    # an asset in an uninterrupted uptrend, and RSI is a primary signal in both
-    # the market-analysis verdict and the adaptive consensus.
-    no_loss = avg_loss.eq(0) & avg_gain.gt(0)
-    rsi = rsi.mask(no_loss, 100.0)
+    The pinned core also returns NaN on a genuinely flat series where this
+    returned 50.0. NaN is the honest answer and the one alert_watcher already
+    expects: it raises rather than reading an unmeasurable RSI as "condition
+    not met". A halted or untraded symbol no longer reports a neutral 50 as
+    though it were measured.
 
-    # Genuinely undefined only while both sides are still zero (flat warm-up).
-    flat = avg_loss.eq(0) & avg_gain.eq(0)
-    return rsi.mask(flat, 50.0)
+    RSI = 100 on an uninterrupted uptrend (no down moves at all) is preserved --
+    the pinned core does the same thing, so the fix that behaviour came from
+    survives the swap.
+    """
+    values = ta_core.REGISTRY["rsi"](df[column].to_numpy(dtype=float), period=int(period))
+    return pd.Series(values, index=df.index)
 
 def calculate_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> pd.DataFrame:
     low_min = df["low"].rolling(window=k_period).min()
@@ -78,12 +86,22 @@ def calculate_stoch_rsi(df: pd.DataFrame, period: int = 14, k_period: int = 3, d
     return pd.DataFrame({"stoch_rsi_k": stoch_rsi_k, "stoch_rsi_d": stoch_rsi_d}, index=df.index)
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low = df["high"] - df["low"]
-    high_cp = (df["high"] - df["close"].shift(1)).abs()
-    low_cp = (df["low"] - df["close"].shift(1)).abs()
-    tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/period, adjust=False).mean()
-    return atr
+    """
+    Wilder's ATR, delegated to the conformance-pinned core.
+
+    Same seeding correction as calculate_rsi: `ewm(alpha=1/period,
+    adjust=False)` starts from bar 0 rather than from SMA(first period).
+    Measured 0.198 apart at bar 13 (10% relative), converged past bar 200.
+    ATR sizes every stop in calculate_position_size and feeds the volatility
+    reading in the metric strip, so the warm-up region is not cosmetic.
+    """
+    values = ta_core.REGISTRY["atr"](
+        df["high"].to_numpy(dtype=float),
+        df["low"].to_numpy(dtype=float),
+        df["close"].to_numpy(dtype=float),
+        period=int(period),
+    )
+    return pd.Series(values, index=df.index)
 
 def calculate_natr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     atr = calculate_atr(df, period)
@@ -228,27 +246,23 @@ def calculate_vwap_bands(df: pd.DataFrame, num_std: float = 2.0, rolling_period:
     }, index=df.index)
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    high_diff = df["high"].diff()
-    low_diff = -df["low"].diff()
-    
-    pos_dm = pd.Series(0.0, index=df.index)
-    neg_dm = pd.Series(0.0, index=df.index)
-    
-    pos_dm[(high_diff > low_diff) & (high_diff > 0)] = high_diff
-    neg_dm[(low_diff > high_diff) & (low_diff > 0)] = low_diff
-    
-    atr = calculate_atr(df, period)
-    
-    smooth_pos_dm = pos_dm.ewm(alpha=1/period, adjust=False).mean()
-    smooth_neg_dm = neg_dm.ewm(alpha=1/period, adjust=False).mean()
-    
-    plus_di = 100 * (smooth_pos_dm / atr.replace(0, np.nan))
-    minus_di = 100 * (smooth_neg_dm / atr.replace(0, np.nan))
-    
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.ewm(alpha=1/period, adjust=False).mean()
-    
-    return pd.DataFrame({"adx": adx, "plus_di": plus_di, "minus_di": minus_di}, index=df.index)
+    """
+    ADX with +DI/-DI, delegated to the conformance-pinned core.
+
+    ADX is Wilder-smoothed three times over — the directional movements, the
+    true range, and then DX itself — so it compounds the bar-zero seeding error
+    rather than diluting it. Delegating keeps all three consistent, and the
+    regime classifier that reads ADX no longer depends on which smoothing
+    convention happened to be used at each of the three steps.
+    """
+    out = ta_core.REGISTRY["adx"](
+        df["high"].to_numpy(dtype=float),
+        df["low"].to_numpy(dtype=float),
+        df["close"].to_numpy(dtype=float),
+        period=int(period),
+    )
+    return pd.DataFrame({"adx": out["adx"], "plus_di": out["plus_di"],
+                         "minus_di": out["minus_di"]}, index=df.index)
 
 def calculate_std(df: pd.DataFrame, period: int = 14, column: str = "close") -> pd.Series:
     return df[column].rolling(window=period).std()
