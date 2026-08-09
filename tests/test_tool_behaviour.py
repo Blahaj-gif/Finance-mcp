@@ -493,3 +493,258 @@ def test_check_connection_reports_freshness_not_merely_reachability():
     body = dict(_tool_bodies())["check_connection"]
     assert "bar_age(" in body
     assert "REACHABLE BUT" in body, "a stale-but-connected result must say so"
+
+
+# =====================================================================
+# Earnings: a date you cannot tell apart from a guess is not a date
+# =====================================================================
+
+class _FakeTicker:
+    """Stands in for a yfinance Ticker with only what get_earnings reads."""
+
+    def __init__(self, calendar=None, dates=None):
+        self.calendar = calendar or {}
+        self.earnings_dates = dates
+
+
+def _dates_frame(rows):
+    """rows: [(date_str, estimate, reported_or_None)] newest-first, as yfinance gives."""
+    idx = pd.to_datetime([r[0] for r in rows])
+    return pd.DataFrame({
+        "EPS Estimate": [r[1] for r in rows],
+        "Reported EPS": [r[2] for r in rows],
+        # yfinance's own column is ALREADY a percentage, not a fraction.
+        "Surprise(%)": [None if r[2] is None else (r[2] - r[1]) / abs(r[1]) * 100
+                        for r in rows],
+    }, index=idx)
+
+
+@pytest.fixture
+def earnings_stub(monkeypatch):
+    def install(calendar, rows, filings=()):
+        monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                            lambda s: _FakeTicker(calendar, _dates_frame(rows)))
+        monkeypatch.setattr(srv.econ_calendar, "earnings_filings",
+                            lambda s, limit=6: list(filings))
+    return install
+
+
+def test_an_estimated_window_is_never_rendered_as_a_date(earnings_stub):
+    """
+    Yahoo publishes an unset date as a window. Printing only its first day is
+    a claim the source never made, and it is wrong by up to a week.
+    """
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 28),
+                                     datetime.date(2026, 11, 3)]},
+                  [("2026-11-03", 1.90, None)])
+    out = srv.get_earnings("AAPL")
+
+    assert "ESTIMATED between 2026-10-28 and 2026-11-03" in out
+    assert "window, not a date" in out
+
+
+def test_a_settled_date_says_both_feeds_agree(earnings_stub):
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                  [("2026-10-30", 1.98, None)])
+    out = srv.get_earnings("AAPL")
+
+    assert "Next report: 2026-10-30" in out
+    assert "ESTIMATED" not in out and "UNCONFIRMED" not in out
+    assert "not a company confirmation" in out, "Yahoo's word is not the company's"
+
+
+def test_two_yahoo_feeds_disagreeing_downgrades_the_date(earnings_stub):
+    """
+    Live AAPL: the calendar endpoint says 30 Oct and the earnings table says
+    29 Oct. A date the provider cannot agree with itself on is not settled,
+    whatever the single-value shape implies.
+    """
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                  [("2026-10-29", 1.98, None)])
+    out = srv.get_earnings("AAPL")
+
+    assert "UNCONFIRMED" in out
+    assert "2026-10-30" in out and "2026-10-29" in out
+
+
+def test_surprise_is_not_inflated_a_hundredfold(earnings_stub):
+    """
+    yfinance's Surprise(%) is already a percentage. The old code multiplied it
+    by 100, turning a 6.9% beat into "+674.00%" -- a number an LLM will repeat.
+    """
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                  [("2026-07-30", 1.89, 2.02)])
+    out = srv.get_earnings("AAPL")
+
+    assert "+6.88%" in out
+    assert "674" not in out
+
+
+def test_an_unreported_quarter_is_pending_not_a_zero_surprise(earnings_stub):
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                  [("2026-10-30", 1.98, None), ("2026-07-30", 1.89, 2.02)])
+    out = srv.get_earnings("AAPL")
+    assert "pending" in out
+
+
+def test_reported_quarters_are_confirmed_against_item_2_02(earnings_stub):
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                  [("2026-07-30", 1.89, 2.02)],
+                  filings=[{"filing_date": "2026-07-30",
+                            "acceptance": "2026-07-30T20:30:28.000Z",
+                            "report_date": "2026-07-30",
+                            "url": "https://www.sec.gov/Archives/x.htm"}])
+    out = srv.get_earnings("AAPL")
+
+    assert "Item 2.02" in out
+    assert "2026-07-30 20:30:28" in out, "the SEC acceptance time is the confirmation"
+
+
+def test_a_foreign_issuer_with_no_8k_is_not_reported_as_never_having_reported(earnings_stub):
+    """TSM files 6-K, so Item 2.02 finds nothing. Absence is not evidence here."""
+    earnings_stub({"Earnings Date": [datetime.date(2026, 10, 15)]},
+                  [("2026-07-16", 3.89, 4.31)], filings=[])
+    out = srv.get_earnings("TSM")
+
+    assert "6-K" in out
+    assert "not evidence" in out
+
+
+def test_a_dead_sec_does_not_take_the_earnings_history_with_it(monkeypatch):
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeTicker({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                                              _dates_frame([("2026-07-30", 1.89, 2.02)])))
+
+    def boom(*a, **k):
+        raise RuntimeError("EDGAR unreachable")
+
+    monkeypatch.setattr(srv.econ_calendar, "earnings_filings", boom)
+    out = srv.get_earnings("AAPL")
+
+    assert "+6.88%" in out, "the Yahoo history should survive an SEC outage"
+    assert "SEC confirmation unavailable" in out
+
+
+# =====================================================================
+# get_updates: what changed, not what is true
+# =====================================================================
+
+def _filing(sym_stamp, form="8-K", items="", desc="", url="https://sec.gov/x"):
+    return {"form": form, "acceptance": sym_stamp, "items": items,
+            "description": desc, "url": url, "filing_date": sym_stamp[:10]}
+
+
+@pytest.fixture
+def quiet_updates(monkeypatch):
+    """No filings, no macro, no bars -- each test switches on what it needs."""
+    monkeypatch.setattr(srv.econ_calendar, "company_filings", lambda *a, **k: [])
+    monkeypatch.setattr(srv.econ_calendar, "economic_calendar",
+                        lambda *a, **k: ([], []))
+
+    def no_bars(*a, **k):
+        raise RuntimeError("no feed in this test")
+
+    monkeypatch.setattr(srv.webull_client, "fetch_data", no_bars)
+
+
+def test_nothing_new_is_stated_not_left_blank(quiet_updates):
+    """An empty response reads as a failure; "nothing new" is a real answer."""
+    out = srv.get_updates(symbols="AAPL", since="24h")
+    assert "Nothing new in this window" in out
+    assert "not an error" in out
+
+
+def test_only_filings_newer_than_the_cutoff_are_reported(monkeypatch, quiet_updates):
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    recent = (now - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    old = (now - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    monkeypatch.setattr(srv.econ_calendar, "company_filings",
+                        lambda *a, **k: [_filing(recent, "8-K", "2.02,9.01"),
+                                         _filing(old, "10-Q")])
+    out = srv.get_updates(symbols="AAPL", since="24h")
+
+    assert "New SEC filings (1)" in out
+    assert "Results of operations" in out, "8-K items carry the actual news"
+    assert "10-Q" not in out, "a filing older than the cutoff must not appear"
+
+
+def test_the_window_boundary_is_the_acceptance_stamp_not_the_filing_date(monkeypatch, quiet_updates):
+    """
+    filing_date is day-resolution. A filing accepted at 20:30 yesterday is
+    inside a 24h window opened at 12:00 today only if the time is honoured.
+    """
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    inside = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    outside = (now - dt.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    monkeypatch.setattr(srv.econ_calendar, "company_filings",
+                        lambda *a, **k: [_filing(inside), _filing(outside)])
+    out = srv.get_updates(symbols="AAPL", since="2h")
+    assert "New SEC filings (1)" in out
+
+
+def test_a_move_is_measured_from_before_the_window(monkeypatch, quiet_updates):
+    """
+    Measuring from the first bar *inside* the window discards the move that
+    happened at its open -- usually the largest part of it.
+    """
+    frame = rising_frame(n=10, start=100.0, step=10.0)   # 100..190, +10/bar
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (frame, "Test feed"))
+
+    out = srv.get_updates(symbols="AAPL", since="3d", move_threshold_pct=1.0)
+    # Three days back covers the last 3 bars, so the reference is bar -4 (160)
+    # and the newest is 190 -> +18.75%. Measuring from 170 would give +11.76%.
+    assert "+18.75%" in out
+
+
+def test_a_quiet_market_is_reported_with_its_numbers(monkeypatch, quiet_updates):
+    flat = rising_frame(n=10, start=100.0, step=0.01)
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda sym, interval="D", count=200: (flat, "Test feed"))
+
+    out = srv.get_updates(symbols="AAPL", since="3d", move_threshold_pct=5.0)
+    assert "nothing moved 5.0% or more" in out
+    assert "AAPL +0.0" in out, "the actual move should still be quoted"
+
+
+def test_an_unreadable_since_is_a_tool_error_not_a_silent_default(quiet_updates):
+    with pytest.raises(Exception, match="Could not read"):
+        srv.get_updates(symbols="AAPL", since="last Tuesday")
+
+
+def test_one_broken_symbol_does_not_hide_the_rest(monkeypatch, quiet_updates):
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    recent = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def filings(symbol, **k):
+        if symbol == "BAD":
+            raise RuntimeError("CIK lookup failed")
+        return [_filing(recent, "8-K", "5.02")]
+
+    monkeypatch.setattr(srv.econ_calendar, "company_filings", filings)
+    out = srv.get_updates(symbols="AAPL,BAD", since="24h")
+
+    assert "Director/officer departure" in out
+    assert "Incomplete" in out and "BAD" in out
+
+
+def test_a_published_macro_release_carries_its_reading(monkeypatch, quiet_updates):
+    import datetime as dt
+    today = dt.date.today()
+    entry = {
+        "date": today, "source": "BLS", "release": "Consumer Price Index",
+        "reference_period": "July 2026", "slug": "cpi", "value_status": "published",
+        "values": [{"series": "cpi", "short": "CPI", "status": "published",
+                    "headline": {"kind": "yoy", "number": 2.7, "text": "+2.7% YoY"}}],
+    }
+    monkeypatch.setattr(srv.econ_calendar, "economic_calendar",
+                        lambda *a, **k: ([entry], []))
+    out = srv.get_updates(symbols="", since="24h")
+
+    assert "Consumer Price Index" in out
+    assert "CPI +2.7% YoY" in out

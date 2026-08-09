@@ -51,6 +51,7 @@ from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import portfolio_history
 from dashboard import econ_calendar
+from dashboard import edgar_forms
 import indicators
 import backtester
 import forecaster
@@ -1336,9 +1337,19 @@ with tab_events:
     # Macro releases
     # ---------------------------------------------------------------
     st.markdown("#### Scheduled Macro Releases")
-    with st.spinner("Reading BLS release schedules..."):
+    source_labels = {"bls": "BLS (CPI, PPI, jobs)",
+                     "fomc": "Federal Reserve (FOMC)",
+                     "bea": "BEA (PCE, GDP, trade)"}
+    picked = st.multiselect("Sources", options=list(source_labels),
+                            default=list(source_labels),
+                            format_func=lambda k: source_labels[k],
+                            help="PCE is the Fed's target measure and is a BEA release, "
+                                 "not a BLS one — a BLS-only calendar omits it.")
+
+    with st.spinner("Reading release schedules..."):
         try:
-            releases, failed = econ_calendar.upcoming_releases(days_ahead=days_ahead, days_back=7)
+            releases, failed = econ_calendar.economic_calendar(
+                days_ahead=days_ahead, days_back=7, sources=picked or None)
         except Exception as e:
             releases, failed = [], [str(e)]
 
@@ -1351,13 +1362,21 @@ with tab_events:
                 "Date": ev["date"].isoformat(),
                 "When": ("today" if delta == 0 else
                          f"in {delta}d" if delta > 0 else f"{-delta}d ago"),
+                "Source": ev.get("source", ""),
                 "Release": ev["release"],
-                "Period": ev.get("period", ""),
-                "Time": ev.get("time", ""),
+                # These were reading ev["period"] and ev["time"], which the
+                # schedule parser has never produced -- both columns were blank.
+                "Covers": ev.get("reference_period", ""),
+                "Time (ET)": ev.get("time_et", ""),
+                "Reading": econ_calendar.describe_reading(ev) or "—",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
                      column_config={"Date": st.column_config.TextColumn(width="small"),
-                                    "When": st.column_config.TextColumn(width="small")})
+                                    "When": st.column_config.TextColumn(width="small"),
+                                    "Source": st.column_config.TextColumn(width="small")})
+        st.caption("`Reading` is the actual print where a release has happened, otherwise "
+                   "the **prior** print with its own reference period. No free source "
+                   "publishes consensus forecasts, so nothing here is an expectation.")
         nxt = next((r for r in rows if not r["When"].endswith("ago")), None)
         if nxt:
             st.caption(f"Next: **{nxt['Release']}** {nxt['When']} ({nxt['Date']}).")
@@ -1367,8 +1386,8 @@ with tab_events:
         # The schedules are scraped HTML pages. When one is unreachable the
         # calendar is incomplete, and an incomplete calendar that looks complete
         # is worse than one that says so.
-        st.warning("Some release schedules could not be read, so this calendar is "
-                   "incomplete: " + "; ".join(f"`{f}`" for f in failed[:4]))
+        st.warning("This calendar is incomplete — some sources could not be read: "
+                   + "; ".join(f"`{f}`" for f in failed[:4]))
 
     # ---------------------------------------------------------------
     # Filings
@@ -1392,7 +1411,11 @@ with tab_events:
                             "Symbol": tkr,
                             "Filed": f.get("filing_date", ""),
                             "Form": f.get("form", ""),
-                            "Description": (f.get("description") or "")[:70],
+                            # EDGAR's own description for a Form 4 is "FORM 4",
+                            # and for an 8-K it omits the item codes that carry
+                            # the actual news.
+                            "What": edgar_forms.describe_form(
+                                f.get("form", ""), f.get("items", ""))[:80],
                             "Accepted": (f.get("acceptance") or "")[:16].replace("T", " "),
                             "Link": f.get("url", ""),
                         })
@@ -1419,6 +1442,105 @@ with tab_events:
             if any("SEC_USER_AGENT" in e for e in filing_errors):
                 st.caption("The SEC's fair-access policy requires a contact address. "
                            "Set `SEC_USER_AGENT` in `.env` and restart.")
+
+    # ---------------------------------------------------------------
+    # What changed
+    # ---------------------------------------------------------------
+    # The tables above answer "what is scheduled" and "what has been filed".
+    # Neither answers "what is new since I last looked", which is the question
+    # someone opening this tab in the morning actually has.
+    st.markdown("#### What Changed")
+    since_choice = st.radio("Since", options=["24h", "3d", "1w"], horizontal=True,
+                            index=0, key="events_since")
+
+    if not watchlist:
+        st.info("Add a ticker above to diff its filings and price moves.")
+    else:
+        try:
+            cutoff = market_calendar.parse_since(since_choice)
+        except ValueError as e:
+            cutoff = None
+            st.error(str(e))
+
+        if cutoff is not None:
+            new_filings, move_rows, diff_errors = [], [], []
+            with st.spinner(f"Diffing the last {since_choice}..."):
+                for tkr in watchlist:
+                    try:
+                        for f in econ_calendar.company_filings(tkr, limit=30):
+                            stamp = (f.get("acceptance") or "").strip()
+                            if not stamp:
+                                continue
+                            try:
+                                when = datetime.datetime.fromisoformat(
+                                    stamp.replace("Z", "+00:00"))
+                            except ValueError:
+                                continue
+                            if when < cutoff:
+                                break      # newest-first, so this symbol is done
+                            new_filings.append({
+                                "Symbol": tkr,
+                                "Accepted": stamp.replace("T", " ")[:19],
+                                "Form": f.get("form", ""),
+                                "What": edgar_forms.describe_form(
+                                    f.get("form", ""), f.get("items", ""))[:70],
+                                "Link": f.get("url", ""),
+                            })
+                    except Exception as e:
+                        diff_errors.append(f"{tkr} filings: {str(e)[:80]}")
+
+                    try:
+                        df_m, src_m = webull_client.fetch_data(tkr, interval="D", count=200)
+                        stamps = pd.to_datetime(df_m["time"], errors="coerce", utc=True)
+                        inside = df_m[stamps >= cutoff]
+                        if inside.empty or len(df_m) < 2:
+                            # Over a weekend a 24h window contains no daily bar
+                            # at all. Say which bar is newest, so "no move" is
+                            # not confused with "the feed is dead".
+                            newest = str(df_m["time"].iloc[-1])[:16] if len(df_m) else "n/a"
+                            diff_errors.append(
+                                f"{tkr}: no bars inside the window (newest bar {newest})")
+                            continue
+                        pos = df_m.index.get_loc(inside.index[0])
+                        # Measure from the last bar BEFORE the window: starting
+                        # inside it discards the move that happened at its open.
+                        base = float(df_m["close"].iloc[max(pos - 1, 0)])
+                        last = float(df_m["close"].iloc[-1])
+                        if base:
+                            move_rows.append({"Symbol": tkr, "From": base, "To": last,
+                                              "Move %": (last / base - 1) * 100,
+                                              "Source": src_m})
+                    except Exception as e:
+                        diff_errors.append(f"{tkr} prices: {str(e)[:80]}")
+
+            dcol1, dcol2 = st.columns([3, 2])
+            with dcol1:
+                if new_filings:
+                    new_filings.sort(key=lambda r: r["Accepted"], reverse=True)
+                    st.dataframe(
+                        pd.DataFrame(new_filings), use_container_width=True, hide_index=True,
+                        column_config={
+                            "Link": st.column_config.LinkColumn("Filing", display_text="open"),
+                            "Symbol": st.column_config.TextColumn(width="small"),
+                            "Form": st.column_config.TextColumn(width="small"),
+                        })
+                else:
+                    st.caption(f"No new filings in the last {since_choice}.")
+            with dcol2:
+                if move_rows:
+                    move_rows.sort(key=lambda r: abs(r["Move %"]), reverse=True)
+                    st.dataframe(
+                        pd.DataFrame(move_rows), use_container_width=True, hide_index=True,
+                        column_config={
+                            "From": st.column_config.NumberColumn(format="%.2f"),
+                            "To": st.column_config.NumberColumn(format="%.2f"),
+                            "Move %": st.column_config.NumberColumn(format="%+.2f%%"),
+                        })
+                else:
+                    st.caption("No priced bars inside this window.")
+
+            if diff_errors:
+                st.warning("This diff is incomplete: " + "; ".join(f"`{e}`" for e in diff_errors[:4]))
 
 with tab_alerts:
     st.markdown("### Live Alerts & Watcher Daemon")

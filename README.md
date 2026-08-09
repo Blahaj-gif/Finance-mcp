@@ -2,7 +2,7 @@
 
 A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
 
-Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 37 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 39 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
 
 ---
 
@@ -19,11 +19,12 @@ Finance MCP bridges the gap between LLM reasoning (Claude) and market execution 
 
 ## Macro Calendar & Real-Time Filings
 
-Two public sources sit alongside the broker feed, so Claude can see the events that move price as well as the price itself.
+Four public sources sit alongside the broker feed, so Claude can see the events that move price as well as the price itself.
 
 | Tool | What it gives you |
 |---|---|
-| `get_economic_calendar` | Scheduled US releases — CPI, PPI, jobs, JOLTS and more — with date, time and reference period, plus the latest actual prints. |
+| `get_economic_calendar` | Scheduled US events from three sources — BLS (CPI, PPI, NFP, JOLTS), the Federal Reserve (FOMC decisions, flagged when they carry a dot plot), and BEA (PCE, GDP, trade) — each row carrying the actual print where it has happened and the **prior** print where it has not. |
+| `get_updates` | What has changed since a timestamp: new SEC filings, macro releases that printed, and outsized price moves. Answers "anything new?" without refetching everything. |
 | `get_macro_data` | Historical CPI, core CPI, unemployment, payrolls, PPI and wages with MoM/YoY changes. `source="markets"` gives policy rates, the yield curve and financial conditions from FRED, the ECB and the Bank of England. |
 | `get_edgar_filings` | SEC filings in three modes: one company's filings, the all-registrant live feed, or full-text search across filing bodies. |
 | `get_insider_activity` | Parsed Form 3/4/5 — who traded, at what price, **whether the sale was under a Rule 10b5-1 plan**, and opening positions. `forms="144"` gives *proposed* sales, filed ahead of the trade, with the plan-adoption date. |
@@ -32,7 +33,9 @@ Two public sources sit alongside the broker feed, so Claude can see the events t
 
 **Filings are parsed, not forwarded.** Most of what an analyst wants from a filing is already a machine-readable field. "Was that sale pre-scheduled?" is `<aff10b5One>` in the Form 4 XML — a boolean. So the server extracts and answers rather than handing over a document: one Form 4 is ~6,600 tokens of raw XML, and a single 10-K is ~610,000 tokens, which is three times a 200k context window. `get_insider_activity` also separates real decisions (codes P/S) from compensation mechanics — grants, option exercises, and shares withheld for tax — which are routinely misreported as "insiders sold $X".
 
-**On latency.** EDGAR acceptance timestamps are exact to the second, so an earnings 8-K (item `2.02`) is visible as soon as it is accepted. The delay you experience is your own polling interval, not the feed.
+**On latency.** EDGAR acceptance timestamps are exact to the second, so an earnings 8-K (item `2.02`) is visible as soon as it is accepted. The delay you experience is your own polling interval, not the feed. `get_earnings` uses that same item code to confirm which quarters were actually released, and flags an upcoming date that Yahoo is only *estimating* — Yahoo publishes an unset date as a window and a set one as a single day, and the two are indistinguishable once formatted.
+
+**No consensus, and it says so.** Street forecasts are a licensed product with no free source, so every comparison in the calendar is against the **previous print** and is labelled that way. A "surprise" measured against a prior reading is not a surprise: the market trades the gap to expectations, and expectations are the one thing not available here.
 
 **Rate and quota handling.** BLS allows 25 API queries a day unregistered; the release-schedule pages are ordinary web fetches and deliberately do *not* draw on that budget. Results are cached (6h for macro series, 24h for schedules, 2min for filings), so a repeated calendar call costs nothing. The SEC's 10 req/s ceiling is enforced at the client.
 

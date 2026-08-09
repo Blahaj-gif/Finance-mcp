@@ -677,3 +677,34 @@ def test_headline_figures_from_a_press_release():
 
 def test_headline_extraction_returns_nothing_rather_than_guessing():
     assert ef.extract_headline_figures("The company held its annual meeting.") == {}
+
+
+# =====================================================================
+# Plain-language form labels
+# =====================================================================
+
+def test_an_8k_is_described_by_its_items_not_its_form_number():
+    """
+    "Material event" next to "Results of operations (earnings)" is the
+    difference between knowing a company filed and knowing what happened.
+    """
+    assert "Results of operations" in ef.describe_form("8-K", "2.02,9.01")
+
+
+def test_a_form_4_gets_a_useful_label():
+    """EDGAR's own description for a Form 4 is the string "FORM 4"."""
+    assert ef.describe_form("4") == "Insider transaction"
+
+
+def test_an_amendment_inherits_its_base_form():
+    assert ef.describe_form("10-K/A") == "Annual report (amended)"
+
+
+def test_an_unknown_form_returns_the_form_itself_not_a_guess():
+    assert ef.describe_form("N-CSRS") == "N-CSRS"
+    assert ef.describe_form("") == "Filing"
+
+
+def test_unrecognised_items_fall_back_to_the_form_meaning():
+    """An item code we do not carry must not blank out the description."""
+    assert ef.describe_form("8-K", "99.99") == "Material event"

@@ -19,6 +19,7 @@ import dashboard.options_math as options_math
 import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
+import dashboard.market_calendar as market_calendar
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -835,36 +836,161 @@ def get_open_positions() -> str:
 # =====================================================================
 
 @mcp.tool()
-def get_earnings(symbol: str) -> str:
+def get_earnings(symbol: str, confirm_with_sec: bool = True) -> str:
     """
-    Fetches next earnings date, historical EPS estimates vs actuals, and surprise % for risk framing.
-    
+    Next earnings date, historical EPS estimates vs actuals, and — critically — whether
+    the upcoming date is CONFIRMED or merely Yahoo's ESTIMATE.
+
+    Yahoo publishes an estimated report date as a window ("Oct 28 - Nov 3") and a set
+    one as a single day. Both look identical once formatted, so an estimated date can
+    read as fact and be wrong by a week. This tool says which it is.
+
+    Past quarters are confirmed against the SEC: an 8-K carrying Item 2.02 ("Results
+    of Operations") is the filing a company makes when it actually releases a quarter,
+    and its acceptance timestamp is authoritative to the second.
+
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
+        confirm_with_sec: Cross-check reported quarters against 8-K Item 2.02 filings.
     """
+    import datetime as _dt
+    sym = symbol.upper()
     try:
-        ticker = webull_client.yahoo_ticker(symbol.upper())
-        dates_df = ticker.earnings_dates
-        
-        if dates_df is None or dates_df.empty:
-            return f"No earnings date information found for {symbol}."
-            
-        dates_df = dates_df.head(6).copy()
-        dates_df.index = dates_df.index.strftime("%Y-%m-%d")
-        dates_df = dates_df.reset_index().rename(columns={"index": "Date", "EPS Estimate": "Estimate", "Reported EPS": "Reported", "Surprise(%)": "Surprise %"})
-        
-        for col in ["Estimate", "Reported"]:
-            if col in dates_df.columns:
-                dates_df[col] = dates_df[col].round(2)
-        if "Surprise %" in dates_df.columns:
-            dates_df["Surprise %"] = (dates_df["Surprise %"] * 100).round(2).astype(str) + "%"
-            
+        ticker = webull_client.yahoo_ticker(sym)
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        out = f"### Earnings — {sym}  *(as of {stamp})*\n\n"
+
+        # --- Next report: is the date set, or is it Yahoo guessing? ------------
+        # Yahoo carries a start and an end timestamp for the next report. They are
+        # equal when the date is set and differ when Yahoo is estimating a window.
+        # Rendering only the start of a window as "the date" is the failure this
+        # tool exists to prevent.
+        window = []
         try:
-            table_str = dates_df.to_markdown(index=False)
+            cal = ticker.calendar or {}
+            raw = cal.get("Earnings Date") or []
+            window = list(raw) if isinstance(raw, (list, tuple)) else [raw]
         except Exception:
-            table_str = dates_df.to_string(index=False)
-            
-        return f"### Earnings Calendar & History: {symbol.upper()}\n\n" + table_str
+            cal = {}
+        is_window = len(window) > 1 and window[0] != window[-1]
+
+        # Yahoo's calendar endpoint and its earnings-dates table are separate
+        # feeds and do disagree -- AAPL shows 30 Oct on one and 29 Oct on the
+        # other. A date two Yahoo endpoints cannot agree on is not a set date,
+        # whatever the single-value shape implies.
+        dates_df = ticker.earnings_dates
+        table_next = None
+        if dates_df is not None and not dates_df.empty:
+            pending = dates_df[dates_df.get("Reported EPS").isna()] \
+                if "Reported EPS" in dates_df.columns else dates_df.iloc[0:0]
+            if not pending.empty:
+                table_next = pending.index.min().date()
+
+        if window and not is_window:
+            head = window[0]
+            if table_next is not None and table_next != head:
+                out += (f"**Next report: {head} — UNCONFIRMED.** Yahoo's calendar says "
+                        f"{head}; its own earnings table says {table_next}.\n\n"
+                        "*Two feeds from the same provider disagree, so the date is not "
+                        "settled. Treat the pair as the window.*\n\n")
+            else:
+                out += (f"**Next report: {head}** — a single date, and Yahoo's two feeds "
+                        "agree on it.\n\n"
+                        "*That is Yahoo's assessment, not a company confirmation. Only "
+                        "the 8-K below proves a quarter was released, and it appears "
+                        "after the fact.*\n\n")
+        elif window:
+            out += (f"**Next report: ESTIMATED between {window[0]} and {window[-1]}** — "
+                    "Yahoo has no set date.\n\n"
+                    "*Treat this as a window, not a date. Sizing risk to the first day "
+                    "of an estimated window is the mistake this flag exists to stop.*\n\n")
+        else:
+            out += "**Next report: not published by Yahoo.**\n\n"
+
+        estimate_bits = [f"{label} ${cal[key]:,.2f}"
+                         for key, label in (("Earnings Average", "Avg"),
+                                            ("Earnings Low", "Low"),
+                                            ("Earnings High", "High"))
+                         if isinstance(cal.get(key), (int, float))]
+        if estimate_bits:
+            out += "**Analyst EPS estimate (next quarter):** " + " · ".join(estimate_bits) + "\n\n"
+
+        # --- History ----------------------------------------------------------
+        if dates_df is None or dates_df.empty:
+            out += "*No reported-quarter history available from Yahoo.*\n"
+        else:
+            hist = dates_df.head(8).copy()
+            hist.index = hist.index.strftime("%Y-%m-%d")
+            hist = hist.reset_index().rename(columns={
+                "index": "Date", "Earnings Date": "Date", "EPS Estimate": "Estimate",
+                "Reported EPS": "Reported", "Surprise(%)": "Surprise %"})
+
+            # yfinance's Surprise(%) is ALREADY a percentage (6.74 for a 6.74%
+            # beat). Multiplying by 100 turned every AAPL beat into "+674%",
+            # which is not a number anyone should repeat. Recompute from the two
+            # columns we can see and use ours, checking Yahoo's against it.
+            disagreements = []
+            surprises = []
+            for _, row in hist.iterrows():
+                est, rep = row.get("Estimate"), row.get("Reported")
+                if pd.isna(rep):
+                    surprises.append("pending")
+                    continue
+                if pd.isna(est) or not est:
+                    surprises.append("n/a")
+                    continue
+                ours = (rep - est) / abs(est) * 100
+                theirs = row.get("Surprise %")
+                if pd.notna(theirs) and abs(ours - float(theirs)) > 1.0:
+                    disagreements.append(f"{row['Date']}: ours {ours:+.2f}% vs "
+                                         f"Yahoo {float(theirs):+.2f}%")
+                surprises.append(f"{ours:+.2f}%")
+
+            for col in ("Estimate", "Reported"):
+                if col in hist.columns:
+                    hist[col] = hist[col].apply(
+                        lambda v: "pending" if pd.isna(v) else f"{v:,.2f}")
+            hist["Surprise %"] = surprises
+
+            out += "**Reported quarters (Yahoo)**\n\n"
+            try:
+                out += hist.to_markdown(index=False) + "\n"
+            except Exception:
+                out += hist.to_string(index=False) + "\n"
+            out += "\n*Surprise is computed from the estimate and the reported figure.*\n"
+            if disagreements:
+                out += ("\n**Warning — our surprise disagrees with Yahoo's own column:** "
+                        + "; ".join(disagreements[:4]) + "\n")
+
+        # --- SEC confirmation -------------------------------------------------
+        if confirm_with_sec:
+            try:
+                hits = econ_calendar.earnings_filings(sym, limit=6)
+            except Exception as e:
+                out += f"\n*SEC confirmation unavailable: {str(e)[:140]}*\n"
+                hits = None
+
+            if hits is not None:
+                if hits:
+                    rows = [{
+                        "Filed": f["filing_date"],
+                        "Accepted (UTC)": (f.get("acceptance") or "").replace("T", " ")[:19],
+                        "Period": f.get("report_date") or "—",
+                        "Filing": f["url"],
+                    } for f in hits]
+                    out += ("\n**Confirmed by SEC — 8-K Item 2.02, Results of Operations**\n\n"
+                            + pd.DataFrame(rows).to_markdown(index=False) + "\n")
+                    out += ("\n*Acceptance timestamps are the SEC's own, to the second. "
+                            "These confirm quarters already released; no filing exists "
+                            "for a quarter not yet reported.*\n")
+                else:
+                    out += ("\n*No 8-K carrying Item 2.02 found for this filer. Foreign "
+                            "private issuers report on 6-K and will show nothing here — "
+                            "that is not evidence they have not reported.*\n")
+
+        return out
+    except ToolError:
+        raise
     except Exception as e:
         raise ToolError(f"Error fetching earnings data for {symbol}: {e}") from e
 
@@ -2743,26 +2869,43 @@ def validate_bls_key(key: str = None) -> str:
 
 @mcp.tool()
 def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
-                          include_latest_data: bool = True) -> str:
+                          include_latest_data: bool = True,
+                          sources: str = "bls,fomc,bea") -> str:
     """
-    Upcoming US macroeconomic releases (CPI, PPI, jobs, JOLTS and more) with their
-    scheduled date and time, plus the most recent actual readings. Sourced live from
-    the Bureau of Labor Statistics — free, no key required.
+    Upcoming US macroeconomic events with their scheduled date, time and — where the
+    release has already happened — the number that came out.
 
-    Use this to know what is due before sizing risk into an event, or to check where
-    inflation and employment actually stand.
+    Three live sources, all free and keyless: the Bureau of Labor Statistics (CPI,
+    core CPI, PPI, the employment situation/NFP, JOLTS), the Federal Reserve (FOMC
+    rate decisions, flagged when they carry a Summary of Economic Projections), and
+    the BEA (PCE — the Fed's target measure — plus GDP and the trade balance).
+
+    Each row carries a reading: the actual print for a release that has happened, or
+    the PREVIOUS print for one that has not. There is no consensus/expectations feed
+    here — street forecasts are a licensed product — so every comparison is against
+    the prior reading and is labelled that way. Do not read a "prior" figure as a
+    forecast for the release being waited on.
 
     Args:
-        days_ahead: How far forward to look for scheduled releases (default 30).
+        days_ahead: How far forward to look for scheduled events (default 30).
         days_back: How far back to include recently published releases (default 7).
         include_latest_data: Also report the latest CPI/core CPI/unemployment/payroll prints.
+        sources: Comma-separated subset of bls,fomc,bea. Default all three.
     """
     import datetime as _dt
     try:
-        upcoming, failed = econ_calendar.upcoming_releases(days_ahead=days_ahead, days_back=days_back)
-        today = _dt.date.today()
+        wanted = [s.strip().lower() for s in str(sources).split(",") if s.strip()]
+        unknown = [s for s in wanted if s not in econ_calendar.CALENDAR_SOURCES]
+        if unknown:
+            raise ToolError(
+                f"Unknown calendar source(s): {', '.join(unknown)}. "
+                f"Available: {', '.join(econ_calendar.CALENDAR_SOURCES)}.")
 
-        out = f"### US Economic Calendar — {today} ({days_back}d back, {days_ahead}d ahead)\n\n"
+        today = _dt.date.today()
+        upcoming, failed = econ_calendar.economic_calendar(
+            days_ahead=days_ahead, days_back=days_back, sources=wanted, today=today)
+
+        out = f"### US Economic Calendar — as of {today} ({days_back}d back, {days_ahead}d ahead)\n\n"
 
         if upcoming:
             rows = []
@@ -2771,16 +2914,22 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
                 when = "TODAY" if delta == 0 else (f"in {delta}d" if delta > 0 else f"{-delta}d ago")
                 rows.append({
                     "Date": str(e["date"]),
-                    "Time (ET)": e["time_et"],
+                    "Time (ET)": e.get("time_et", ""),
                     "When": when,
+                    "Source": e.get("source", ""),
                     "Release": e["release"],
-                    "Covers": e["reference_period"],
+                    "Covers": e.get("reference_period", ""),
+                    "Reading": econ_calendar.describe_reading(e) or "—",
                 })
             table = pd.DataFrame(rows)
             try:
                 out += table.to_markdown(index=False) + "\n"
             except Exception:
                 out += table.to_string(index=False) + "\n"
+            out += ("\n*Readings are the actual print where published, otherwise the "
+                    "**prior** print with its own reference period. No consensus "
+                    "forecast is available from any free source, so nothing here is "
+                    "an expectation.*\n")
         else:
             out += "*No scheduled releases in this window.*\n"
 
@@ -2799,13 +2948,19 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
             out += "\n**Latest prints**\n\n"
             drows = []
             for key, series in data.items():
-                if not series["observations"]:
+                obs = series["observations"]
+                if not obs:
                     continue
-                o = series["observations"][0]
+                o = obs[0]
                 u = o.get("change_unit", "%")
+                prev = obs[1]["value"] if len(obs) > 1 else None
+                headline = econ_calendar.headline(key, series["unit"], o, prev)
                 drows.append({
                     "Indicator": series["label"],
                     "Period": f"{o['period']} {o['year']}",
+                    # Payrolls as "+0.09% MoM" is right and unreadable; the print
+                    # is "+147k". The headline column says it the quoted way.
+                    "Print": headline["text"] if headline else "n/a",
                     "Value": f"{o['value']:,.2f}",
                     "MoM": f"{o['mom_pct']:+.2f}{u}" if o["mom_pct"] is not None else "n/a",
                     "YoY": f"{o['yoy_pct']:+.2f}{u}" if o["yoy_pct"] is not None else "n/a",
@@ -2817,10 +2972,11 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
                 out += dtable.to_string(index=False) + "\n"
 
         if failed:
-            out += f"\n**Warning: {len(failed)} schedule(s) unavailable:** " + "; ".join(failed) + "\n"
+            out += (f"\n**Warning — this calendar is incomplete ({len(failed)} issue(s)):** "
+                    + "; ".join(failed) + "\n")
 
         status = econ_calendar.source_status()["bls"]
-        out += (f"\n*Source: BLS {status['tier']}"
+        out += (f"\n*Sources: BLS {status['tier']}, Federal Reserve, BEA"
                 + (f" · {status['remaining_today']} of {status['daily_cap']} queries left today"
                    if status["remaining_today"] is not None else "")
                 + (f" · {status['note']}" if status["note"] else "") + "*")
@@ -3044,6 +3200,169 @@ def get_edgar_filings(symbol: str = None, form_type: str = "8-K",
         raise
     except Exception as e:
         raise ToolError(f"Error fetching EDGAR filings: {e}") from e
+
+
+@mcp.tool()
+def get_updates(symbols: str | list[str] = "", since: str = "24h",
+                include_macro: bool = True, move_threshold_pct: float = 3.0) -> str:
+    """
+    What has actually changed since a point in time: new SEC filings, macro releases
+    that have printed, and outsized price moves.
+
+    Every other tool here answers "what is true now". Answering "what is new" without
+    this means refetching everything and diffing by hand, which is expensive and easy
+    to get wrong. This does the diff against a timestamp you supply.
+
+    Args:
+        symbols: Tickers to check, comma-separated or a list. Filings and price moves
+                 are per-symbol; leave empty for macro only.
+        since: A window ("24h", "3d", "2w"), a date ("2026-08-01"), or an ISO
+               timestamp ("2026-08-01T13:30:00Z"). Default 24h.
+        include_macro: Include economic releases that printed inside the window.
+        move_threshold_pct: Report a price move only if it is at least this large.
+    """
+    import datetime as _dt
+    try:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        try:
+            cutoff = market_calendar.parse_since(since, now=now)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+
+        span_hours = (now - cutoff).total_seconds() / 3600.0
+        span = (f"{span_hours:.0f}h" if span_hours < 48 else f"{span_hours / 24:.1f}d")
+        tickers = symbols.split(",") if isinstance(symbols, str) else list(symbols)
+        tickers = [t.strip().upper() for t in tickers if str(t).strip()][:12]
+
+        out = (f"### Updates since {cutoff:%Y-%m-%d %H:%M UTC} "
+               f"({span} ago; now {now:%Y-%m-%d %H:%M UTC})\n\n")
+        found_anything = False
+        problems = []
+
+        # --- New filings ------------------------------------------------------
+        if tickers:
+            rows = []
+            for sym in tickers:
+                try:
+                    for f in econ_calendar.company_filings(sym, limit=30):
+                        stamp = (f.get("acceptance") or "").strip()
+                        if not stamp:
+                            continue
+                        try:
+                            when = _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                        if when < cutoff:
+                            # Filings come back newest-first, so the first one
+                            # older than the cutoff ends this symbol.
+                            break
+                        rows.append({
+                            "Symbol": sym,
+                            "Accepted (UTC)": stamp.replace("T", " ")[:19],
+                            "Form": str(f["form"]),
+                            "What": edgar_forms.describe_form(f["form"], f.get("items", "")),
+                            "Link": f["url"],
+                        })
+                except Exception as e:
+                    problems.append(f"{sym} filings: {str(e)[:90]}")
+
+            if rows:
+                found_anything = True
+                rows.sort(key=lambda r: r["Accepted (UTC)"], reverse=True)
+                out += f"**New SEC filings ({len(rows)})**\n\n"
+                out += pd.DataFrame(rows).astype(str).to_markdown(index=False) + "\n\n"
+
+        # --- Macro that printed ------------------------------------------------
+        if include_macro:
+            try:
+                days_back = max(1, math.ceil(span_hours / 24))
+                entries, warns = econ_calendar.economic_calendar(
+                    days_ahead=0, days_back=days_back)
+                problems.extend(warns)
+                printed = [e for e in entries if e["date"] >= cutoff.date()]
+                if printed:
+                    found_anything = True
+                    out += f"**Economic releases in the window ({len(printed)})**\n\n"
+                    out += pd.DataFrame([{
+                        "Date": str(e["date"]),
+                        "Source": e.get("source", ""),
+                        "Release": e["release"],
+                        "Covers": e.get("reference_period", ""),
+                        "Reading": econ_calendar.describe_reading(e) or "—",
+                    } for e in printed]).to_markdown(index=False) + "\n\n"
+            except Exception as e:
+                problems.append(f"macro calendar: {str(e)[:90]}")
+
+        # --- Price moves -------------------------------------------------------
+        if tickers:
+            moves, skipped = [], []
+            # A window under a day needs intraday bars; a longer one needs daily.
+            interval = "5" if span_hours <= 8 else ("60" if span_hours <= 48 else "D")
+            for sym in tickers:
+                try:
+                    df, source = webull_client.fetch_data(sym, interval=interval, count=200)
+                    stamps = pd.to_datetime(df["time"], errors="coerce", utc=True)
+                    inside = df[stamps >= cutoff]
+                    if inside.empty or len(df) < 2:
+                        skipped.append(sym)
+                        continue
+                    # The reference is the last bar BEFORE the window, so the move
+                    # spans the window rather than starting inside it.
+                    first_idx = inside.index[0]
+                    prior_idx = df.index[df.index.get_loc(first_idx) - 1] \
+                        if df.index.get_loc(first_idx) > 0 else first_idx
+                    base = float(df.loc[prior_idx, "close"])
+                    last = float(df["close"].iloc[-1])
+                    if not base:
+                        skipped.append(sym)
+                        continue
+                    pct = (last / base - 1) * 100
+                    age = webull_client.bar_age(df, interval)
+                    moves.append({
+                        "Symbol": sym,
+                        "From": f"{base:,.2f}",
+                        "To": f"{last:,.2f}",
+                        "Move": f"{pct:+.2f}%",
+                        "_abs": abs(pct),
+                        "Bars": len(inside),
+                        "As of": age["as_of"] if age else "n/a",
+                        "Source": source,
+                    })
+                except Exception as e:
+                    problems.append(f"{sym} prices: {str(e)[:90]}")
+
+            notable = [m for m in moves if m["_abs"] >= abs(move_threshold_pct)]
+            if notable:
+                found_anything = True
+                notable.sort(key=lambda m: m["_abs"], reverse=True)
+                out += (f"**Price moves of {abs(move_threshold_pct):.1f}% or more "
+                        f"({len(notable)} of {len(moves)} priced)**\n\n")
+                out += pd.DataFrame([{k: v for k, v in m.items() if k != "_abs"}
+                                     for m in notable]).to_markdown(index=False) + "\n\n"
+            elif moves:
+                quiet = ", ".join(f"{m['Symbol']} {m['Move']}" for m in moves)
+                out += (f"**Prices:** nothing moved {abs(move_threshold_pct):.1f}% or more "
+                        f"({quiet}).\n\n")
+            if skipped:
+                problems.append("no bars inside the window for " + ", ".join(skipped))
+
+        if not found_anything:
+            out += ("**Nothing new in this window.** That is a result, not an error — "
+                    "the sources were queried and returned no filings, releases or "
+                    "outsized moves for what was asked.\n\n")
+
+        if problems:
+            out += ("**Incomplete — this diff did not cover everything:** "
+                    + "; ".join(problems[:8]) + "\n")
+
+        out += ("\n*A filing appears here the moment the SEC accepts it. A price move "
+                "is measured from the last bar before the window to the newest bar, so "
+                "it is bounded by feed latency, not by this tool.*")
+        return out
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"Error building the update diff: {e}") from e
 
 
 if __name__ == "__main__":

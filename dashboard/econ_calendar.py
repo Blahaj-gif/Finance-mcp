@@ -1,19 +1,33 @@
 """
 Economic calendar and real-time filings, from free public APIs.
 
-Two sources, deliberately kept separate from the broker feed:
+Four sources, deliberately kept separate from the broker feed:
 
   * **BLS** (bls.gov) for macro releases -- CPI and core CPI, PPI, the
     employment situation, JOLTS. The v1 API needs no registration but is capped
     at 25 queries a day per IP, so results are cached hard. Setting
     ``BLS_API_KEY`` in .env upgrades to v2 (500/day, longer history, and
-    server-side calculations).
+    server-side calculations). Note that the *schedule* pages live on
+    www.bls.gov and the *data* on api.bls.gov; they fail independently.
+
+  * **Federal Reserve** for FOMC decision dates, scraped from the Fed's own
+    calendar page. Not a BLS release, so a BLS-only calendar simply does not
+    contain the most market-moving date there is.
+
+  * **BEA** for PCE, GDP and the trade balance. PCE is the Fed's stated target
+    measure and is a BEA release -- another thing a BLS-only calendar omits.
 
   * **SEC EDGAR** for filings. No key exists, but the SEC's fair-access policy
     requires a descriptive ``User-Agent`` carrying a real contact address and
     caps traffic at 10 requests/second. Set ``SEC_USER_AGENT`` in .env --
     requests are refused without it rather than sent anonymously, because
     being rate-banned by the SEC is a worse outcome than a clear error.
+
+What is *not* here, and cannot be from a free source: **consensus forecasts**.
+Street estimates are a licensed product. Every comparison in this module is
+therefore against the previous print and is labelled that way -- a "surprise"
+against a prior reading is not a surprise, because the market trades the gap to
+expectations and we do not have expectations.
 
 Everything here is read-only and public. Nothing touches the broker.
 """
@@ -405,6 +419,559 @@ def upcoming_releases(days_ahead=30, days_back=7, slugs=None):
 
 
 # =====================================================================
+# BLS — JOINING THE SCHEDULE TO THE NUMBERS
+# =====================================================================
+# The schedule says *when*; fetch_bls_series says *what*. Joining them is what
+# turns "CPI on Wednesday" into "CPI Wednesday; June printed +2.7% YoY, the
+# third straight deceleration" -- context a reader can actually act on.
+#
+# The join key is the reference period, not the release date: the CPI released
+# on 12 August 2026 *is* the July 2026 reading, and pairing a release row with
+# whatever observation happens to be newest would silently label the wrong month.
+
+# Which series each release publishes. Only releases whose numbers we actually
+# carry appear here; the rest keep their schedule row and are marked "unmapped"
+# rather than quietly showing nothing.
+RELEASE_SERIES = {
+    "cpi":    ["cpi", "core_cpi"],
+    "ppi":    ["ppi"],
+    "empsit": ["payrolls", "unemployment", "avg_hourly_pay"],
+}
+
+# What the market actually quotes for each series.
+#
+# Nonfarm payrolls as a percentage ("+0.09%") is arithmetically correct and
+# useless -- the print is the change in level, +147,000 jobs. CPI as an index
+# level (324.099) is equally useless; the print is the year-over-year rate.
+# Getting this wrong produces numbers that are right and unrecognisable.
+RELEASE_HEADLINE = {
+    "cpi": "yoy", "cpi_sa": "yoy", "core_cpi": "yoy",
+    "ppi": "yoy", "avg_hourly_pay": "yoy",
+    "unemployment": "level", "labor_force": "level",
+    "payrolls": "level_change",
+}
+
+# Table-width labels. "CPI-U, All Items (NSA)" is the correct name and does not
+# fit beside three other series in one calendar row.
+RELEASE_SHORT = {
+    "cpi": "CPI", "cpi_sa": "CPI (SA)", "core_cpi": "Core CPI", "ppi": "PPI",
+    "payrolls": "Payrolls", "unemployment": "Unemployment",
+    "avg_hourly_pay": "Avg hourly earnings", "labor_force": "Participation",
+}
+
+_QUARTERS = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4,
+             "first": 1, "second": 2, "third": 3, "fourth": 4}
+
+
+def parse_reference_period(text):
+    """
+    "July 2026" -> (2026, 7, "month");  "2nd Quarter 2026" -> (2026, 6, "quarter").
+
+    A quarter resolves to its final month, which is what a quarterly series is
+    stamped with. Returns None when the period is not a form we can join on --
+    an annual or semi-annual release, or a heading the table parser picked up.
+    """
+    cleaned = nz.normalize_text(text or "").replace(".", "")
+    if not cleaned:
+        return None
+
+    m = re.search(r"(\d)(?:st|nd|rd|th)?\s*(?:quarter|qtr|q)\s*(\d{4})", cleaned, re.I)
+    if m:
+        q, year = int(m.group(1)), int(m.group(2))
+        return (year, q * 3, "quarter") if 1 <= q <= 4 else None
+
+    m = re.search(r"(1st|2nd|3rd|4th|first|second|third|fourth)\s+quarter\s+(\d{4})", cleaned, re.I)
+    if m:
+        return (int(m.group(2)), _QUARTERS[m.group(1).lower()] * 3, "quarter")
+
+    m = re.search(r"([A-Za-z]{3,9})\s+(\d{4})", cleaned)
+    if m:
+        name, year = m.group(1).lower(), int(m.group(2))
+        for full, num in _MONTHS.items():
+            if full.lower().startswith(name[:3]) and len(name) >= 3:
+                return (year, num, "month")
+    return None
+
+
+def headline(key, unit, obs, prev_value):
+    """
+    Render one observation the way the release is quoted, plus how to read it.
+
+    Returns None when the shape asked for is not computable -- a level change
+    with no prior month has nothing to subtract, and a fabricated zero there
+    would read as "no jobs added".
+    """
+    kind = RELEASE_HEADLINE.get(key, "level")
+    value = obs["value"]
+
+    if kind == "yoy":
+        if obs.get("yoy_pct") is None:
+            return None
+        return {"kind": "yoy", "number": obs["yoy_pct"],
+                "text": f"{obs['yoy_pct']:+.1f}% YoY", "index_level": value}
+
+    if kind == "level_change":
+        if prev_value is None:
+            return None
+        delta = value - prev_value
+        if unit == "thousands":
+            return {"kind": "level_change", "number": delta,
+                    "text": f"{delta:+,.0f}k", "index_level": value}
+        return {"kind": "level_change", "number": delta,
+                "text": f"{delta:+,.1f}", "index_level": value}
+
+    suffix = "%" if unit == "percent" else ""
+    return {"kind": "level", "number": value, "text": f"{value:,.1f}{suffix}",
+            "index_level": value}
+
+
+def attach_release_values(entries, today=None):
+    """
+    Add the published numbers to schedule rows, in place. Returns (entries, warnings).
+
+    Each entry gains ``values`` (a list, one per series that release publishes)
+    and ``value_status``, one of:
+
+      published  -- the reading for this row's own reference period is out
+      awaiting   -- the release date has passed but the API has not got it yet
+      scheduled  -- still in the future; ``prior`` carries the last published
+                    reading, explicitly stamped with *its* reference period
+      unmapped   -- a release whose series we do not carry
+
+    ``prior`` is never a forecast and is never presented as one. We have no
+    consensus feed -- street estimates are a licensed product -- so every change
+    here is measured against the previous print, and named that way. A "surprise"
+    against a prior reading is not a surprise; the market trades the gap to
+    expectations, and we do not have expectations.
+
+    Never raises: a calendar that loses its numbers is still a calendar, and one
+    exhausted BLS quota should not take the schedule down with it.
+    """
+    today = today or datetime.date.today()
+    warnings = []
+
+    wanted = sorted({k for e in entries for k in RELEASE_SERIES.get(e.get("slug"), [])})
+    if not wanted:
+        for e in entries:
+            e.setdefault("values", [])
+            e.setdefault("value_status", "unmapped")
+        return entries, warnings
+
+    # One API call for every series across every row: the unregistered quota is
+    # 25 queries a *day*, so a per-row fetch would exhaust it on one calendar.
+    try:
+        data = fetch_bls_series(wanted, start_year=min(e["date"].year for e in entries) - 1)
+    except Exception as exc:
+        warnings.append(f"Release values unavailable: {str(exc)[:120]}")
+        for e in entries:
+            e.setdefault("values", [])
+            e.setdefault("value_status", "unavailable")
+        return entries, warnings
+
+    index = {}      # key -> {(year, month): observation}
+    newest = {}     # key -> newest observation
+    for key, block in data.items():
+        obs = block["observations"]          # newest-first
+        index[key] = {(o["year"], o["month"]): o for o in obs}
+        newest[key] = obs[0] if obs else None
+
+    def prev_value(key, year, month):
+        p = (year, month - 1) if month > 1 else (year - 1, 12)
+        got = index[key].get(p)
+        return got["value"] if got else None
+
+    for entry in entries:
+        keys = RELEASE_SERIES.get(entry.get("slug"), [])
+        entry["values"] = []
+        if not keys:
+            entry["value_status"] = "unmapped"
+            continue
+
+        ref = parse_reference_period(entry.get("reference_period"))
+        entry["reference"] = {"year": ref[0], "month": ref[1], "kind": ref[2]} if ref else None
+
+        published = False
+        for key in keys:
+            block = data[key]
+            unit = block["unit"]
+            row = {"series": key, "label": block["label"], "unit": unit,
+                   "short": RELEASE_SHORT.get(key, block["label"]),
+                   "series_id": block["series_id"]}
+
+            obs = index[key].get((ref[0], ref[1])) if ref else None
+            if obs is not None:
+                published = True
+                row["status"] = "published"
+                row["period"] = f"{obs['period']} {obs['year']}"
+                row["value"] = obs["value"]
+                row["mom"], row["yoy"] = obs.get("mom_pct"), obs.get("yoy_pct")
+                row["change_unit"] = obs.get("change_unit")
+                row["headline"] = headline(key, unit, obs, prev_value(key, obs["year"], obs["month"]))
+                if obs.get("warnings"):
+                    warnings.extend(f"{block['label']}: {w}" for w in obs["warnings"])
+            else:
+                last = newest.get(key)
+                row["status"] = "scheduled" if entry["date"] > today else "awaiting"
+                if last is not None:
+                    row["prior"] = {
+                        "period": f"{last['period']} {last['year']}",
+                        "value": last["value"],
+                        "mom": last.get("mom_pct"), "yoy": last.get("yoy_pct"),
+                        "change_unit": last.get("change_unit"),
+                        "headline": headline(key, unit, last,
+                                              prev_value(key, last["year"], last["month"])),
+                    }
+            entry["values"].append(row)
+
+        if published:
+            entry["value_status"] = "published"
+        elif entry["date"] > today:
+            entry["value_status"] = "scheduled"
+        else:
+            entry["value_status"] = "awaiting"
+            warnings.append(
+                f"{entry['release']} ({entry.get('reference_period', '?')}) was due "
+                f"{entry['date']} but has not appeared in the BLS API yet")
+
+    return entries, warnings
+
+
+# =====================================================================
+# FEDERAL RESERVE — FOMC DECISIONS
+# =====================================================================
+# The most market-moving date on the calendar, and it is not a BLS release, so
+# a BLS-only calendar simply does not contain it.
+#
+# Both the meeting dates and the *decision* date are read from the Fed's own
+# calendar page. What is not on that page is the time: the statement has landed
+# at 2:00 PM ET at every meeting since 2013, but that is a convention we are
+# asserting, not a figure the page supplies, and it is labelled as such.
+
+FOMC_CALENDAR = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+
+_FOMC_YEAR = re.compile(r'<h4><a id="\d+">(\d{4})\s+FOMC\s+Meetings</a></h4>', re.I)
+_FOMC_ROW = re.compile(
+    r'fomc-meeting__month[^>]*>\s*(?:<strong>)?(.*?)(?:</strong>)?\s*</div>'
+    r'(.*?)fomc-meeting__date[^>]*>(.*?)</div>', re.S)
+
+
+def _month_number(name):
+    name = nz.normalize_text(name).replace(".", "").lower()
+    for full, num in _MONTHS.items():
+        if name and full.lower().startswith(name[:3]):
+            return num
+    return None
+
+
+def _parse_fomc_row(months_text, days_text, year):
+    """
+    "April" + "28-29"    -> (Apr 28, Apr 29)
+    "Apr/May" + "30-1"   -> (Apr 30, May 1)      -- meetings straddle month ends
+    "August" + "22 (notation vote)" -> (Aug 22, Aug 22), unscheduled
+    """
+    months = [m for m in (_month_number(p) for p in months_text.split("/")) if m]
+    if not months:
+        return None
+
+    note = ""
+    m = re.search(r"\(([^)]*)\)", days_text)
+    if m:
+        note = nz.normalize_text(m.group(1))
+    projections = "*" in days_text
+
+    days = [int(d) for d in re.findall(r"\d{1,2}", re.sub(r"\([^)]*\)", "", days_text))]
+    if not days:
+        return None
+
+    start_month = months[0]
+    end_month = months[-1] if len(months) > 1 else start_month
+    start_year = end_year = year
+    # A December/January meeting ends in the following year.
+    if end_month < start_month:
+        end_year += 1
+
+    try:
+        start = datetime.date(start_year, start_month, days[0])
+        end = datetime.date(end_year, end_month, days[-1])
+    except ValueError:
+        return None
+
+    return {"start": start, "end": end, "note": note, "projections": projections}
+
+
+def _meeting_span(start, end):
+    """'Mar 17-18', or 'Apr 30 - May 1' when the meeting straddles a month."""
+    months = list(_MONTHS)
+    a = f"{months[start.month - 1][:3]} {start.day}"
+    if start == end:
+        return a
+    if start.month == end.month:
+        return f"{a}-{end.day}"
+    return f"{a} - {months[end.month - 1][:3]} {end.day}"
+
+
+def fetch_fomc_meetings():
+    """
+    Every FOMC meeting the Fed's calendar lists, oldest-first.
+
+    ``date`` is the *decision* date -- the final day, when the statement is
+    released. That is the market-moving moment; the first day is carried
+    separately as ``start_date`` rather than being the thing sorted on.
+    """
+    cached = CACHE.get("fomc-cal", TTL_SCHEDULE)
+    if cached is not None:
+        return cached
+
+    SEC_LIMITER.acquire()      # ordinary web fetch; reuse the polite spacing
+    html_text = _http(FOMC_CALENDAR,
+                      headers={"User-Agent": SEC_USER_AGENT or "Finance MCP",
+                               "Accept-Encoding": "gzip, deflate"})
+    html_text = re.sub(r"<script.*?</script>", "", html_text, flags=re.S)
+
+    # Year panels are not in chronological order on the page (the next year is
+    # appended after the archive), so each meeting takes the year of the panel
+    # it physically sits inside rather than the order it was found in.
+    panels = [(m.start(), int(m.group(1))) for m in _FOMC_YEAR.finditer(html_text)]
+    if not panels:
+        raise RuntimeError("FOMC calendar page did not contain any year panels; "
+                           "the Federal Reserve page layout has changed")
+
+    def year_at(pos):
+        year = None
+        for start, y in panels:
+            if start <= pos:
+                year = y
+            else:
+                break
+        return year
+
+    out = []
+    for row in _FOMC_ROW.finditer(html_text):
+        year = year_at(row.start())
+        if year is None:
+            continue
+        parsed = _parse_fomc_row(row.group(1), row.group(3), year)
+        if not parsed:
+            continue
+        # The asterisk marks a Summary of Economic Projections meeting, but the
+        # row's own body names the materials -- read the words, not the glyph.
+        projections = parsed["projections"] or "Projection Materials" in row.group(2)
+        unscheduled = "notation" in parsed["note"].lower()
+        out.append({
+            "source": "Federal Reserve",
+            "release": "FOMC rate decision",
+            "slug": "fomc",
+            "date": parsed["end"],
+            "start_date": parsed["start"],
+            "reference_period": _meeting_span(parsed["start"], parsed["end"]),
+            "time_et": "2:00 PM (customary)",
+            "projections": projections,
+            "unscheduled": unscheduled,
+            "note": parsed["note"],
+        })
+
+    out.sort(key=lambda e: e["date"])
+    CACHE.put("fomc-cal", out)
+    return out
+
+
+# =====================================================================
+# BEA — PCE, GDP, TRADE
+# =====================================================================
+# PCE is the Federal Reserve's stated target measure and it is a BEA release,
+# not a BLS one -- so a BLS-only calendar omits the inflation gauge that
+# actually drives policy. GDP is here for the same reason.
+
+BEA_SCHEDULE = "https://www.bea.gov/news/schedule"
+
+# BEA publishes a great deal that no one trades: state personal income, direct
+# investment by country, activities of multinational enterprises. Matching an
+# explicit list keeps the calendar to releases that move a market, and anything
+# unmatched is counted and reported rather than silently dropped.
+#
+# The GDP pattern requires an estimate vintage -- "GDP (Advance Estimate)" --
+# because a bare "GDP" prefix also catches "GDP by County and Personal Income
+# by County", a regional statistic that is not the national print.
+BEA_RELEASES = (
+    (re.compile(r"^Personal Income and Outlays"), "Personal Income & Outlays (PCE)", "pce"),
+    (re.compile(r"^(?:GDP|Gross Domestic Product)\s*\((?:Advance|Second|Third)\s+Estimate\)",
+                re.I), "Gross Domestic Product", "gdp"),
+    (re.compile(r"^U\.S\. International Trade in Goods and Services"),
+     "International Trade Balance", "trade"),
+)
+
+_BEA_ROW = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_BEA_DATE = re.compile(r'class="release-date"[^>]*>(.*?)</div>', re.S)
+_BEA_TIME = re.compile(r'class="text-muted"[^>]*>(.*?)</small>', re.S)
+_BEA_TITLE = re.compile(r'class="release-title[^"]*"[^>]*>(.*?)</td>', re.S)
+_BEA_YEAR = re.compile(r"Year\s+(\d{4})")
+
+
+def fetch_bea_schedule():
+    """
+    Scheduled BEA releases we track, oldest-first. Returns (entries, skipped).
+
+    ``skipped`` is the count of rows that parsed but matched no tracked release
+    -- the page carries far more than three, and a silent filter would make an
+    incomplete calendar indistinguishable from a complete one.
+    """
+    cached = CACHE.get("bea-cal", TTL_SCHEDULE)
+    if cached is not None:
+        return cached
+
+    SEC_LIMITER.acquire()
+    html_text = _http(BEA_SCHEDULE,
+                      headers={"User-Agent": SEC_USER_AGENT or "Finance MCP",
+                               "Accept-Encoding": "gzip, deflate"})
+    html_text = re.sub(r"<script.*?</script>", "", html_text, flags=re.S)
+
+    year_m = _BEA_YEAR.search(html_text)
+    if not year_m:
+        raise RuntimeError("BEA schedule page carried no year header; layout has changed")
+    year = int(year_m.group(1))
+
+    entries, skipped, last_month = [], 0, 0
+    for row in _BEA_ROW.finditer(html_text):
+        block = row.group(1)
+        date_m, title_m = _BEA_DATE.search(block), _BEA_TITLE.search(block)
+        if not date_m or not title_m:
+            continue
+
+        # The date cells carry no year -- only the table header does. Rows are
+        # chronological, so a month that moves backwards means the year rolled.
+        raw_date = nz.normalize_text(_TAG.sub("", date_m.group(1)))
+        dm = re.match(r"([A-Za-z]+)\s+(\d{1,2})", raw_date)
+        if not dm:
+            continue
+        month = _month_number(dm.group(1))
+        if not month:
+            continue
+        if month < last_month:
+            year += 1
+        last_month = month
+        try:
+            when = datetime.date(year, month, int(dm.group(2)))
+        except ValueError:
+            continue
+
+        title = nz.normalize_text(_TAG.sub(" ", title_m.group(1)))
+        match = next((r for r in BEA_RELEASES if r[0].match(title)), None)
+        if match is None:
+            skipped += 1
+            continue
+
+        # "GDP (Third Estimate), Industries, Corporate Profits, State GDP, and
+        # State Personal Income, 2nd Quarter 2026" -- the period is the part
+        # anyone reads; the rest stays available as full_title.
+        period = re.search(r"((?:\d(?:st|nd|rd|th)\s+Quarter|[A-Z][a-z]+)\s+\d{4})", title)
+        reference = period.group(1) if period else title
+        # Advance, second and third estimates of the same quarter are three
+        # separate market events; without the vintage two rows read identically.
+        vintage = re.search(r"\((Advance|Second|Third)\s+Estimate\)", title, re.I)
+        if vintage:
+            reference = f"{reference} ({vintage.group(1).title()})"
+
+        time_m = _BEA_TIME.search(block)
+        entries.append({
+            "source": "BEA",
+            "release": match[1],
+            "slug": f"bea_{match[2]}",
+            "date": when,
+            "reference_period": reference,
+            "time_et": nz.normalize_text(_TAG.sub("", time_m.group(1))) if time_m else "",
+            "full_title": title,
+        })
+
+    entries.sort(key=lambda e: e["date"])
+    result = (entries, skipped)
+    CACHE.put("bea-cal", result)
+    return result
+
+
+# =====================================================================
+# ONE CALENDAR
+# =====================================================================
+
+CALENDAR_SOURCES = ("bls", "fomc", "bea")
+
+
+def economic_calendar(days_ahead=30, days_back=7, sources=None, with_values=True,
+                      today=None):
+    """
+    Every tracked release inside the window, from every source, chronologically.
+
+    Returns ``(entries, warnings)``. One source failing degrades that source
+    only: a Fed page redesign should not take CPI off the calendar with it, and
+    the warning names which source went missing so an empty week is never
+    mistaken for a quiet week.
+    """
+    today = today or datetime.date.today()
+    lo = today - datetime.timedelta(days=days_back)
+    hi = today + datetime.timedelta(days=days_ahead)
+    wanted = [s for s in (sources or CALENDAR_SOURCES) if s in CALENDAR_SOURCES]
+
+    entries, warnings = [], []
+
+    if "bls" in wanted:
+        found, failed = upcoming_releases(days_ahead=days_ahead, days_back=days_back)
+        for e in found:
+            e.setdefault("source", "BLS")
+        if with_values and found:
+            found, value_warnings = attach_release_values(found, today=today)
+            warnings.extend(value_warnings)
+        entries.extend(found)
+        warnings.extend(f"BLS {f}" for f in failed)
+
+    if "fomc" in wanted:
+        try:
+            entries.extend(m for m in fetch_fomc_meetings() if lo <= m["date"] <= hi)
+        except Exception as exc:
+            warnings.append(f"FOMC calendar unavailable: {str(exc)[:120]}")
+
+    if "bea" in wanted:
+        try:
+            found, skipped = fetch_bea_schedule()
+            entries.extend(e for e in found if lo <= e["date"] <= hi)
+        except Exception as exc:
+            warnings.append(f"BEA schedule unavailable: {str(exc)[:120]}")
+
+    entries.sort(key=lambda e: (e["date"], e.get("source", ""), e["release"]))
+    return entries, warnings
+
+
+def describe_reading(entry):
+    """
+    One line of "what this row says", shared by the MCP tool and the dashboard
+    so the two can never drift into describing the same row differently.
+
+    A published row shows its own print. A scheduled row shows the previous
+    print, labelled ``prior`` and stamped with the period it belongs to -- never
+    rendered as if it were an expectation for the release being waited on.
+    """
+    if entry.get("slug") == "fomc":
+        bits = []
+        if entry.get("projections"):
+            bits.append("projections / dot plot")
+        if entry.get("unscheduled"):
+            bits.append(entry.get("note") or "unscheduled")
+        return " · ".join(bits)
+
+    parts = []
+    for v in entry.get("values", []):
+        name = v.get("short") or v.get("label")
+        head = v.get("headline")
+        if v.get("status") == "published" and head:
+            parts.append(f"{name} {head['text']}")
+        elif (v.get("prior") or {}).get("headline"):
+            prior = v["prior"]
+            parts.append(f"{name} prior {prior['headline']['text']} ({prior['period']})")
+
+    if not parts and entry.get("value_status") == "awaiting":
+        return "due, not yet published"
+    return " · ".join(parts)
+
+
+# =====================================================================
 # SEC EDGAR
 # =====================================================================
 
@@ -474,6 +1041,27 @@ def company_filings(symbol, forms=None, limit=20):
         if len(out) >= limit:
             break
     return out
+
+
+EARNINGS_ITEM = "2.02"
+
+
+def earnings_filings(symbol, limit=8):
+    """
+    The 8-Ks that actually announced results, newest-first.
+
+    Item 2.02 is "Results of Operations and Financial Condition" -- the filing a
+    company makes when it releases a quarter. This is the authoritative answer to
+    "did they report, and exactly when": ``acceptance`` carries seconds, and in
+    practice lands within a minute of the press release.
+
+    It is a record, not a schedule. It can confirm a past quarter and can never
+    tell you the date of a future one.
+    """
+    filings = company_filings(symbol, forms=["8-K"], limit=max(limit * 6, 40))
+    hits = [f for f in filings
+            if EARNINGS_ITEM in [i.strip() for i in (f.get("items") or "").split(",")]]
+    return hits[:limit]
 
 
 _ATOM_ENTRY = re.compile(r"<entry>(.*?)</entry>", re.S)

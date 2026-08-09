@@ -106,3 +106,70 @@ def test_sessions_stale_grows_one_per_session():
     latest = mc.previous_trading_day(datetime.date.today() + datetime.timedelta(days=1))
     prior = mc.previous_trading_day(latest)
     assert mc.sessions_stale(prior) == 1
+
+
+# =====================================================================
+# "since when?"
+# =====================================================================
+
+import pytest
+
+NOW = datetime.datetime(2026, 8, 9, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.parametrize("text,expected_delta", [
+    ("24h",       datetime.timedelta(hours=24)),
+    ("1h",        datetime.timedelta(hours=1)),
+    ("90m",       datetime.timedelta(minutes=90)),
+    ("3d",        datetime.timedelta(days=3)),
+    ("2 weeks",   datetime.timedelta(weeks=2)),
+    ("  6 hours", datetime.timedelta(hours=6)),
+])
+def test_relative_windows(text, expected_delta):
+    assert mc.parse_since(text, now=NOW) == NOW - expected_delta
+
+
+def test_a_bare_date_is_read_as_midnight_utc():
+    assert mc.parse_since("2026-08-01", now=NOW) == datetime.datetime(
+        2026, 8, 1, tzinfo=datetime.timezone.utc)
+
+
+def test_an_iso_timestamp_keeps_its_time():
+    assert mc.parse_since("2026-08-01T13:30:00Z", now=NOW) == datetime.datetime(
+        2026, 8, 1, 13, 30, tzinfo=datetime.timezone.utc)
+
+
+def test_the_result_is_always_timezone_aware():
+    """
+    It gets compared against SEC acceptance stamps, which are aware. A naive
+    value raises TypeError the moment it meets one.
+    """
+    for text in ("24h", "2026-08-01", "2026-08-01 13:30:00", "2026-08-01T13:30:00Z"):
+        assert mc.parse_since(text, now=NOW).tzinfo is not None, text
+
+
+def test_an_unreadable_window_is_refused_not_defaulted():
+    """Quietly falling back to 24h answers a question that was not asked."""
+    with pytest.raises(ValueError, match="Could not read"):
+        mc.parse_since("since Monday", now=NOW)
+
+
+def test_a_future_timestamp_is_refused():
+    with pytest.raises(ValueError, match="future"):
+        mc.parse_since("2027-01-01", now=NOW)
+
+
+def test_a_zero_length_window_is_refused():
+    with pytest.raises(ValueError, match="positive"):
+        mc.parse_since("0d", now=NOW)
+
+
+def test_an_empty_window_is_refused():
+    with pytest.raises(ValueError, match="No 'since'"):
+        mc.parse_since("", now=NOW)
+
+
+def test_a_datetime_passes_through_and_gains_utc():
+    naive = datetime.datetime(2026, 8, 1, 9, 0)
+    assert mc.parse_since(naive, now=NOW) == datetime.datetime(
+        2026, 8, 1, 9, 0, tzinfo=datetime.timezone.utc)

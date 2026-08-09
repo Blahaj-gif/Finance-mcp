@@ -10,6 +10,7 @@ enough to absorb a holiday weekend, and therefore wide enough to hide a genuine
 three-day outage. Counting *trading* days lets the threshold tighten to 1.
 """
 import datetime
+import re
 from functools import lru_cache
 
 
@@ -133,3 +134,71 @@ def sessions_stale(bar_date: datetime.date, now: datetime.date = None) -> int:
     reference = previous_trading_day(now) if not is_trading_day(now) else previous_trading_day(now + datetime.timedelta(days=1))
     # `reference` is the newest session that could possibly have a completed bar.
     return trading_days_between(bar_date, reference)
+
+
+# =====================================================================
+# "since when?"
+# =====================================================================
+
+_RELATIVE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|"
+                       r"h|hr|hrs|hour|hours|d|day|days|w|week|weeks)\s*$", re.I)
+
+_UNIT_SECONDS = {
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
+}
+
+
+def parse_since(text, now=None):
+    """
+    Turn "24h", "3d", "2026-08-01" or an ISO timestamp into an aware UTC datetime.
+
+    Everything downstream compares against SEC acceptance stamps, which are UTC
+    and timezone-aware. A naive datetime raises TypeError the moment it meets
+    one, so this always returns an aware value -- a bare date or a naive ISO
+    string is *interpreted* as UTC rather than left ambiguous.
+
+    Raises ValueError on anything unrecognised. Silently defaulting to "24h"
+    when asked for "since Monday" would answer a question nobody asked.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+
+    if isinstance(text, datetime.datetime):
+        return text if text.tzinfo else text.replace(tzinfo=datetime.timezone.utc)
+    if isinstance(text, datetime.date):
+        return datetime.datetime(text.year, text.month, text.day,
+                                 tzinfo=datetime.timezone.utc)
+
+    raw = str(text or "").strip()
+    if not raw:
+        raise ValueError("No 'since' given.")
+
+    m = _RELATIVE.match(raw)
+    if m:
+        seconds = float(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
+        if seconds <= 0:
+            raise ValueError("A 'since' window must be a positive length of time.")
+        return now - datetime.timedelta(seconds=seconds)
+
+    iso = raw.replace("Z", "+00:00").replace(" ", "T", 1) if " " in raw else raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        try:
+            parsed = datetime.datetime.combine(
+                datetime.date.fromisoformat(raw), datetime.time.min)
+        except ValueError:
+            raise ValueError(
+                f"Could not read '{raw}' as a time. Use a relative window like "
+                "'24h', '3d' or '2w', a date like '2026-08-01', or an ISO "
+                "timestamp like '2026-08-01T13:30:00Z'.") from None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    if parsed > now:
+        raise ValueError(f"'{raw}' is in the future; there is nothing since then.")
+    return parsed

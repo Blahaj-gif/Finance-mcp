@@ -73,6 +73,63 @@ EIGHT_K_ITEMS = {
 }
 
 
+# What a form type means, in the words someone reading a feed needs. EDGAR's own
+# primaryDocDescription for a Form 4 is the string "FORM 4", which tells a reader
+# nothing they did not already have from the form number.
+FORM_MEANING = {
+    "3": "Initial statement of beneficial ownership",
+    "4": "Insider transaction",
+    "5": "Annual statement of insider transactions",
+    "8-K": "Material event",
+    "6-K": "Foreign issuer report",
+    "10-K": "Annual report",
+    "10-Q": "Quarterly report",
+    "20-F": "Annual report (foreign issuer)",
+    "40-F": "Annual report (Canadian issuer)",
+    "S-1": "Registration of new securities",
+    "S-3": "Shelf registration",
+    "S-8": "Employee benefit-plan securities",
+    "424B5": "Prospectus supplement (offering priced)",
+    "13F-HR": "Institutional holdings report",
+    "SC 13D": "Activist stake (>5%, intent to influence)",
+    "SC 13G": "Passive stake (>5%)",
+    "SC 13D/A": "Activist stake, amended",
+    "SC 13G/A": "Passive stake, amended",
+    "144": "Notice of proposed insider sale",
+    "DEF 14A": "Proxy statement",
+    "11-K": "Employee stock-plan annual report",
+    "25-NSE": "Delisting notice",
+    "NT 10-K": "Late annual report",
+    "NT 10-Q": "Late quarterly report",
+}
+
+
+def describe_form(form: str, items: str = "") -> str:
+    """
+    A plain-language label for a filing.
+
+    For an 8-K the item codes carry the actual news -- "Material event" is close
+    to useless next to "Results of operations (earnings)" -- so the items win
+    where they exist.
+    """
+    form = (form or "").strip().upper()
+    if items:
+        # Only codes we actually carry. describe_8k_items renders an unknown
+        # code as "99.99 - Other", which is less informative than the form's
+        # own meaning and would otherwise win over it.
+        known = [f"{c} — {EIGHT_K_ITEMS[c]}"
+                 for c in (p.strip() for p in items.split(",")) if c in EIGHT_K_ITEMS]
+        if known:
+            return "; ".join(known)
+
+    if form in FORM_MEANING:
+        return FORM_MEANING[form]
+    # "10-K/A" and "8-K/A" are amendments to a base form.
+    if form.endswith("/A") and form[:-2] in FORM_MEANING:
+        return FORM_MEANING[form[:-2]] + " (amended)"
+    return form or "Filing"
+
+
 # Filing agents differ on namespaces: the same Form 144 arrives as <issuerCik>
 # from one agent and <own:issuerCik> from another. Matching only the bare tag
 # silently returns nothing for every namespaced filing, which reads as an empty
