@@ -252,3 +252,44 @@ def test_missing_metadata_returns_nothing_rather_than_a_guess(monkeypatch):
         raise RuntimeError("no metadata")
     monkeypatch.setattr(wc, "yahoo_ticker", boom)
     assert wc.yahoo_feed_delay("AAPL") == {}
+
+
+def test_paper_mode_injects_the_sandbox_endpoints_for_a_real_region(monkeypatch, tmp_path):
+    """
+    The last unverified link in the paper-trading path: that setting
+    WEBULL_ENVIRONMENT=paper actually repoints the client, rather than just
+    changing a label while every call still goes to production.
+
+    Asserted by capturing add_endpoint rather than by connecting — the sandbox
+    needs its own credentials, and a test that silently no-ops without them
+    would be exactly the kind of never-fires assertion this project has been
+    burned by before.
+    """
+    calls = []
+
+    class _Recorder:
+        def set_token_dir(self, _d): pass
+        def set_stream_logger(self, **_k): pass
+        def set_file_logger(self, **_k): pass
+        def add_endpoint(self, region, endpoint, api_type):
+            calls.append((region, endpoint, api_type))
+
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
+    monkeypatch.setattr(wc, "WEBULL_REGION_ID", "th")
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "k")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "s")
+    monkeypatch.setattr(wc, "WEBULL_TOKEN_DIR", str(tmp_path / "conf"))
+    monkeypatch.setattr(wc, "_API_CLIENT", None)
+
+    import webull.core.client as sdk_client
+    monkeypatch.setattr(sdk_client, "ApiClient", lambda *a, **k: _Recorder())
+    monkeypatch.setattr(wc, "_API_CLIENT", None)
+    wc.get_api_client()
+    monkeypatch.setattr(wc, "_API_CLIENT", None)          # don't leak the stub
+
+    got = {api_type: host for _region, host, api_type in calls}
+    expected = wc.SANDBOX_ENDPOINTS["th"]
+    assert got == expected, f"paper mode did not repoint the client: {got}"
+    assert all(region == "th" for region, _h, _t in calls)
+    # And nothing production-shaped slipped through.
+    assert not any("api.webull.co.th" == host for _r, host, _t in calls)
