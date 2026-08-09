@@ -647,12 +647,19 @@ def get_api_client():
             token_check_duration_seconds=10,
             token_check_interval_seconds=2,
         )
-        if WEBULL_TOKEN_DIR:
-            api_client.set_token_dir(WEBULL_TOKEN_DIR)
+        token_dir = WEBULL_TOKEN_DIR or os.path.join(BASE_DIR, "conf")
+        # `conf/` holds the token and the SDK log, so it is gitignored -- which
+        # means it does not exist on a fresh clone or a fresh install, and the
+        # file logger below opens its path without creating the directory. The
+        # first Webull call on a new machine therefore died with
+        # FileNotFoundError before any of the real work started. Nothing else
+        # creates it: not the installer, not the SDK's token manager.
+        os.makedirs(token_dir, exist_ok=True)
+        api_client.set_token_dir(token_dir)
 
         # WARNING, not the SDK default of DEBUG: DEBUG logs credentials.
         api_client.set_stream_logger(log_level=logging.WARNING, stream=sys.stderr)
-        log_file = os.path.join(WEBULL_TOKEN_DIR or os.path.join(BASE_DIR, "conf"), "webull_sdk.log")
+        log_file = os.path.join(token_dir, "webull_sdk.log")
         api_client.set_file_logger(path=log_file, log_level=logging.WARNING)
 
         # ...and redact, because the SDK logs the signed request at ERROR too.

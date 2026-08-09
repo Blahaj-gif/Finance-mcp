@@ -98,16 +98,50 @@ def test_the_broken_uat_import_is_gone():
     assert "SANDBOX_ENDPOINTS" in src, "the endpoints must be defined locally"
 
 
-def test_an_unknown_region_in_paper_mode_refuses_rather_than_falling_through(monkeypatch):
-    """Falling back to production while the user believes they are on paper is
-    the one outcome that must never happen."""
+def test_an_unknown_region_in_paper_mode_refuses_rather_than_falling_through(monkeypatch, tmp_path):
+    """
+    Falling back to production while the user believes they are on paper is the
+    one outcome that must never happen.
+
+    `conf/` is redirected to a tmp dir: it holds the token and the SDK log so it
+    is gitignored, and this test used to pass only because the developer machine
+    already had one. On a clean checkout it died in the file logger with
+    FileNotFoundError before ever reaching the assertion — a green test locally
+    and a red one in CI, which is how the fresh-install bug below was found.
+    """
     monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
     monkeypatch.setattr(wc, "WEBULL_REGION_ID", "atlantis")
     monkeypatch.setattr(wc, "_API_CLIENT", None)
     monkeypatch.setattr(wc, "WEBULL_APP_KEY", "k")
     monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "s")
+    monkeypatch.setattr(wc, "WEBULL_TOKEN_DIR", str(tmp_path / "conf"))
     with pytest.raises(RuntimeError, match="no sandbox endpoint"):
         wc.get_api_client()
+
+
+def test_the_token_directory_is_created_rather_than_assumed(monkeypatch, tmp_path):
+    """
+    A fresh clone or a fresh install has no `conf/` -- it is gitignored, the
+    installer does not create it, and the SDK's token manager does not either.
+    The file logger opened a path inside it without creating the directory, so
+    the very first Webull call on a new machine died with FileNotFoundError
+    before doing anything. Found by running the suite on a clean checkout, not
+    on the machine that had been using it for weeks.
+    """
+    target = tmp_path / "nested" / "conf"
+    assert not target.exists()
+
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
+    monkeypatch.setattr(wc, "WEBULL_REGION_ID", "atlantis")   # bail before the network
+    monkeypatch.setattr(wc, "_API_CLIENT", None)
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "k")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "s")
+    monkeypatch.setattr(wc, "WEBULL_TOKEN_DIR", str(target))
+
+    with pytest.raises(RuntimeError, match="no sandbox endpoint"):
+        wc.get_api_client()
+
+    assert target.is_dir(), "the token/log directory should have been created"
 
 
 # =====================================================================

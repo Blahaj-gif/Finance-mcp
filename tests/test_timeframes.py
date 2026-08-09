@@ -154,10 +154,21 @@ def test_empty_groups_are_dropped_rather_than_emitted_as_nan_bars():
 
 
 def test_resampling_preserves_the_frame_contract():
-    """Downstream code and the validator both require these exact columns."""
+    """
+    Downstream code and the validator both require these exact columns, with
+    `time` as a formatted string like every other frame in the system.
+
+    Asserted by value, not by dtype: pandas 3.0 returns the new StringDtype from
+    `.dt.strftime()` where pandas 2 returned `object`, so `dtype == object` was
+    testing pandas' internal label rather than the contract. It passed on the
+    development machine (pandas 2.3) and failed in CI (pandas 3.0) — which is
+    the entire reason the matrix installs fresh dependencies.
+    """
     out = resample(hourly(8), "4h")
     assert list(out.columns) == ["time", "open", "high", "low", "close", "volume"]
-    assert out["time"].dtype == object          # formatted strings, as elsewhere
+    assert all(isinstance(t, str) for t in out["time"]), "time must be formatted strings"
+    assert all(len(t) == 19 and t[4] == "-" and t[13] == ":" for t in out["time"]), \
+        "time must keep the YYYY-MM-DD HH:MM:SS shape the validator parses"
     assert out["time"].is_monotonic_increasing
 
 
