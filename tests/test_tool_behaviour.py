@@ -748,3 +748,43 @@ def test_a_published_macro_release_carries_its_reading(monkeypatch, quiet_update
 
     assert "Consumer Price Index" in out
     assert "CPI +2.7% YoY" in out
+
+
+# =====================================================================
+# Alerts you can trust to fire
+# =====================================================================
+
+def test_a_typod_condition_is_refused_rather_than_saved(monkeypatch):
+    """
+    "PRICE_ABOEV" used to save happily and report success, producing an alert
+    that could never fire and that the daemon then failed on every 60 seconds,
+    into a log nobody reads.
+    """
+    called = {"n": 0}
+    monkeypatch.setattr(srv.alert_watcher, "add_alert",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    with pytest.raises(Exception, match="Unknown condition"):
+        srv.set_alert("AAPL", "PRICE_ABOEV", 999.0)
+    assert called["n"] == 0, "nothing should have been written"
+
+
+def test_a_valid_condition_is_written_through_the_locked_writer(monkeypatch):
+    written = []
+    monkeypatch.setattr(srv.alert_watcher, "add_alert", lambda a, **k: written.append(a))
+    monkeypatch.setattr(srv.webull_client, "get_provenance",
+                        lambda s, i: {"bar_close": 300.0, "bar_time": "2026-08-07",
+                                      "source": "Test feed"})
+    out = srv.set_alert("AAPL", "rsi_below", 30.0, "oversold")
+
+    assert written and written[0]["condition"] == "RSI_BELOW"
+    assert written[0]["status"] == "ACTIVE"
+    assert "Price when set" in out, "the level it was judged against must be recorded"
+
+
+def test_every_supported_condition_is_accepted(monkeypatch):
+    """The tool's list and the daemon's list must not drift apart."""
+    monkeypatch.setattr(srv.alert_watcher, "add_alert", lambda a, **k: None)
+    monkeypatch.setattr(srv.webull_client, "get_provenance", lambda s, i: {})
+    for cond in srv.alert_watcher.CONDITIONS:
+        srv.set_alert("AAPL", cond, 50.0)

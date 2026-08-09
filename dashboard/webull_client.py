@@ -118,12 +118,34 @@ INTERVAL_WEBULL_TO_YF = {
     "M15": "15m",
     "M30": "30m",
     "H1": "1h",
+    "M60": "1h",
+    "M120": "1h",      # Yahoo has no 2h bar; the caller resamples
+    "M240": "1h",      # likewise 4h
     "D": "1d",
     "W": "1wk",
-    "M": "1mo"
+    "M": "1mo",
+    "Y": "3mo",        # Yahoo's coarsest is quarterly
 }
 
-INTERVAL_YF_TO_WEBULL = {v: k for k, v in INTERVAL_WEBULL_TO_YF.items()}
+INTERVAL_YF_TO_WEBULL = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30",
+                         "1h": "H1", "1d": "D", "1wk": "W", "1mo": "M"}
+
+# Webull's own timespan vocabulary, from the API's error message:
+#   [M1, M5, M15, M30, M60, M120, M240, D, W, M, Y]
+#
+# Note there is no "H1". Our canonical name for an hourly bar has always been
+# H1, and it was passed through to the API unchanged -- so every hourly request
+# returned HTTP 417 UNSUPPORTED_TIMESPAN and fell back to Yahoo. The fallback
+# announced itself, but nothing said the timeframe could *never* succeed, so it
+# read as a flaky broker rather than a name the broker does not have. Both the
+# dashboard's 1H and 4H views and get_multi_timeframe's hourly leg were served
+# by Yahoo while the daily leg came from Webull -- two feeds, two adjustment
+# conventions, one confluence score.
+WEBULL_TIMESPAN = {
+    "M1": "M1", "M5": "M5", "M15": "M15", "M30": "M30",
+    "H1": "M60", "M60": "M60", "M120": "M120", "M240": "M240",
+    "D": "D", "W": "W", "M": "M", "Y": "Y",
+}
 
 # Staleness thresholds.
 #
@@ -356,8 +378,17 @@ def yahoo_feed_delay(symbol: str) -> dict:
 
 def get_yfinance_data(symbol: str, interval: str = "D", count: int = 200) -> pd.DataFrame:
     """Fetch historical data from Yahoo Finance as a robust fallback."""
-    # Map Webull interval to Yahoo Finance interval
-    yf_interval = INTERVAL_WEBULL_TO_YF.get(interval, "1d")
+    # Map Webull interval to Yahoo Finance interval.
+    #
+    # This used to default to "1d" for anything unrecognised, so a typo'd or
+    # unsupported interval came back as daily bars wearing the requested
+    # interval's name -- indicators computed on the wrong timeframe entirely,
+    # with nothing in the output to show it.
+    yf_interval = INTERVAL_WEBULL_TO_YF.get(interval)
+    if yf_interval is None:
+        raise ValueError(
+            f"No Yahoo interval for '{interval}'. "
+            f"Known: {', '.join(sorted(INTERVAL_WEBULL_TO_YF))}.")
 
     # Size the download to what was actually asked for. A fixed period="1y"
     # pulled ~250 daily bars to answer a 26-bar heatmap request, and weekly and
@@ -754,10 +785,18 @@ def get_webull_data(symbol: str, interval: str = "D", count: int = 200) -> pd.Da
     else:
         category = "US_STOCK"
 
+    timespan = WEBULL_TIMESPAN.get(interval)
+    if timespan is None:
+        # Refuse locally rather than spend a request learning the same thing
+        # from a 417, which the fallback then papers over.
+        raise ValueError(
+            f"Webull has no timespan for interval '{interval}'. "
+            f"Known: {', '.join(sorted(WEBULL_TIMESPAN))}.")
+
     kwargs = {
         "symbol": sym_upper.replace(".HK", "").replace(".SS", "").replace(".SZ", ""),
         "category": category,
-        "timespan": interval,
+        "timespan": timespan,
         "count": str(count)
     }
 

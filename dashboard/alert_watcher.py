@@ -13,6 +13,7 @@ import json
 import math
 import datetime
 import subprocess
+import threading
 
 # Ensure local path is accessible
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -213,34 +214,130 @@ def check_alerts(alerts, now_ts, fetch=_default_fetch,
     return updated
 
 
+# alerts.json has three writers -- this daemon, the dashboard form, and the
+# set_alert MCP tool -- and they used to read-modify-write it with no lock and
+# no atomic replace. Two consequences, both silent: an alert added in the
+# dashboard while the daemon was writing a triggered status could be lost, and
+# a crash mid-write left truncated JSON that took the Alerts tab down with it.
+#
+# The lock only covers writers inside one process. The atomic replace is what
+# protects a reader in another process, which is why both are here.
+_ALERTS_LOCK = threading.RLock()
+
+
 def load_alerts(path=None) -> list:
     path = path or ALERTS_FILE
     if not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read().strip()
+    with _ALERTS_LOCK:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
     return json.loads(content) if content else []
 
 
 def save_alerts(alerts, path=None):
+    """Write via a temp file and replace, so a reader never sees a partial file."""
     path = path or ALERTS_FILE
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(alerts, f, indent=4, ensure_ascii=False)
+    tmp = path + ".tmp"
+    with _ALERTS_LOCK:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(alerts, f, indent=4, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+
+def add_alert(alert, path=None):
+    """
+    Append one alert under the lock.
+
+    The dashboard and the MCP tool both used to hand-roll read-append-write,
+    which loses a concurrent write from the daemon. Going through one function
+    means the read and the write cannot be separated by another writer.
+    """
+    with _ALERTS_LOCK:
+        alerts = load_alerts(path)
+        alerts.append(alert)
+        save_alerts(alerts, path)
+    return alerts
+
+
+# Set while the loop is running, so the dashboard can report whether the daemon
+# it claims to be running is in fact running. A thread that died on its first
+# iteration is indistinguishable from a healthy one without this.
+WATCHER_STATE = {"running": False, "last_pass": None, "passes": 0,
+                 "last_error": None, "started": None}
+
+
+def watcher_status(now=None):
+    """
+    Liveness, judged by whether a pass completed recently rather than by whether
+    a thread object exists. Returns (healthy: bool, message: str).
+    """
+    now = now or time.time()
+    if not WATCHER_STATE["running"]:
+        return False, "Alert daemon is NOT running — no alert will fire."
+
+    last = WATCHER_STATE["last_pass"]
+    if last is None:
+        return False, "Alert daemon started but has not completed a pass yet."
+
+    age = now - last
+    # Two missed polls is the point at which "slow" becomes "stuck".
+    if age > CHECK_INTERVAL_SECONDS * 3:
+        return False, (f"Alert daemon last completed a check {age / 60:.1f} minutes ago "
+                       f"(polls every {CHECK_INTERVAL_SECONDS}s) — it may be stuck.")
+
+    msg = (f"Alert daemon running — {WATCHER_STATE['passes']} checks, last "
+           f"{age:.0f}s ago, polling every {CHECK_INTERVAL_SECONDS}s.")
+    if WATCHER_STATE["last_error"]:
+        return True, msg + f" Last error: {WATCHER_STATE['last_error']}"
+    return True, msg
+
+
+def start_watcher_once():
+    """
+    Start the daemon thread, at most once per process.
+
+    The dashboard guarded this with st.session_state, which is per browser
+    session -- so every additional tab started another watcher in the same
+    process, each polling the feed and each firing its own notification for the
+    same alert. Returns True if this call started it.
+    """
+    with _ALERTS_LOCK:
+        if WATCHER_STATE["running"]:
+            return False
+        thread = threading.Thread(target=run_watcher_loop, daemon=True,
+                                  name="finance-mcp-alert-watcher")
+        thread.start()
+        WATCHER_STATE["started"] = time.time()
+        return True
 
 
 def run_watcher_loop():
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting Finance MCP Alert Watcher Daemon...")
     print(f"Polling Interval: {CHECK_INTERVAL_SECONDS}s | Alert Cooldown: {ALERT_COOLDOWN_SECONDS // 60}m")
+    WATCHER_STATE["running"] = True
 
-    while True:
-        try:
-            alerts = load_alerts()
-            if alerts and check_alerts(alerts, time.time()):
-                save_alerts(alerts)
-        except Exception as e:
-            print(f"Error in watcher loop: {str(e)}", file=sys.stderr)
+    try:
+        while True:
+            try:
+                alerts = load_alerts()
+                if alerts and check_alerts(alerts, time.time()):
+                    save_alerts(alerts)
+                WATCHER_STATE["last_error"] = None
+            except Exception as e:
+                # Recorded as well as printed: stderr from a headless Streamlit
+                # run goes to a log nobody reads, so an alert daemon failing
+                # every pass looked exactly like one with nothing to do.
+                WATCHER_STATE["last_error"] = str(e)[:200]
+                print(f"Error in watcher loop: {str(e)}", file=sys.stderr)
 
-        time.sleep(CHECK_INTERVAL_SECONDS)
+            WATCHER_STATE["last_pass"] = time.time()
+            WATCHER_STATE["passes"] += 1
+            time.sleep(CHECK_INTERVAL_SECONDS)
+    finally:
+        WATCHER_STATE["running"] = False
 
 
 if __name__ == "__main__":

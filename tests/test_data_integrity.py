@@ -593,3 +593,45 @@ def test_log_redaction_scrubs_credentials():
     for leaked in (key, secret, signature, token):
         assert leaked not in record.msg, f"credential leaked into log: {leaked[:8]}..."
     assert "WebullApiSDK" in record.msg, "redaction must not destroy benign context"
+
+
+# =====================================================================
+# Interval names: ours vs the broker's
+# =====================================================================
+
+def test_hourly_maps_to_the_timespan_webull_actually_has():
+    """
+    Webull's vocabulary is [M1, M5, M15, M30, M60, M120, M240, D, W, M, Y].
+    There is no H1. Passing our canonical name straight through returned HTTP
+    417 on every hourly request and fell back to Yahoo -- so the dashboard's
+    1H and 4H views, and get_multi_timeframe's hourly leg, were never served by
+    the primary feed while the daily leg was.
+    """
+    assert wc.WEBULL_TIMESPAN["H1"] == "M60"
+    assert "H1" not in set(wc.WEBULL_TIMESPAN.values())
+
+
+def test_every_timespan_we_send_is_one_webull_publishes():
+    published = {"M1", "M5", "M15", "M30", "M60", "M120", "M240", "D", "W", "M", "Y"}
+    assert set(wc.WEBULL_TIMESPAN.values()) <= published
+
+
+def test_an_unknown_interval_is_refused_before_a_request_is_spent():
+    """A 417 round trip only to be papered over by the fallback helps nobody."""
+    with pytest.raises(ValueError, match="no timespan"):
+        wc.get_webull_data("AAPL", interval="H4")
+
+
+def test_an_unknown_interval_does_not_silently_become_daily_on_yahoo():
+    """
+    The Yahoo map defaulted to "1d", so a typo'd interval returned daily bars
+    wearing the requested interval's name -- indicators computed on the wrong
+    timeframe with nothing in the output to show it.
+    """
+    with pytest.raises(ValueError, match="No Yahoo interval"):
+        wc.get_yfinance_data("AAPL", interval="H4")
+
+
+def test_both_interval_maps_agree_on_what_exists():
+    """A name one side knows and the other does not is a silent fallback."""
+    assert set(wc.WEBULL_TIMESPAN) <= set(wc.INTERVAL_WEBULL_TO_YF)

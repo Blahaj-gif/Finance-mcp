@@ -350,3 +350,128 @@ def test_the_alerts_path_is_not_pinned_to_a_hardcoded_drive():
     """It was C:/mcp-servers/..., which broke the moment the repo moved."""
     assert "C:/mcp-servers" not in aw.ALERTS_FILE
     assert aw.ALERTS_FILE.endswith("alerts.json")
+
+
+# =====================================================================
+# Persistence: three writers, one file
+# =====================================================================
+# alerts.json is written by this daemon, by the dashboard form, and by the
+# set_alert MCP tool. None of them used to lock or replace atomically.
+
+def test_the_alert_file_is_written_atomically(tmp_path):
+    path = str(tmp_path / "alerts.json")
+    aw.save_alerts([{"symbol": "AAPL", "status": "ACTIVE"}], path=path)
+    assert not os.path.exists(path + ".tmp"), "a temp file left behind is a half-written state"
+    assert aw.load_alerts(path)[0]["symbol"] == "AAPL"
+
+
+def test_add_alert_appends_without_a_separate_read_and_write(tmp_path):
+    path = str(tmp_path / "alerts.json")
+    aw.add_alert({"symbol": "AAPL", "status": "ACTIVE"}, path=path)
+    aw.add_alert({"symbol": "NVDA", "status": "ACTIVE"}, path=path)
+    assert [a["symbol"] for a in aw.load_alerts(path)] == ["AAPL", "NVDA"]
+
+
+def test_concurrent_appends_do_not_lose_an_alert(tmp_path):
+    """
+    The dashboard used to read, append and write with no lock while the daemon
+    did the same. Whichever wrote second discarded the other's change.
+    """
+    import threading
+    path = str(tmp_path / "alerts.json")
+    aw.save_alerts([], path=path)
+
+    def add(i):
+        aw.add_alert({"symbol": f"S{i}", "status": "ACTIVE"}, path=path)
+
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(25)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(aw.load_alerts(path)) == 25
+
+
+# =====================================================================
+# Liveness: the dashboard claims the daemon is running
+# =====================================================================
+
+def test_a_daemon_that_never_started_is_not_reported_as_healthy():
+    """
+    The Alerts tab states "the alert daemon monitors ... in the background".
+    Without this, that sentence was printed whether or not it was true.
+    """
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        aw.WATCHER_STATE.update(running=False, last_pass=None, passes=0)
+        healthy, msg = aw.watcher_status()
+        assert healthy is False
+        assert "NOT running" in msg
+    finally:
+        aw.WATCHER_STATE.update(saved)
+
+
+def test_a_started_daemon_with_no_completed_pass_is_not_yet_healthy():
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        aw.WATCHER_STATE.update(running=True, last_pass=None, passes=0)
+        healthy, msg = aw.watcher_status()
+        assert healthy is False and "not completed a pass" in msg
+    finally:
+        aw.WATCHER_STATE.update(saved)
+
+
+def test_a_stuck_daemon_is_reported_stuck_not_running():
+    """A thread alive but wedged fires no alerts, same as a dead one."""
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        now = 10_000.0
+        aw.WATCHER_STATE.update(running=True, passes=9,
+                                last_pass=now - aw.CHECK_INTERVAL_SECONDS * 10)
+        healthy, msg = aw.watcher_status(now=now)
+        assert healthy is False and "stuck" in msg
+    finally:
+        aw.WATCHER_STATE.update(saved)
+
+
+def test_a_healthy_daemon_reports_its_cadence():
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        now = 10_000.0
+        aw.WATCHER_STATE.update(running=True, passes=42, last_pass=now - 5,
+                                last_error=None)
+        healthy, msg = aw.watcher_status(now=now)
+        assert healthy is True and "42 checks" in msg
+    finally:
+        aw.WATCHER_STATE.update(saved)
+
+
+def test_a_loop_error_is_recorded_not_only_printed():
+    """
+    stderr from a headless Streamlit run goes to a log nobody reads, so a
+    daemon failing every pass looked exactly like one with nothing to do.
+    """
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        aw.WATCHER_STATE.update(running=True, passes=3, last_pass=10_000.0 - 5,
+                                last_error="feed unreachable")
+        healthy, msg = aw.watcher_status(now=10_000.0)
+        assert healthy is True
+        assert "feed unreachable" in msg
+    finally:
+        aw.WATCHER_STATE.update(saved)
+
+
+def test_the_watcher_starts_at_most_once_per_process():
+    """
+    The dashboard guarded this with st.session_state, which is per BROWSER
+    session -- a second tab started a second watcher in the same process, and
+    both fired a notification for the same alert.
+    """
+    saved = dict(aw.WATCHER_STATE)
+    try:
+        aw.WATCHER_STATE["running"] = True      # pretend one is already up
+        assert aw.start_watcher_once() is False
+    finally:
+        aw.WATCHER_STATE.update(saved)

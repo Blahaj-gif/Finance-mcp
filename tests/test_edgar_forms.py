@@ -708,3 +708,42 @@ def test_an_unknown_form_returns_the_form_itself_not_a_guess():
 def test_unrecognised_items_fall_back_to_the_form_meaning():
     """An item code we do not carry must not blank out the description."""
     assert ef.describe_form("8-K", "99.99") == "Material event"
+
+
+# =====================================================================
+# Section names: the tool advertised them and then rejected them
+# =====================================================================
+
+@pytest.mark.parametrize("asked,expected", [
+    ("Risk Factors", "1A"),
+    ("risk factors", "1A"),
+    ("MD&A", "7"),
+    ("MDA", "7"),
+    ("Item 7", "7"),
+    ("1A", "1A"),
+    ("Controls", "9A"),
+    ("Business", "1"),
+])
+def test_a_named_section_resolves_to_its_item_code(asked, expected):
+    """
+    read_filing's docstring offers "a named Item (Risk Factors, MD&A)". It then
+    reported "No 'Item RISK FACTORS' heading found" -- while printing the very
+    mapping it was declining to apply.
+    """
+    assert ef.resolve_section(asked, "10-K") == expected
+
+
+def test_a_10q_is_numbered_differently_from_a_10k():
+    """
+    A 10-Q's Item 2 is MD&A; a 10-K's Item 2 is Properties. Resolving MD&A to
+    Item 7 inside a 10-Q extracts the wrong section or nothing at all.
+    """
+    assert ef.resolve_section("MD&A", "10-Q") == "2"
+    assert ef.resolve_section("MD&A", "10-K") == "7"
+    assert ef.sections_for("10-Q")["2"].startswith("Management")
+    assert ef.sections_for("10-K")["2"] == "Properties"
+
+
+def test_an_unknown_section_passes_through_rather_than_guessing():
+    """Substituting a nearby section would answer a question nobody asked."""
+    assert ef.resolve_section("Nonsense", "10-K") == "NONSENSE"

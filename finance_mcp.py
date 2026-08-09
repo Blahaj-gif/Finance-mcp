@@ -20,6 +20,7 @@ import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
+import dashboard.alert_watcher as alert_watcher
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -1092,37 +1093,39 @@ def set_alert(symbol: str, condition: str, target_value: float, note: str = "") 
     
     Args:
         symbol: Ticker symbol (e.g. NVDA, AAPL).
-        condition: Condition operator (e.g. PRICE_ABOVE, PRICE_BELOW, RSI_BELOW, RSI_ABOVE, MACD_CROSS).
+        condition: One of PRICE_ABOVE, PRICE_BELOW, RSI_BELOW, RSI_ABOVE,
+            MACD_CROSS_BULL, MACD_CROSS_BEAR. Anything else is refused rather than
+            saved as an alert that can never fire.
         target_value: The price or indicator threshold value.
         note: Rationale or note for why this alert is set.
     """
-    import json, datetime
-    alerts_path = BASE_DIR + "/dashboard/alerts.json"
+    import datetime
+    cond = (condition or "").strip().upper()
+    # Validate before writing. An unrecognised condition used to save happily
+    # and report success, producing an alert that could never fire and that the
+    # daemon then failed on every 60 seconds, into a log nobody reads.
+    if cond not in alert_watcher.CONDITIONS:
+        raise ToolError(
+            f"Unknown condition '{condition}'. Supported: "
+            f"{', '.join(alert_watcher.CONDITIONS)}.")
     try:
-        alerts = []
-        if os.path.exists(alerts_path):
-            with open(alerts_path, "r", encoding="utf-8") as f:
-                c = f.read().strip()
-                if c:
-                    alerts = json.loads(c)
-                    
         # Record the market level the alert was set against, so a threshold can
         # later be judged against where price actually was when it was chosen.
         prov = webull_client.get_provenance(symbol, "D")
 
-        new_alert = {
+        # Through the watcher's own writer: it round-trips the file under a lock
+        # and replaces it atomically, so a reader never sees a partial write.
+        alert_watcher.add_alert({
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol.upper(),
-            "condition": condition.upper(),
+            "condition": cond,
             "target_value": float(target_value),
             "note": note,
             "status": "ACTIVE",
             "provenance_at_creation": prov,
-        }
-        alerts.append(new_alert)
-        atomic_write_json(alerts_path, alerts)
+        })
 
-        out = f"Successfully set alert for {symbol.upper()}: `{condition.upper()} {target_value}`. Note: {note}"
+        out = f"Successfully set alert for {symbol.upper()}: `{cond} {target_value}`. Note: {note}"
         if prov.get("bar_close"):
             out += (f"\nPrice when set: ${prov['bar_close']:,.2f} "
                     f"(bar {prov['bar_time']}, {prov['source']}).")
@@ -2653,18 +2656,29 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
                 out += f"{i}. …{h['excerpt']}…\n\n"
             return out
 
+        # The item numbering differs by form: a 10-Q's Item 2 is MD&A, a 10-K's
+        # Item 2 is Properties. Offering the 10-K list while reading a 10-Q
+        # points the caller at items the document does not contain.
+        section_map = edgar_forms.sections_for(form)
+
         if not section:
             # 8-K, DEF 14A and 13D/G are handled above by their own extractors.
-            available = ", ".join(f"{k} ({v})" for k, v in edgar_forms.FILING_SECTIONS.items())
-            return head + f"*Pass `section` to extract one, or `query` to search.*\n\nAvailable: {available}"
+            available = ", ".join(f"{k} ({v})" for k, v in section_map.items())
+            return head + (f"*Pass `section` to extract one, or `query` to search.*"
+                           f"\n\nAvailable in a {form.upper()}: {available}")
 
-        body, meta = edgar_forms.extract_section(text, section, budget=budget)
+        # Accept "Risk Factors" as well as "1A" -- the docstring advertises the
+        # names, and an LLM reaches for them before it reaches for item codes.
+        code = edgar_forms.resolve_section(section, form)
+        body, meta = edgar_forms.extract_section(text, code, budget=budget)
         if not meta["found"]:
-            return head + (f"*{meta['reason']}. Available sections in a 10-K: "
-                           f"{', '.join(edgar_forms.FILING_SECTIONS)}*")
+            asked = f"'{section}'" + (f" (read as Item {code})" if code != section else "")
+            return head + (f"*{meta['reason']} for {asked}. Available in a "
+                           f"{form.upper()}: "
+                           + ", ".join(f"{k} ({v})" for k, v in section_map.items()) + "*")
 
-        title = edgar_forms.FILING_SECTIONS.get(section.upper(), "")
-        out = head + f"#### Item {section.upper()} — {title}\n\n{body}\n"
+        title = section_map.get(code.upper(), "")
+        out = head + f"#### Item {code.upper()} — {title}\n\n{body}\n"
         if meta["truncated"]:
             out += (f"\n*Truncated: showing {budget:,} of {meta['full_length']:,} characters. "
                     "Raise `budget` or use `query` to search within it.*")

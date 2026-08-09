@@ -384,6 +384,73 @@ FILING_SECTIONS = {
 
 _ITEM_ORDER = ["1", "1A", "1B", "2", "3", "4", "5", "6", "7", "7A", "8", "9", "9A", "9B", "10", "11", "12", "13", "14", "15"]
 
+# A 10-Q is numbered differently from a 10-K -- its Item 2 is MD&A, where a
+# 10-K's Item 2 is Properties. Offering a caller the 10-K list while they are
+# reading a 10-Q points them at items that do not exist in the document.
+QUARTERLY_SECTIONS = {
+    "1":   "Financial Statements",
+    "2":   "Management's Discussion and Analysis",
+    "3":   "Quantitative and Qualitative Disclosures About Market Risk",
+    "4":   "Controls and Procedures",
+    "1A":  "Risk Factors (Part II)",
+    "5":   "Other Information (Part II)",
+    "6":   "Exhibits (Part II)",
+}
+
+
+def sections_for(form: str) -> dict:
+    """The item map that applies to this form."""
+    return QUARTERLY_SECTIONS if (form or "").upper().startswith("10-Q") else FILING_SECTIONS
+
+
+# Names an LLM will reach for, mapped to the item codes the extractor needs.
+# The tool advertised "a named Item (Risk Factors, MD&A)" and then rejected
+# exactly those words, while its own fallback message printed the mapping it
+# was declining to apply.
+_SECTION_ALIASES = {
+    "BUSINESS": "1", "RISK FACTORS": "1A", "RISKS": "1A",
+    "UNRESOLVED STAFF COMMENTS": "1B", "PROPERTIES": "2",
+    "LEGAL": "3", "LEGAL PROCEEDINGS": "3",
+    "MARKET FOR REGISTRANT'S COMMON EQUITY": "5",
+    "MDA": "7", "MD&A": "7", "MANAGEMENT'S DISCUSSION AND ANALYSIS": "7",
+    "MANAGEMENT DISCUSSION AND ANALYSIS": "7", "DISCUSSION AND ANALYSIS": "7",
+    "MARKET RISK": "7A", "QUANTITATIVE AND QUALITATIVE DISCLOSURES ABOUT MARKET RISK": "7A",
+    "FINANCIAL STATEMENTS": "8", "FINANCIALS": "8",
+    "CONTROLS": "9A", "CONTROLS AND PROCEDURES": "9A",
+}
+
+_QUARTERLY_ALIASES = {
+    "FINANCIAL STATEMENTS": "1", "FINANCIALS": "1",
+    "MDA": "2", "MD&A": "2", "MANAGEMENT'S DISCUSSION AND ANALYSIS": "2",
+    "MANAGEMENT DISCUSSION AND ANALYSIS": "2", "DISCUSSION AND ANALYSIS": "2",
+    "MARKET RISK": "3", "CONTROLS": "4", "CONTROLS AND PROCEDURES": "4",
+    "RISK FACTORS": "1A", "RISKS": "1A",
+    "OTHER INFORMATION": "5", "EXHIBITS": "6",
+}
+
+
+def resolve_section(section: str, form: str = "10-K") -> str:
+    """
+    Accept either an item code ("1A") or the name it is known by ("Risk Factors").
+
+    Returns the item code. An unrecognised name is passed through unchanged so
+    the extractor can report it did not find that heading, rather than this
+    silently substituting a different section.
+    """
+    raw = (section or "").strip()
+    if not raw:
+        return raw
+    upper = raw.upper()
+    table = sections_for(form)
+    if upper in table:
+        return upper
+
+    aliases = _QUARTERLY_ALIASES if (form or "").upper().startswith("10-Q") else _SECTION_ALIASES
+    key = re.sub(r"^ITEM\s+", "", upper).strip().rstrip(".")
+    if key in table:
+        return key
+    return aliases.get(key, key)
+
 
 def html_to_text(raw: str) -> str:
     """Flatten filing HTML to readable text, dropping scripts, styles and markup."""

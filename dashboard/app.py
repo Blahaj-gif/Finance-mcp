@@ -371,13 +371,18 @@ render_html(f"""
 import threading
 import alert_watcher
 
-if "watcher_thread_started" not in st.session_state:
+# Guarded inside alert_watcher, not by st.session_state: session state is per
+# BROWSER session, so a second tab used to start a second watcher in the same
+# process -- two polls of the feed and two notifications for one alert. The
+# failure is also recorded rather than swallowed, because a dashboard that says
+# "the daemon monitors your alerts" while the thread never started is making a
+# claim someone will rely on.
+if "watcher_start_error" not in st.session_state:
+    st.session_state["watcher_start_error"] = None
     try:
-        watcher_thread = threading.Thread(target=alert_watcher.run_watcher_loop, daemon=True)
-        watcher_thread.start()
-        st.session_state["watcher_thread_started"] = True
-    except Exception:
-        pass
+        alert_watcher.start_watcher_once()
+    except Exception as e:
+        st.session_state["watcher_start_error"] = str(e)
 
 # ------------------------------------------------------------------
 # Dashboard Tab Selection
@@ -1544,7 +1549,19 @@ with tab_events:
 
 with tab_alerts:
     st.markdown("### Live Alerts & Watcher Daemon")
-    st.markdown("The alert daemon monitors live price and indicator conditions in the background, firing native Windows desktop balloon notifications.")
+    st.markdown("The alert daemon monitors live price and indicator conditions in the background, "
+                "firing native Windows desktop balloon notifications.")
+
+    # Whether that sentence is currently true, judged by whether a pass has
+    # actually completed recently rather than by whether a thread object exists.
+    healthy, status_msg = alert_watcher.watcher_status()
+    if st.session_state.get("watcher_start_error"):
+        st.error(f"Alert daemon failed to start: `{st.session_state['watcher_start_error']}` "
+                 "— no alert will fire.")
+    elif healthy:
+        st.success(status_msg)
+    else:
+        st.error(status_msg)
     
     # Form to add new alert
     with st.expander("Set New Technical Alert", expanded=False):
@@ -1561,42 +1578,38 @@ with tab_alerts:
             submit_al = st.form_submit_button("Set Alert")
             
             if submit_al:
-                import json
-                al_path = BASE_DIR + "/dashboard/alerts.json"
-                existing_al = []
-                if os.path.exists(al_path):
-                    with open(al_path, "r", encoding="utf-8") as f:
-                        c = f.read().strip()
-                        if c:
-                            existing_al = json.loads(c)
-                existing_al.append({
-                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "symbol": al_symbol,
-                    "condition": al_cond,
-                    "target_value": al_val,
-                    "note": al_note,
-                    "status": "ACTIVE"
-                })
-                with open(al_path, "w", encoding="utf-8") as f:
-                    json.dump(existing_al, f, indent=4, ensure_ascii=False)
-                st.success(f"Alert set for {al_symbol}: {al_cond} {al_val}")
-                st.rerun()
+                # Through alert_watcher.add_alert, not a hand-rolled
+                # read-append-write: the daemon writes this same file, and an
+                # unlocked round trip drops whichever update lands second.
+                try:
+                    alert_watcher.add_alert({
+                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "symbol": al_symbol,
+                        "condition": al_cond,
+                        "target_value": al_val,
+                        "note": al_note,
+                        "status": "ACTIVE",
+                    })
+                    st.success(f"Alert set for {al_symbol}: {al_cond} {al_val}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save the alert: {e}")
                 
-    # List active & triggered alerts
-    al_path = BASE_DIR + "/dashboard/alerts.json"
-    if os.path.exists(al_path):
-        with open(al_path, "r", encoding="utf-8") as f:
-            c = f.read().strip()
-            if c:
-                all_alerts = json.loads(c)
-                if all_alerts:
-                    df_al = pd.DataFrame(all_alerts)
-                    st.dataframe(df_al, use_container_width=True)
-                else:
-                    st.info("No active alerts set.")
-            else:
-                st.info("No active alerts set.")
-    else:
+    # List active & triggered alerts. A corrupt file used to raise here and take
+    # the whole tab down; the alert list is a record, and nothing else needs it.
+    try:
+        all_alerts = alert_watcher.load_alerts()
+    except Exception as e:
+        all_alerts = None
+        st.error(f"`alerts.json` could not be read: {e}. Fix or delete the file; "
+                 "no alert can fire until it parses.")
+
+    if all_alerts:
+        st.dataframe(pd.DataFrame(all_alerts), use_container_width=True, hide_index=True)
+        active = sum(1 for a in all_alerts if str(a.get("status", "")).upper() == "ACTIVE")
+        st.caption(f"{active} active of {len(all_alerts)} total. A triggered alert re-arms "
+                   f"after {alert_watcher.ALERT_COOLDOWN_SECONDS // 60} minutes.")
+    elif all_alerts is not None:
         st.info("No active alerts set.")
 
 # Tab 6: Raw Data Table
