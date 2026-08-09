@@ -10,19 +10,14 @@ try:
 except ImportError:  # when imported as a top-level module from dashboard/
     import market_calendar
 
-# Load local .env variables manually to avoid extra dependencies
-def load_env(env_path=None):
-    if env_path is None:
-        # Resolve relative to this file so the package is not pinned to C:/mcp-servers
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        os.environ[parts[0].strip()] = parts[1].strip()
+# .env lives in one place now (dashboard/envfile.py) because three modules read
+# environment variables at import time and only this one used to load the file --
+# so econ_calendar and central_banks were silently empty unless this module had
+# been imported first. The name is kept: tests and callers use it.
+try:
+    from dashboard.envfile import load_env
+except ImportError:  # imported as a top-level module from dashboard/
+    from envfile import load_env
 
 load_env()
 

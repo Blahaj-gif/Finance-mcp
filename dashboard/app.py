@@ -49,6 +49,8 @@ sys.path.append(BASE_DIR)
 import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
 from dashboard import market_calendar
+from dashboard import portfolio_history
+from dashboard import econ_calendar
 import indicators
 import backtester
 import forecaster
@@ -383,13 +385,15 @@ if "watcher_thread_started" not in st.session_state:
 # strip against 1140px of container, so two tabs sat behind a scroll arrow at
 # 1600px and four at 1280px -- half the app reachable only by finding an arrow.
 # Every tab already states its full name in the heading inside it.
-tab_charts, tab_backtest, tab_journal, tab_signals, tab_execution, tab_portfolio, tab_alerts, tab_data = st.tabs([
+(tab_charts, tab_backtest, tab_journal, tab_signals, tab_execution,
+ tab_portfolio, tab_events, tab_alerts, tab_data) = st.tabs([
     "Charts",
     "Backtest",
     "Journal",
     "Signals",
     "Execution",
     "Portfolio",
+    "Events",
     "Alerts",
     "Data"
 ])
@@ -1080,13 +1084,189 @@ with tab_portfolio:
         with mcol1:
             st.metric(f"Net Liquidation ({currency or 'base'})", f"{net_liq:,.2f}")
         with mcol2:
-            st.metric("Unrealised P&L", f"{day_pnl:,.2f}",
+            # Also the account base currency — it comes from the same balance
+            # payload as net liquidation, not from the positions below it.
+            st.metric(f"Unrealised P&L ({currency or 'base'})", f"{day_pnl:,.2f}",
                       delta=f"{pnl_pct:+.2f}% on cost", delta_color="normal")
         with mcol3:
             st.metric("Buying Power (USD)", f"{buying_power:,.2f}",
                       help="Buying power is reported per currency; this is the USD line. "
                            "Net liquidation above is in the account's base currency, "
                            "which may differ.")
+
+        # ------------------------------------------------------------------
+        # Value over time
+        # ------------------------------------------------------------------
+        # Two series, deliberately kept apart. The broker returns a snapshot,
+        # never a history, so a P&L curve has to come from one of two places:
+        # what we wrote down (true, and empty until the second day) or what we
+        # can reconstruct by marking today's book back through price history
+        # (available now, and NOT a P&L history -- it assumes the current
+        # position was held throughout, so any trade inside the window makes it
+        # a curve of something that never happened). Same unit, one axis,
+        # separate names.
+        book = [{"symbol": p.get("symbol"),
+                 "quantity": float(p.get("quantity", 0) or 0),
+                 "cost": float(p.get("cost_price", 0) or 0),
+                 "last": float(p.get("last_price", 0) or 0),
+                 "currency": p.get("currency") or "?"} for p in (positions or [])]
+
+        # Positions are priced in their OWN currency, which is not the account's
+        # base. This account holds USD stock inside a THB account, so labelling
+        # position marks with `total_asset_currency` was wrong by the FX rate --
+        # a ~35x misread. Derive the currency from the positions themselves, and
+        # refuse to sum across currencies rather than adding USD to THB.
+        pos_currencies = sorted({b["currency"] for b in book if b["currency"] != "?"})
+        pos_ccy = pos_currencies[0] if len(pos_currencies) == 1 else None
+        mixed_currency = len(pos_currencies) > 1
+
+        try:
+            portfolio_history.record_snapshot(
+                net_liquidation=net_liq, gross_exposure=sum(b["last"] * b["quantity"] for b in book),
+                unrealised_pnl=day_pnl, currency=currency,
+                positions=[{k: b[k] for k in ("symbol", "quantity", "cost")} for b in book])
+        except Exception:
+            pass          # a history write must never take the live panel down
+
+        st.markdown("#### Portfolio Value")
+        if mixed_currency:
+            st.warning(
+                f"Positions span {', '.join(pos_currencies)}. Marks in different "
+                "currencies are not summed here — there is no FX rate in this feed, "
+                "and adding them would produce a number that means nothing. Per-position "
+                "P&L below is still correct within each currency.")
+        pnl_window = st.select_slider("History window", options=[30, 60, 90, 180, 365],
+                                      value=90, format_func=lambda d: f"{d}d",
+                                      key="pnl_window", label_visibility="collapsed")
+
+        price_hist, missing = {}, []
+        for b in book:
+            try:
+                h, _src = webull_client.fetch_data(b["symbol"], "D", min(pnl_window + 10, MAX_BARS))
+                price_hist[b["symbol"]] = list(zip(h["time"].str[:10], h["close"].astype(float)))
+            except Exception:
+                missing.append(b["symbol"])
+
+        # Only reconstruct when every position shares one currency (see above).
+        recon, coverage = (([], {"used": [], "dropped": [b["symbol"] for b in book]})
+                           if mixed_currency
+                           else portfolio_history.reconstruct_series(book, price_hist))
+        recorded = portfolio_history.recorded_series()
+
+        if not recon and not recorded:
+            st.info("No value history yet — no position has enough price history to "
+                    "reconstruct from, and no snapshot has been recorded.")
+        else:
+            fig_pnl = go.Figure()
+            if recon:
+                recon = recon[-pnl_window:]
+                rx = pd.to_datetime([r["date"] for r in recon])
+                ry = [r["value"] for r in recon]
+                fig_pnl.add_trace(go.Scatter(
+                    x=rx, y=ry, mode="lines", name="Current book, marked back",
+                    line=dict(color=PALETTE["accent"], width=2),
+                    fill="tozeroy", fillcolor=PALETTE["accent_band_faintest"],
+                    hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f}<extra></extra>"))
+                # The endpoint only. A number on every point is unreadable and
+                # the axis plus the hover carry the rest.
+                fig_pnl.add_trace(go.Scatter(
+                    x=[rx[-1]], y=[ry[-1]], mode="markers+text",
+                    text=[f"{ry[-1]:,.0f}"], textposition="middle left",
+                    textfont=dict(color=PALETTE["ink"]),
+                    marker=dict(color=PALETTE["accent"], size=8),
+                    showlegend=False, hoverinfo="skip"))
+            if len(recorded) > 1:
+                fig_pnl.add_trace(go.Scatter(
+                    x=pd.to_datetime([r["date"] for r in recorded]),
+                    y=[r["net_liquidation"] for r in recorded],
+                    mode="lines+markers", name="Recorded net liquidation",
+                    line=dict(color=PALETTE["ink"], width=1.5),
+                    marker=dict(size=5),
+                    hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f}<extra></extra>"))
+
+            fig_pnl.update_layout(
+                template="plotly_dark", height=300,
+                margin=dict(l=10, r=56, t=34, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left",
+                            x=0, font=dict(size=10)),
+                paper_bgcolor=PALETTE["paper"], plot_bgcolor=PALETTE["plot"],
+                font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11),
+                dragmode="pan", hovermode="x unified",
+                modebar=dict(orientation="v", bgcolor=PALETTE["paper"],
+                             color=PALETTE["faint"], activecolor=PALETTE["accent"]),
+                uirevision=f"pnl-{pnl_window}")
+            fig_pnl.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"],
+                                 linecolor=PALETTE["axis"], zeroline=False)
+            fig_pnl.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"],
+                                 linecolor=PALETTE["axis"], zeroline=False,
+                                 title_text=f"Position marks ({pos_ccy or 'mixed'})")
+            st.plotly_chart(fig_pnl, use_container_width=True, config=CHART_CONFIG)
+
+            caveats = []
+            if recon:
+                caveats.append(
+                    f"**Current book, marked back** prices today's holdings over past "
+                    f"closes, in **{pos_ccy or 'the position currency'}** — the "
+                    f"currency the positions are quoted in, which is not the account's "
+                    f"base ({currency or 'unknown'}). It is not your realised P&L "
+                    f"history either: it assumes this exact position was held for the "
+                    f"whole window, so any buy, trim or exit inside it did not happen "
+                    f"on this line.")
+            if len(recorded) <= 1:
+                caveats.append(
+                    f"**Recorded net liquidation** is the true series and needs a "
+                    f"second day to draw — {len(recorded)} snapshot(s) so far, one "
+                    "written per day the dashboard is opened.")
+            if coverage.get("dropped") or missing:
+                gone = sorted(set(coverage.get("dropped", [])) | set(missing))
+                caveats.append(f"Excluded from the reconstruction (no price history): "
+                               f"{', '.join(gone)}.")
+            for c in caveats:
+                st.caption(c)
+
+        # ------------------------------------------------------------------
+        # Which position did it
+        # ------------------------------------------------------------------
+        contribs = portfolio_history.position_contributions(book)
+        if contribs:
+            st.markdown("#### P&L by Position")
+            # Bars, not lines: this is magnitude by identity, and colouring by
+            # sign is a status use (gain/loss), not a value ramp on nominal
+            # categories. One axis, one unit.
+            fig_c = go.Figure(go.Bar(
+                x=[c["pnl"] for c in contribs],
+                y=[c["symbol"] for c in contribs],
+                orientation="h",
+                marker_color=[PALETTE["up"] if c["pnl"] >= 0 else PALETTE["down"]
+                              for c in contribs],
+                marker_line_width=0,
+                text=[f"{c['pnl']:+,.2f}" for c in contribs],
+                textposition="outside",
+                textfont=dict(color=PALETTE["ink"]),
+                hovertemplate="%{y}: %{x:,.2f}<extra></extra>"))
+            # Pad the value axis so a bar never runs under the modebar column,
+            # and so an outside label at the extreme has somewhere to sit.
+            span = max((abs(c["pnl"]) for c in contribs), default=1.0) or 1.0
+            lo = min(0.0, min(c["pnl"] for c in contribs)) - span * 0.25
+            hi = max(0.0, max(c["pnl"] for c in contribs)) + span * 0.25
+
+            fig_c.update_layout(
+                template="plotly_dark", height=max(150, 54 * len(contribs)),
+                margin=dict(l=10, r=64, t=10, b=44), showlegend=False,
+                paper_bgcolor=PALETTE["paper"], plot_bgcolor=PALETTE["plot"],
+                font=dict(family=PALETTE["font"], color=PALETTE["dim"], size=11),
+                # Thin marks: a saturated block spanning the pane reads loud and
+                # says nothing the bar length does not already say.
+                bargap=0.62,
+                modebar=dict(orientation="v", bgcolor=PALETTE["paper"],
+                             color=PALETTE["faint"], activecolor=PALETTE["accent"]))
+            fig_c.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"],
+                               linecolor=PALETTE["axis"], zeroline=True,
+                               zerolinecolor=PALETTE["axis"], range=[lo, hi],
+                               title_text=f"Unrealised P&L ({pos_ccy or 'position currency'})")
+            fig_c.update_yaxes(showgrid=False, linecolor=PALETTE["axis"],
+                               autorange="reversed")
+            st.plotly_chart(fig_c, use_container_width=True, config=CHART_CONFIG)
 
         st.markdown("#### Open Positions")
         if not positions:
@@ -1107,6 +1287,13 @@ with tab_portfolio:
                     "P&L": (last - cost) * qty,
                     "P&L %": ((last - cost) / cost * 100) if cost else 0.0,
                 })
+            # Column headers carry the currency. The account base is THB here
+            # while the positions are quoted in USD, so unlabelled money columns
+            # sat directly under a THB net-liquidation figure and read as the
+            # same unit.
+            money = f" ({pos_ccy})" if pos_ccy else ""
+            for row, p in zip(prows, positions):
+                row["Ccy"] = p.get("currency") or "?"
             # Explicit column formats: raw floats rendered as 0.3 / 908.69 / 880
             # / -3.1573 in the same table, so nothing lined up and the percent
             # column read as a price.
@@ -1114,10 +1301,11 @@ with tab_portfolio:
                 pd.DataFrame(prows), use_container_width=True, hide_index=True,
                 column_config={
                     "Quantity": st.column_config.NumberColumn(format="%.4f"),
-                    "Cost":     st.column_config.NumberColumn(format="%.2f"),
-                    "Last":     st.column_config.NumberColumn(format="%.2f"),
-                    "Value":    st.column_config.NumberColumn(format="%.2f"),
-                    "P&L":      st.column_config.NumberColumn(format="%+.2f"),
+                    "Cost":     st.column_config.NumberColumn(f"Cost{money}", format="%.2f"),
+                    "Last":     st.column_config.NumberColumn(f"Last{money}", format="%.2f"),
+                    "Value":    st.column_config.NumberColumn(f"Value{money}", format="%.2f"),
+                    "P&L":      st.column_config.NumberColumn(f"P&L{money}", format="%+.2f"),
+                    "Ccy":      st.column_config.TextColumn(width="small"),
                     "P&L %":    st.column_config.NumberColumn(format="%+.2f%%"),
                 })
             with st.expander("Raw broker payload"):
@@ -1127,6 +1315,111 @@ with tab_portfolio:
         st.error(f"Failed to fetch Webull account data: {str(e)}")
 
 # Tab 7: Live Alerts & Daemon
+with tab_events:
+    st.markdown("### Economic Calendar & Filings")
+    st.markdown("Scheduled macro releases, and SEC filings for the symbols you are watching. "
+                "Both are dated at the source — nothing here is inferred.")
+
+    ev_col1, ev_col2 = st.columns([1, 1])
+    with ev_col1:
+        watch_raw = st.text_input(
+            "Watchlist (comma separated)", value=symbol,
+            help="Filings are fetched per symbol from SEC EDGAR. The ticker in the "
+                 "sidebar is the default.")
+    with ev_col2:
+        days_ahead = st.select_slider("Look ahead", options=[7, 14, 30, 60, 90], value=30,
+                                      format_func=lambda d: f"{d}d")
+
+    watchlist = [t.strip().upper() for t in watch_raw.split(",") if t.strip()][:8]
+
+    # ---------------------------------------------------------------
+    # Macro releases
+    # ---------------------------------------------------------------
+    st.markdown("#### Scheduled Macro Releases")
+    with st.spinner("Reading BLS release schedules..."):
+        try:
+            releases, failed = econ_calendar.upcoming_releases(days_ahead=days_ahead, days_back=7)
+        except Exception as e:
+            releases, failed = [], [str(e)]
+
+    if releases:
+        today = datetime.date.today()
+        rows = []
+        for ev in releases:
+            delta = (ev["date"] - today).days
+            rows.append({
+                "Date": ev["date"].isoformat(),
+                "When": ("today" if delta == 0 else
+                         f"in {delta}d" if delta > 0 else f"{-delta}d ago"),
+                "Release": ev["release"],
+                "Period": ev.get("period", ""),
+                "Time": ev.get("time", ""),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                     column_config={"Date": st.column_config.TextColumn(width="small"),
+                                    "When": st.column_config.TextColumn(width="small")})
+        nxt = next((r for r in rows if not r["When"].endswith("ago")), None)
+        if nxt:
+            st.caption(f"Next: **{nxt['Release']}** {nxt['When']} ({nxt['Date']}).")
+    else:
+        st.info("No scheduled releases in this window.")
+    if failed:
+        # The schedules are scraped HTML pages. When one is unreachable the
+        # calendar is incomplete, and an incomplete calendar that looks complete
+        # is worse than one that says so.
+        st.warning("Some release schedules could not be read, so this calendar is "
+                   "incomplete: " + "; ".join(f"`{f}`" for f in failed[:4]))
+
+    # ---------------------------------------------------------------
+    # Filings
+    # ---------------------------------------------------------------
+    st.markdown("#### Recent SEC Filings")
+    form_filter = st.multiselect(
+        "Forms", options=["8-K", "10-Q", "10-K", "4", "13D", "13G", "144", "S-1", "DEF 14A"],
+        default=["8-K", "10-Q", "10-K", "4"],
+        help="Form 4 is insider dealing; 8-K is a material event, which is where "
+             "earnings and guidance land.")
+
+    if not watchlist:
+        st.info("Add a ticker above to see its filings.")
+    else:
+        filing_rows, filing_errors = [], []
+        with st.spinner(f"Fetching filings for {', '.join(watchlist)}..."):
+            for tkr in watchlist:
+                try:
+                    for f in econ_calendar.company_filings(tkr, forms=form_filter or None, limit=12):
+                        filing_rows.append({
+                            "Symbol": tkr,
+                            "Filed": f.get("filing_date", ""),
+                            "Form": f.get("form", ""),
+                            "Description": (f.get("description") or "")[:70],
+                            "Accepted": (f.get("acceptance") or "")[:16].replace("T", " "),
+                            "Link": f.get("url", ""),
+                        })
+                except Exception as e:
+                    filing_errors.append(f"{tkr}: {str(e)[:90]}")
+
+        if filing_rows:
+            filing_rows.sort(key=lambda r: r["Filed"], reverse=True)
+            st.dataframe(
+                pd.DataFrame(filing_rows), use_container_width=True, hide_index=True,
+                column_config={
+                    "Link": st.column_config.LinkColumn("Filing", display_text="open"),
+                    "Symbol": st.column_config.TextColumn(width="small"),
+                    "Form": st.column_config.TextColumn(width="small"),
+                })
+            st.caption(f"{len(filing_rows)} filings across {len(watchlist)} symbol(s). "
+                       "`Accepted` is the SEC's acceptance timestamp, which is what makes "
+                       "this near-real-time — the filing date alone is only day-resolution.")
+        elif not filing_errors:
+            st.info("No filings matching those forms for these symbols.")
+
+        if filing_errors:
+            st.warning("Could not fetch filings for: " + "; ".join(f"`{e}`" for e in filing_errors))
+            if any("SEC_USER_AGENT" in e for e in filing_errors):
+                st.caption("The SEC's fair-access policy requires a contact address. "
+                           "Set `SEC_USER_AGENT` in `.env` and restart.")
+
 with tab_alerts:
     st.markdown("### Live Alerts & Watcher Daemon")
     st.markdown("The alert daemon monitors live price and indicator conditions in the background, firing native Windows desktop balloon notifications.")

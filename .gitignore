@@ -36,3 +36,4 @@ iv_history.json
 # sha256 manifest; it does not build and is not a dependency. The pieces we
 # adopted are vendored explicitly (dashboard/ta_core.py, tests/fixtures/).
 extract-chart-dsl/
+dashboard/portfolio_history.json

@@ -35,6 +35,16 @@ import os
 import urllib.parse
 
 try:
+    from dashboard.envfile import load_env
+except ImportError:  # imported as a top-level module from dashboard/
+    from envfile import load_env
+
+# Read .env here rather than relying on another module having done it:
+# these constants are captured at import time, and were empty whenever this
+# module was imported before webull_client.
+load_env()
+
+try:
     from dashboard import normalization as nz
     from dashboard import econ_calendar as ec
 except ImportError:
