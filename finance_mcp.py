@@ -2875,8 +2875,19 @@ def get_macro_data(series: str | list[str] = "cpi,core_cpi,unemployment",
 
         unknown = [k for k in keys if k not in econ_calendar.BLS_SERIES]
         if unknown:
-            raise ToolError(f"Unknown series {unknown}. Available: "
-                            f"{', '.join(econ_calendar.BLS_SERIES)}")
+            # A key that exists under the other source is not "unknown" -- saying
+            # so sends the caller looking for a series it already found, and the
+            # available-list it gets back does not contain the name it just used.
+            elsewhere = [k for k in unknown if k in central_banks.SERIES]
+            if elsewhere:
+                raise ToolError(
+                    f"{', '.join(elsewhere)} " +
+                    ("is a markets series" if len(elsewhere) == 1 else "are markets series") +
+                    ', not a BLS one. Re-run with source="markets".')
+            raise ToolError(f"Unknown series {unknown}. Available from BLS: "
+                            f"{', '.join(econ_calendar.BLS_SERIES)}. "
+                            f'Policy rates, the curve and financial conditions are '
+                            f'under source="markets": {", ".join(central_banks.SERIES)}')
 
         data = econ_calendar.fetch_bls_series(keys)
         out = "### US Macroeconomic Data (BLS)\n\n"
