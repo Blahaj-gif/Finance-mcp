@@ -993,13 +993,36 @@ with tab_execution:
                             except Exception as e:
                                 st.session_state.pop(preview_key, None)
                                 st.error(f"Webull refused to preview this order: {e}")
+                                # Two refusals mean something other than "your
+                                # order is bad", and a bare broker code does not
+                                # say so. Both were hit for real during testing.
+                                text = str(e).upper()
+                                if "UNAUTHORIZED" in text or "INVALID CREDENTIALS" in text:
+                                    if webull_client.is_paper_environment():
+                                        st.info(
+                                            "Webull's sandbox is a separate deployment with its own "
+                                            "app registry, so a **production** key authenticates "
+                                            "there as 401. Register a sandbox app and set "
+                                            "`WEBULL_PAPER_APP_KEY` / `WEBULL_PAPER_APP_SECRET` in "
+                                            "`.env`, then restart.")
+                                elif "NO_TRADING_DAY" in text:
+                                    st.info(
+                                        "Webull rejects orders outside trading days entirely — a "
+                                        "resting limit order cannot be parked over a weekend. "
+                                        "Rehearse on a session day, or in paper.")
 
                 preview = st.session_state.get(preview_key)
                 if preview:
                     q = preview["quote"]
+                    # Streamlit renders $...$ as LaTeX. Two unescaped dollar
+                    # signs in one line turned the broker's own cost figure into
+                    # "0.01∗∗,fee∗∗0.00" -- unreadable, on the single number a
+                    # person is being asked to approve. Escaped, and the units
+                    # named so the currency is not left to inference.
+                    ccy = q.get("currency") or "USD"
                     st.success(
-                        f"Broker preview — estimated cost **${q.get('estimated_cost', '?')}**, "
-                        f"fee **${q.get('estimated_transaction_fee', '?')}**"
+                        f"Broker preview — estimated cost **\\${q.get('estimated_cost', '?')} "
+                        f"{ccy}**, fee **\\${q.get('estimated_transaction_fee', '?')} {ccy}**"
                     )
 
                 # --- Step 2: submit, only ever after a successful preview ---
@@ -1035,6 +1058,16 @@ with tab_execution:
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to submit — the draft remains PENDING: {e}")
+                                text = str(e).upper()
+                                if "NO_TRADING_DAY" in text:
+                                    st.info(
+                                        "Webull rejects orders outside trading days entirely — a "
+                                        "resting limit order cannot be parked over a weekend. "
+                                        "Nothing was sent to the market and nothing was spent.")
+                                elif "UNAUTHORIZED" in text and webull_client.is_paper_environment():
+                                    st.info(
+                                        "The sandbox needs its own credentials: set "
+                                        "`WEBULL_PAPER_APP_KEY` / `WEBULL_PAPER_APP_SECRET`.")
                             
     except Exception as e:
         st.error(f"Error reading order drafts: {str(e)}")

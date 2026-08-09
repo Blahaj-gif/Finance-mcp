@@ -25,6 +25,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
 WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
+# Optional, and only used when WEBULL_ENVIRONMENT=paper. Webull's sandbox is a
+# separate deployment with its own app registry -- a production key returns 401
+# there, not a permissions error.
+WEBULL_PAPER_APP_KEY = os.getenv("WEBULL_PAPER_APP_KEY", "").strip()
+WEBULL_PAPER_APP_SECRET = os.getenv("WEBULL_PAPER_APP_SECRET", "").strip()
 WEBULL_REGION_ID = os.getenv("WEBULL_REGION_ID", "th")
 WEBULL_ENVIRONMENT = os.getenv("WEBULL_ENVIRONMENT", "prod")
 WEBULL_TOKEN_DIR = os.getenv("WEBULL_TOKEN_DIR", os.path.join(BASE_DIR, "conf"))
@@ -700,12 +705,24 @@ def get_api_client():
         from webull.core.client import ApiClient
         import logging
 
-        if not WEBULL_APP_KEY or not WEBULL_APP_SECRET:
+        # The sandbox is a separate Webull deployment with its own registry, so
+        # production credentials authenticate against it as 401 UNAUTHORIZED.
+        # Verified live: submitting into paper with the prod key returns
+        # "Invalid credentials ... ensure you are connecting to the correct
+        # environment". Paper therefore takes its own pair when one is set, and
+        # says exactly this when it is not, rather than leaving someone to read
+        # a bare 401 as "my key is wrong".
+        app_key, app_secret = WEBULL_APP_KEY, WEBULL_APP_SECRET
+        if is_paper_environment():
+            app_key = WEBULL_PAPER_APP_KEY or WEBULL_APP_KEY
+            app_secret = WEBULL_PAPER_APP_SECRET or WEBULL_APP_SECRET
+
+        if not app_key or not app_secret:
             raise ValueError("Webull App Key and App Secret must be set in .env")
 
         api_client = ApiClient(
-            WEBULL_APP_KEY,
-            WEBULL_APP_SECRET,
+            app_key,
+            app_secret,
             WEBULL_REGION_ID.lower(),
             token_check_duration_seconds=10,
             token_check_interval_seconds=2,
@@ -727,7 +744,8 @@ def get_api_client():
         _quieten_rotation_errors()
 
         # ...and redact, because the SDK logs the signed request at ERROR too.
-        redactor = _RedactSecretsFilter((WEBULL_APP_KEY, WEBULL_APP_SECRET))
+        redactor = _RedactSecretsFilter(
+            (WEBULL_APP_KEY, WEBULL_APP_SECRET, app_key, app_secret))
         sdk_logger = logging.getLogger("webull.core")
         if not any(isinstance(f, _RedactSecretsFilter) for f in sdk_logger.filters):
             sdk_logger.addFilter(redactor)

@@ -83,6 +83,12 @@ WEBULL_REGION_ID=th
 # point at your live account by default.
 WEBULL_ENVIRONMENT=paper
 
+# Webull's sandbox is a SEPARATE deployment with its own app registry, so a
+# production key authenticates against it as 401. Register a sandbox app and put
+# its pair here; paper mode uses these when set.
+# WEBULL_PAPER_APP_KEY=
+# WEBULL_PAPER_APP_SECRET=
+
 # Pin this if your login has more than one account; the server refuses to guess.
 # WEBULL_ACCOUNT_ID=
 
