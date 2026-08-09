@@ -54,9 +54,9 @@ def test_rsi_is_0_when_there_are_no_gains():
 def test_rsi_is_undefined_not_neutral_on_a_flat_series():
     """
     This used to return 50.0. That reads as a measured neutral reading, and the
-    alert daemon would evaluate it as one — an RSI_BELOW 30 alert on a halted or
+    alert manager would evaluate it as one — an RSI_BELOW 30 alert on a halted or
     untraded symbol would report "condition not met" as though it had looked.
-    NaN is the honest answer, and `_finite()` in alert_watcher already raises on
+    NaN is the honest answer, and `_finite()` in alert_manager already raises on
     it rather than treating it as a no.
     """
     import math

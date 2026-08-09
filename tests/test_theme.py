@@ -229,7 +229,7 @@ def _emoji_in(text):
 
 
 @pytest.mark.parametrize("relpath", [
-    "dashboard/app.py", "dashboard/theme.py", "dashboard/alert_watcher.py",
+    "dashboard/app.py", "dashboard/theme.py", "dashboard/alert_manager.py",
     "dashboard/webull_client.py", "finance_mcp.py", "installer.ps1", "README.md",
 ])
 def test_no_emoji_on_a_user_visible_surface(relpath):

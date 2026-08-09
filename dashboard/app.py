@@ -367,22 +367,22 @@ render_html(f"""
 """)
 
 
-# Initialize Background Alert Watcher Thread in Streamlit if not running
+# Initialize Background Alert Manager Thread in Streamlit if not running
 import threading
-import alert_watcher
+import alert_manager
 
-# Guarded inside alert_watcher, not by st.session_state: session state is per
-# BROWSER session, so a second tab used to start a second watcher in the same
+# Guarded inside alert_manager, not by st.session_state: session state is per
+# BROWSER session, so a second tab used to start a second manager in the same
 # process -- two polls of the feed and two notifications for one alert. The
 # failure is also recorded rather than swallowed, because a dashboard that says
-# "the daemon monitors your alerts" while the thread never started is making a
+# "the manager monitors your alerts" while the thread never started is making a
 # claim someone will rely on.
-if "watcher_start_error" not in st.session_state:
-    st.session_state["watcher_start_error"] = None
+if "manager_start_error" not in st.session_state:
+    st.session_state["manager_start_error"] = None
     try:
-        alert_watcher.start_watcher_once()
+        alert_manager.start_manager_once()
     except Exception as e:
-        st.session_state["watcher_start_error"] = str(e)
+        st.session_state["manager_start_error"] = str(e)
 
 # ------------------------------------------------------------------
 # Dashboard Tab Selection
@@ -1320,7 +1320,7 @@ with tab_portfolio:
     except Exception as e:
         st.error(f"Failed to fetch Webull account data: {str(e)}")
 
-# Tab 7: Live Alerts & Daemon
+# Tab 7: Live Alerts & Manager
 with tab_events:
     st.markdown("### Economic Calendar & Filings")
     st.markdown("Scheduled macro releases, and SEC filings for the symbols you are watching. "
@@ -1548,15 +1548,15 @@ with tab_events:
                 st.warning("This diff is incomplete: " + "; ".join(f"`{e}`" for e in diff_errors[:4]))
 
 with tab_alerts:
-    st.markdown("### Live Alerts & Watcher Daemon")
-    st.markdown("The alert daemon monitors live price and indicator conditions in the background, "
+    st.markdown("### Live Alerts & Manager")
+    st.markdown("The alert manager monitors live price and indicator conditions in the background, "
                 "firing native Windows desktop balloon notifications.")
 
     # Whether that sentence is currently true, judged by whether a pass has
     # actually completed recently rather than by whether a thread object exists.
-    healthy, status_msg = alert_watcher.watcher_status()
-    if st.session_state.get("watcher_start_error"):
-        st.error(f"Alert daemon failed to start: `{st.session_state['watcher_start_error']}` "
+    healthy, status_msg = alert_manager.manager_status()
+    if st.session_state.get("manager_start_error"):
+        st.error(f"Alert manager failed to start: `{st.session_state['manager_start_error']}` "
                  "— no alert will fire.")
     elif healthy:
         st.success(status_msg)
@@ -1578,11 +1578,11 @@ with tab_alerts:
             submit_al = st.form_submit_button("Set Alert")
             
             if submit_al:
-                # Through alert_watcher.add_alert, not a hand-rolled
-                # read-append-write: the daemon writes this same file, and an
+                # Through alert_manager.add_alert, not a hand-rolled
+                # read-append-write: the manager writes this same file, and an
                 # unlocked round trip drops whichever update lands second.
                 try:
-                    alert_watcher.add_alert({
+                    alert_manager.add_alert({
                         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "symbol": al_symbol,
                         "condition": al_cond,
@@ -1598,7 +1598,7 @@ with tab_alerts:
     # List active & triggered alerts. A corrupt file used to raise here and take
     # the whole tab down; the alert list is a record, and nothing else needs it.
     try:
-        all_alerts = alert_watcher.load_alerts()
+        all_alerts = alert_manager.load_alerts()
     except Exception as e:
         all_alerts = None
         st.error(f"`alerts.json` could not be read: {e}. Fix or delete the file; "
@@ -1608,7 +1608,7 @@ with tab_alerts:
         st.dataframe(pd.DataFrame(all_alerts), use_container_width=True, hide_index=True)
         active = sum(1 for a in all_alerts if str(a.get("status", "")).upper() == "ACTIVE")
         st.caption(f"{active} active of {len(all_alerts)} total. A triggered alert re-arms "
-                   f"after {alert_watcher.ALERT_COOLDOWN_SECONDS // 60} minutes.")
+                   f"after {alert_manager.ALERT_COOLDOWN_SECONDS // 60} minutes.")
     elif all_alerts is not None:
         st.info("No active alerts set.")
 

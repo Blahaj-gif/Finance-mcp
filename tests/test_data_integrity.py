@@ -573,13 +573,19 @@ def test_log_redaction_scrubs_credentials():
     """
     Lowering the SDK log level is not sufficient: it dumps the full signed
     request at ERROR whenever a call fails, and 429s are routine.
+
+    The fixtures below are synthetic and must stay that way. This test was
+    originally written by pasting a real failing request out of the SDK log --
+    which put the live app key into a committed file, in every commit, and
+    silently undid the rotation that the same incident had prompted. A test
+    that proves secrets are scrubbed is the last place a real secret belongs.
     """
     import logging
 
-    key = "1da0d51604aaa7a51d3f3d39370e783f"
-    secret = "3595e3ff8afde80cc74904fd552e624a"
-    signature = "8TFXMPCOmljSoSfqH8wT82KVOJDyht2uHwS3gmseNw0="
-    token = "126b4fe698aa496eb852111134a329b1"
+    key = "deadbeefdeadbeefdeadbeefdeadbeef"
+    secret = "cafebabecafebabecafebabecafebabe"
+    signature = "AAAAsyntheticSignatureForTestingOnly000000000="
+    token = "0123456789abcdef0123456789abcdef"
 
     raw = (
         'ServerException occurred. Request:{ "x-app-key": "%s", '

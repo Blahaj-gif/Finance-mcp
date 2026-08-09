@@ -20,7 +20,7 @@ import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
-import dashboard.alert_watcher as alert_watcher
+import dashboard.alert_manager as alert_manager
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -1103,19 +1103,19 @@ def set_alert(symbol: str, condition: str, target_value: float, note: str = "") 
     cond = (condition or "").strip().upper()
     # Validate before writing. An unrecognised condition used to save happily
     # and report success, producing an alert that could never fire and that the
-    # daemon then failed on every 60 seconds, into a log nobody reads.
-    if cond not in alert_watcher.CONDITIONS:
+    # manager then failed on every 60 seconds, into a log nobody reads.
+    if cond not in alert_manager.CONDITIONS:
         raise ToolError(
             f"Unknown condition '{condition}'. Supported: "
-            f"{', '.join(alert_watcher.CONDITIONS)}.")
+            f"{', '.join(alert_manager.CONDITIONS)}.")
     try:
         # Record the market level the alert was set against, so a threshold can
         # later be judged against where price actually was when it was chosen.
         prov = webull_client.get_provenance(symbol, "D")
 
-        # Through the watcher's own writer: it round-trips the file under a lock
+        # Through the manager's own writer: it round-trips the file under a lock
         # and replaces it atomically, so a reader never sees a partial write.
-        alert_watcher.add_alert({
+        alert_manager.add_alert({
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol.upper(),
             "condition": cond,

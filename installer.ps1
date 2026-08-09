@@ -76,7 +76,13 @@ if (-not (Test-Path $envFile)) {
 WEBULL_APP_KEY=YOUR_WEBULL_APP_KEY_HERE
 WEBULL_APP_SECRET=YOUR_WEBULL_APP_SECRET_HERE
 WEBULL_REGION_ID=th
-WEBULL_ENVIRONMENT=prod
+
+# paper = Webull's sandbox. An approved order goes to the sandbox and spends
+# nothing. Change to prod when you have rehearsed the approval flow and want
+# orders to reach the real account and real money. A fresh install does not
+# point at your live account by default.
+WEBULL_ENVIRONMENT=paper
+
 # Pin this if your login has more than one account; the server refuses to guess.
 # WEBULL_ACCOUNT_ID=
 

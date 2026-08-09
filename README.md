@@ -13,7 +13,7 @@ Finance MCP bridges the gap between LLM reasoning (Claude) and market execution 
 * **Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
 * **Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
 * **Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
-* **Background Alert Daemon:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
+* **Background Alert Manager:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
 
 ---
 
@@ -154,11 +154,11 @@ uv run --with streamlit --with plotly --with pandas --with numpy \
 
 It opens on <http://localhost:8501>. Add `--server.port 8899` to move it.
 
-**The alert daemon** (optional, Windows toast notifications). The dashboard
+**The alert manager** (optional, Windows toast notifications). The dashboard
 starts it automatically in a background thread; to run it standalone:
 
 ```bash
-python -m dashboard.alert_watcher
+python -m dashboard.alert_manager
 ```
 
 **Verify the install** — `pytest` runs the whole suite offline, with no
@@ -185,7 +185,7 @@ your account. **`check_connection`** confirms the Webull session specifically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `WEBULL_ENVIRONMENT` | `prod` | `prod` trades the real account. **`paper`** (aliases `uat`, `sandbox`, `simulated`) routes every call to Webull's simulated environment for your region, so the whole approval path — draft, preview, approve, submit — can be rehearsed without risking anything. The dashboard shows `LIVE` or `PAPER` beside the wordmark and on the Execution tab. If no sandbox host is published for your region the client refuses to start rather than falling through to production. |
+| `WEBULL_ENVIRONMENT` | `paper` | A fresh install defaults to **`paper`** so the first run cannot reach real money. `prod` trades the real account. **`paper`** (aliases `uat`, `sandbox`, `simulated`) routes every call to Webull's simulated environment for your region, so the whole approval path — draft, preview, approve, submit — can be rehearsed without risking anything. The dashboard shows `LIVE` or `PAPER` beside the wordmark and on the Execution tab. If no sandbox host is published for your region the client refuses to start rather than falling through to production. |
 | `WEBULL_ACCOUNT_ID` | *(unset)* | Pin a specific account. **Required if your login has more than one** — the server refuses to guess rather than silently trading the wrong account. |
 | `WEBULL_MIN_REQUEST_INTERVAL` | `0.25` | Seconds between Webull API calls. Pacing keeps list-sweeping tools (sector heatmap, watchlist scans) off the rate limiter. |
 | `WEBULL_MAX_RETRIES` | `3` | Attempts before a rate-limited call gives up and falls back. |
@@ -213,7 +213,7 @@ Double-click the **Finance MCP Dashboard** shortcut, or run
 | **Signals** | The four indicator verdicts behind the consensus score, and the regime weighting matrix that produced them. |
 | **Execution** | The approval desk. See below. |
 | **Portfolio** | Live balance, buying power and open positions with P&L, straight from the broker. |
-| **Alerts** | Price, RSI and MACD-cross alerts; the daemon fires Windows notifications and stamps which bar triggered. |
+| **Alerts** | Price, RSI and MACD-cross alerts; the manager fires Windows notifications and stamps which bar triggered. |
 | **Data** | Every computed indicator column for the loaded window, newest first. |
 
 **DISPLAY** in the top right switches the visual theme (**Terminal**, the

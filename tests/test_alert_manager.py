@@ -1,7 +1,7 @@
 """
-Alert daemon tests.
+Alert manager tests.
 
-Offline: no broker session, no network, no sleeping. The daemon's whole job is
+Offline: no broker session, no network, no sleeping. The manager's whole job is
 deciding *whether* to interrupt someone, so the properties worth pinning are
 the ones that make it cry wolf or stay silent when it shouldn't.
 """
@@ -14,8 +14,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dashboard import alert_watcher as aw
-from dashboard.alert_watcher import AlertEvaluationError
+from dashboard import alert_manager as am
+from dashboard.alert_manager import AlertEvaluationError
 
 
 def bars(macd_pairs=None, close=100.0, rsi=50.0):
@@ -50,7 +50,7 @@ def stub_fetch(df, source="Webull OpenAPI"):
     ("PRICE_BELOW", 90.0, 100.0, False),
 ])
 def test_price_conditions(condition, target, close, expected):
-    fired, text = aw.evaluate_condition(condition, target, {"close": close}, bars())
+    fired, text = am.evaluate_condition(condition, target, {"close": close}, bars())
     assert fired is expected
     assert f"${close:.2f}" in text
 
@@ -62,12 +62,12 @@ def test_price_conditions(condition, target, close, expected):
     ("RSI_ABOVE", 70.0, 45.0, False),
 ])
 def test_rsi_conditions(condition, target, rsi, expected):
-    fired, _ = aw.evaluate_condition(condition, target, {"rsi_14": rsi}, bars())
+    fired, _ = am.evaluate_condition(condition, target, {"rsi_14": rsi}, bars())
     assert fired is expected
 
 
 def test_conditions_are_case_and_whitespace_insensitive():
-    fired, _ = aw.evaluate_condition("  price_above  ", 90.0, {"close": 100.0}, bars())
+    fired, _ = am.evaluate_condition("  price_above  ", 90.0, {"close": 100.0}, bars())
     assert fired is True
 
 
@@ -77,18 +77,18 @@ def test_an_unknown_condition_raises_instead_of_guessing():
     became a *different alert* that still fired -- silently.
     """
     with pytest.raises(AlertEvaluationError, match="Unknown condition"):
-        aw.evaluate_condition("RSI_BELO", 30.0, {"close": 100.0, "rsi_14": 20.0}, bars())
+        am.evaluate_condition("RSI_BELO", 30.0, {"close": 100.0, "rsi_14": 20.0}, bars())
 
 
 def test_every_condition_offered_by_the_dashboard_is_supported():
-    """The alert form's dropdown and the daemon's vocabulary must not drift."""
+    """The alert form's dropdown and the manager's vocabulary must not drift."""
     app = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "dashboard", "app.py"), encoding="utf-8").read()
-    for cond in aw.CONDITIONS:
+    for cond in am.CONDITIONS:
         assert cond in app, f"{cond} is not offered anywhere in the dashboard"
     offered = app.split('st.selectbox("Condition Operator", [', 1)[1].split("]", 1)[0]
     for cond in [c.strip().strip('"') for c in offered.split(",")]:
-        assert cond in aw.CONDITIONS, f"dashboard offers '{cond}', daemon cannot evaluate it"
+        assert cond in am.CONDITIONS, f"dashboard offers '{cond}', manager cannot evaluate it"
 
 
 # =====================================================================
@@ -101,12 +101,12 @@ def test_a_nan_indicator_raises_rather_than_reading_as_not_triggered():
     used to be indistinguishable from a condition that genuinely wasn't met.
     """
     with pytest.raises(AlertEvaluationError, match="NaN"):
-        aw.evaluate_condition("RSI_BELOW", 30.0, {"rsi_14": float("nan")}, bars())
+        am.evaluate_condition("RSI_BELOW", 30.0, {"rsi_14": float("nan")}, bars())
 
 
 def test_a_missing_indicator_column_raises():
     with pytest.raises(AlertEvaluationError, match="missing"):
-        aw.evaluate_condition("RSI_ABOVE", 70.0, {"close": 100.0}, bars())
+        am.evaluate_condition("RSI_ABOVE", 70.0, {"close": 100.0}, bars())
 
 
 # =====================================================================
@@ -115,7 +115,7 @@ def test_a_missing_indicator_column_raises():
 
 def test_macd_bull_fires_on_the_bar_that_crosses():
     df = bars([(-0.5, 0.1), (0.4, 0.2)])          # below -> above
-    fired, text = aw.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
+    fired, text = am.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
     assert fired is True
     assert "prev" in text
 
@@ -127,33 +127,33 @@ def test_macd_bull_does_not_re_fire_while_merely_above():
     the single crossing it was meant to catch.
     """
     df = bars([(0.4, 0.2), (0.6, 0.3)])           # above, and stays above
-    fired, _ = aw.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
+    fired, _ = am.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
     assert fired is False
 
 
 def test_macd_bear_fires_on_the_bar_that_crosses_down():
     df = bars([(0.5, 0.1), (-0.2, 0.1)])
-    fired, _ = aw.evaluate_condition("MACD_CROSS_BEAR", 0, df.iloc[-1].to_dict(), df)
+    fired, _ = am.evaluate_condition("MACD_CROSS_BEAR", 0, df.iloc[-1].to_dict(), df)
     assert fired is True
 
 
 def test_macd_bear_does_not_re_fire_while_merely_below():
     df = bars([(-0.5, 0.1), (-0.7, 0.1)])
-    fired, _ = aw.evaluate_condition("MACD_CROSS_BEAR", 0, df.iloc[-1].to_dict(), df)
+    fired, _ = am.evaluate_condition("MACD_CROSS_BEAR", 0, df.iloc[-1].to_dict(), df)
     assert fired is False
 
 
 def test_a_touch_then_break_counts_as_a_cross():
     """Equality on the previous bar is 'not yet above', so the break still fires."""
     df = bars([(0.2, 0.2), (0.5, 0.2)])
-    fired, _ = aw.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
+    fired, _ = am.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
     assert fired is True
 
 
 def test_macd_needs_two_bars():
     df = bars([(0.4, 0.2)])
     with pytest.raises(AlertEvaluationError, match="previous bar"):
-        aw.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
+        am.evaluate_condition("MACD_CROSS_BULL", 0, df.iloc[-1].to_dict(), df)
 
 
 # =====================================================================
@@ -161,22 +161,22 @@ def test_macd_needs_two_bars():
 # =====================================================================
 
 def test_an_active_alert_is_never_in_cooldown():
-    assert aw.is_in_cooldown(alert(status="ACTIVE"), now_ts=1000.0) is False
+    assert am.is_in_cooldown(alert(status="ACTIVE"), now_ts=1000.0) is False
 
 
 def test_a_freshly_triggered_alert_is_suppressed():
     a = alert(status="TRIGGERED", last_triggered_time=1000.0)
-    assert aw.is_in_cooldown(a, now_ts=1000.0 + aw.ALERT_COOLDOWN_SECONDS - 1) is True
+    assert am.is_in_cooldown(a, now_ts=1000.0 + am.ALERT_COOLDOWN_SECONDS - 1) is True
 
 
 def test_the_alert_re_arms_once_the_window_expires():
     a = alert(status="TRIGGERED", last_triggered_time=1000.0)
-    assert aw.is_in_cooldown(a, now_ts=1000.0 + aw.ALERT_COOLDOWN_SECONDS + 1) is False
+    assert am.is_in_cooldown(a, now_ts=1000.0 + am.ALERT_COOLDOWN_SECONDS + 1) is False
 
 
 def test_a_null_last_triggered_time_does_not_crash_the_cooldown():
     a = alert(status="TRIGGERED", last_triggered_time=None)
-    assert aw.is_in_cooldown(a, now_ts=1000.0) is False
+    assert am.is_in_cooldown(a, now_ts=1000.0) is False
 
 
 def test_a_suppressed_alert_is_not_even_fetched():
@@ -188,7 +188,7 @@ def test_a_suppressed_alert_is_not_even_fetched():
         return bars(close=100.0), "Webull OpenAPI"
 
     a = alert(status="TRIGGERED", last_triggered_time=1000.0)
-    aw.check_alerts([a], now_ts=1000.0, fetch=counting_fetch,
+    am.check_alerts([a], now_ts=1000.0, fetch=counting_fetch,
                     notify=lambda *_: None, log=lambda _: None)
     assert calls == []
 
@@ -200,7 +200,7 @@ def test_a_suppressed_alert_is_not_even_fetched():
 def test_a_triggered_alert_is_stamped_and_notified():
     sent = []
     a = alert(condition="PRICE_ABOVE", target_value=90.0)
-    changed = aw.check_alerts([a], now_ts=5000.0,
+    changed = am.check_alerts([a], now_ts=5000.0,
                               fetch=stub_fetch(bars(close=101.0)),
                               notify=lambda t, m: sent.append((t, m)),
                               log=lambda _: None)
@@ -215,7 +215,7 @@ def test_a_triggered_alert_is_stamped_and_notified():
 
 def test_an_untriggered_alert_leaves_the_file_alone():
     a = alert(condition="PRICE_ABOVE", target_value=500.0)
-    changed = aw.check_alerts([a], now_ts=5000.0,
+    changed = am.check_alerts([a], now_ts=5000.0,
                               fetch=stub_fetch(bars(close=101.0)),
                               notify=lambda *_: None, log=lambda _: None)
     assert changed is False
@@ -225,7 +225,7 @@ def test_an_untriggered_alert_leaves_the_file_alone():
 def test_the_notification_reports_the_bar_it_fired_on_not_the_wall_clock():
     """A ten-month-old bar satisfying the condition must not read as 'now'."""
     sent = []
-    aw.check_alerts([alert(target_value=90.0)], now_ts=5000.0,
+    am.check_alerts([alert(target_value=90.0)], now_ts=5000.0,
                     fetch=stub_fetch(bars(close=101.0)),
                     notify=lambda t, m: sent.append(m), log=lambda _: None)
     assert "Bar: 2026-08-02" in sent[0]
@@ -233,7 +233,7 @@ def test_the_notification_reports_the_bar_it_fired_on_not_the_wall_clock():
 
 def test_the_fallback_source_is_recorded_on_the_alert():
     a = alert(target_value=90.0)
-    aw.check_alerts([a], now_ts=5000.0,
+    am.check_alerts([a], now_ts=5000.0,
                     fetch=stub_fetch(bars(close=101.0), "Yahoo Finance (Fallback) (Cached)"),
                     notify=lambda *_: None, log=lambda _: None)
     assert a["triggered_on"]["source"] == "Yahoo Finance (Fallback)"
@@ -253,7 +253,7 @@ def test_a_malformed_target_value_does_not_abort_the_pass():
     good = alert(symbol="GOOD", target_value=90.0)
     logged = []
 
-    changed = aw.check_alerts([bad, good], now_ts=5000.0,
+    changed = am.check_alerts([bad, good], now_ts=5000.0,
                               fetch=stub_fetch(bars(close=101.0)),
                               notify=lambda *_: None, log=logged.append)
 
@@ -271,7 +271,7 @@ def test_a_fetch_failure_on_one_symbol_does_not_abort_the_pass():
 
     dead, good = alert(symbol="DEAD", target_value=90.0), alert(symbol="GOOD", target_value=90.0)
     logged = []
-    aw.check_alerts([dead, good], now_ts=5000.0, fetch=flaky,
+    am.check_alerts([dead, good], now_ts=5000.0, fetch=flaky,
                     notify=lambda *_: None, log=logged.append)
 
     assert good["status"] == "TRIGGERED"
@@ -281,7 +281,7 @@ def test_a_fetch_failure_on_one_symbol_does_not_abort_the_pass():
 
 def test_an_alert_with_no_symbol_is_skipped_quietly():
     a = alert(symbol="")
-    assert aw.check_alerts([a], now_ts=5000.0, fetch=stub_fetch(bars()),
+    assert am.check_alerts([a], now_ts=5000.0, fetch=stub_fetch(bars()),
                            notify=lambda *_: None, log=lambda _: None) is False
 
 
@@ -306,7 +306,7 @@ def test_the_note_is_never_interpolated_into_the_powershell_script():
     real_run = subprocess.run
     subprocess.run = fake_run
     try:
-        aw.send_windows_notification("title", payload)
+        am.send_windows_notification("title", payload)
     finally:
         subprocess.run = real_run
 
@@ -323,24 +323,24 @@ def test_the_note_is_never_interpolated_into_the_powershell_script():
 def test_alerts_round_trip_through_disk(tmp_path):
     path = tmp_path / "alerts.json"
     original = [alert(symbol="MU"), alert(symbol="TSM", status="TRIGGERED")]
-    aw.save_alerts(original, path=str(path))
-    assert aw.load_alerts(path=str(path)) == original
+    am.save_alerts(original, path=str(path))
+    assert am.load_alerts(path=str(path)) == original
 
 
 def test_a_missing_or_empty_alerts_file_reads_as_no_alerts(tmp_path):
-    assert aw.load_alerts(path=str(tmp_path / "nope.json")) == []
+    assert am.load_alerts(path=str(tmp_path / "nope.json")) == []
     empty = tmp_path / "empty.json"
     empty.write_text("   ", encoding="utf-8")
-    assert aw.load_alerts(path=str(empty)) == []
+    assert am.load_alerts(path=str(empty)) == []
 
 
 def test_the_written_file_is_what_the_dashboard_reads_back(tmp_path):
     """The dashboard loads alerts.json straight into a DataFrame."""
     path = tmp_path / "alerts.json"
     a = alert(target_value=90.0)
-    aw.check_alerts([a], now_ts=5000.0, fetch=stub_fetch(bars(close=101.0)),
+    am.check_alerts([a], now_ts=5000.0, fetch=stub_fetch(bars(close=101.0)),
                     notify=lambda *_: None, log=lambda _: None)
-    aw.save_alerts([a], path=str(path))
+    am.save_alerts([a], path=str(path))
     reloaded = json.loads(path.read_text(encoding="utf-8"))
     pd.DataFrame(reloaded)          # must not raise
     assert reloaded[0]["status"] == "TRIGGERED"
@@ -348,41 +348,41 @@ def test_the_written_file_is_what_the_dashboard_reads_back(tmp_path):
 
 def test_the_alerts_path_is_not_pinned_to_a_hardcoded_drive():
     """It was C:/mcp-servers/..., which broke the moment the repo moved."""
-    assert "C:/mcp-servers" not in aw.ALERTS_FILE
-    assert aw.ALERTS_FILE.endswith("alerts.json")
+    assert "C:/mcp-servers" not in am.ALERTS_FILE
+    assert am.ALERTS_FILE.endswith("alerts.json")
 
 
 # =====================================================================
 # Persistence: three writers, one file
 # =====================================================================
-# alerts.json is written by this daemon, by the dashboard form, and by the
+# alerts.json is written by this manager, by the dashboard form, and by the
 # set_alert MCP tool. None of them used to lock or replace atomically.
 
 def test_the_alert_file_is_written_atomically(tmp_path):
     path = str(tmp_path / "alerts.json")
-    aw.save_alerts([{"symbol": "AAPL", "status": "ACTIVE"}], path=path)
+    am.save_alerts([{"symbol": "AAPL", "status": "ACTIVE"}], path=path)
     assert not os.path.exists(path + ".tmp"), "a temp file left behind is a half-written state"
-    assert aw.load_alerts(path)[0]["symbol"] == "AAPL"
+    assert am.load_alerts(path)[0]["symbol"] == "AAPL"
 
 
 def test_add_alert_appends_without_a_separate_read_and_write(tmp_path):
     path = str(tmp_path / "alerts.json")
-    aw.add_alert({"symbol": "AAPL", "status": "ACTIVE"}, path=path)
-    aw.add_alert({"symbol": "NVDA", "status": "ACTIVE"}, path=path)
-    assert [a["symbol"] for a in aw.load_alerts(path)] == ["AAPL", "NVDA"]
+    am.add_alert({"symbol": "AAPL", "status": "ACTIVE"}, path=path)
+    am.add_alert({"symbol": "NVDA", "status": "ACTIVE"}, path=path)
+    assert [a["symbol"] for a in am.load_alerts(path)] == ["AAPL", "NVDA"]
 
 
 def test_concurrent_appends_do_not_lose_an_alert(tmp_path):
     """
-    The dashboard used to read, append and write with no lock while the daemon
+    The dashboard used to read, append and write with no lock while the manager
     did the same. Whichever wrote second discarded the other's change.
     """
     import threading
     path = str(tmp_path / "alerts.json")
-    aw.save_alerts([], path=path)
+    am.save_alerts([], path=path)
 
     def add(i):
-        aw.add_alert({"symbol": f"S{i}", "status": "ACTIVE"}, path=path)
+        am.add_alert({"symbol": f"S{i}", "status": "ACTIVE"}, path=path)
 
     threads = [threading.Thread(target=add, args=(i,)) for i in range(25)]
     for t in threads:
@@ -390,88 +390,88 @@ def test_concurrent_appends_do_not_lose_an_alert(tmp_path):
     for t in threads:
         t.join()
 
-    assert len(aw.load_alerts(path)) == 25
+    assert len(am.load_alerts(path)) == 25
 
 
 # =====================================================================
-# Liveness: the dashboard claims the daemon is running
+# Liveness: the dashboard claims the manager is running
 # =====================================================================
 
-def test_a_daemon_that_never_started_is_not_reported_as_healthy():
+def test_a_manager_that_never_started_is_not_reported_as_healthy():
     """
-    The Alerts tab states "the alert daemon monitors ... in the background".
+    The Alerts tab states "the alert manager monitors ... in the background".
     Without this, that sentence was printed whether or not it was true.
     """
-    saved = dict(aw.WATCHER_STATE)
+    saved = dict(am.MANAGER_STATE)
     try:
-        aw.WATCHER_STATE.update(running=False, last_pass=None, passes=0)
-        healthy, msg = aw.watcher_status()
+        am.MANAGER_STATE.update(running=False, last_pass=None, passes=0)
+        healthy, msg = am.manager_status()
         assert healthy is False
         assert "NOT running" in msg
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)
 
 
-def test_a_started_daemon_with_no_completed_pass_is_not_yet_healthy():
-    saved = dict(aw.WATCHER_STATE)
+def test_a_started_manager_with_no_completed_pass_is_not_yet_healthy():
+    saved = dict(am.MANAGER_STATE)
     try:
-        aw.WATCHER_STATE.update(running=True, last_pass=None, passes=0)
-        healthy, msg = aw.watcher_status()
+        am.MANAGER_STATE.update(running=True, last_pass=None, passes=0)
+        healthy, msg = am.manager_status()
         assert healthy is False and "not completed a pass" in msg
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)
 
 
-def test_a_stuck_daemon_is_reported_stuck_not_running():
+def test_a_stuck_manager_is_reported_stuck_not_running():
     """A thread alive but wedged fires no alerts, same as a dead one."""
-    saved = dict(aw.WATCHER_STATE)
+    saved = dict(am.MANAGER_STATE)
     try:
         now = 10_000.0
-        aw.WATCHER_STATE.update(running=True, passes=9,
-                                last_pass=now - aw.CHECK_INTERVAL_SECONDS * 10)
-        healthy, msg = aw.watcher_status(now=now)
+        am.MANAGER_STATE.update(running=True, passes=9,
+                                last_pass=now - am.CHECK_INTERVAL_SECONDS * 10)
+        healthy, msg = am.manager_status(now=now)
         assert healthy is False and "stuck" in msg
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)
 
 
-def test_a_healthy_daemon_reports_its_cadence():
-    saved = dict(aw.WATCHER_STATE)
+def test_a_healthy_manager_reports_its_cadence():
+    saved = dict(am.MANAGER_STATE)
     try:
         now = 10_000.0
-        aw.WATCHER_STATE.update(running=True, passes=42, last_pass=now - 5,
+        am.MANAGER_STATE.update(running=True, passes=42, last_pass=now - 5,
                                 last_error=None)
-        healthy, msg = aw.watcher_status(now=now)
+        healthy, msg = am.manager_status(now=now)
         assert healthy is True and "42 checks" in msg
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)
 
 
 def test_a_loop_error_is_recorded_not_only_printed():
     """
     stderr from a headless Streamlit run goes to a log nobody reads, so a
-    daemon failing every pass looked exactly like one with nothing to do.
+    manager failing every pass looked exactly like one with nothing to do.
     """
-    saved = dict(aw.WATCHER_STATE)
+    saved = dict(am.MANAGER_STATE)
     try:
-        aw.WATCHER_STATE.update(running=True, passes=3, last_pass=10_000.0 - 5,
+        am.MANAGER_STATE.update(running=True, passes=3, last_pass=10_000.0 - 5,
                                 last_error="feed unreachable")
-        healthy, msg = aw.watcher_status(now=10_000.0)
+        healthy, msg = am.manager_status(now=10_000.0)
         assert healthy is True
         assert "feed unreachable" in msg
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)
 
 
-def test_the_watcher_starts_at_most_once_per_process():
+def test_the_manager_starts_at_most_once_per_process():
     """
     The dashboard guarded this with st.session_state, which is per BROWSER
-    session -- a second tab started a second watcher in the same process, and
+    session -- a second tab started a second manager in the same process, and
     both fired a notification for the same alert.
     """
-    saved = dict(aw.WATCHER_STATE)
+    saved = dict(am.MANAGER_STATE)
     try:
-        aw.WATCHER_STATE["running"] = True      # pretend one is already up
-        assert aw.start_watcher_once() is False
+        am.MANAGER_STATE["running"] = True      # pretend one is already up
+        assert am.start_manager_once() is False
     finally:
-        aw.WATCHER_STATE.update(saved)
+        am.MANAGER_STATE.update(saved)

@@ -58,7 +58,7 @@ def calculate_rsi(df: pd.DataFrame, period: int = 14, column: str = "close") -> 
     live in -- and 1.9 points is enough to flip a 30/70 threshold at the edge.
 
     The pinned core also returns NaN on a genuinely flat series where this
-    returned 50.0. NaN is the honest answer and the one alert_watcher already
+    returned 50.0. NaN is the honest answer and the one alert_manager already
     expects: it raises rather than reading an unmeasurable RSI as "condition
     not met". A halted or untraded symbol no longer reports a neutral 50 as
     though it were measured.

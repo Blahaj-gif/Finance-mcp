@@ -1,5 +1,5 @@
 """
-Background alert daemon.
+Background alert manager.
 
 The loop is deliberately thin: everything that decides *whether* an alert fires
 lives in `evaluate_condition` / `check_alerts`, which take their data and their
@@ -214,10 +214,10 @@ def check_alerts(alerts, now_ts, fetch=_default_fetch,
     return updated
 
 
-# alerts.json has three writers -- this daemon, the dashboard form, and the
+# alerts.json has three writers -- this manager, the dashboard form, and the
 # set_alert MCP tool -- and they used to read-modify-write it with no lock and
 # no atomic replace. Two consequences, both silent: an alert added in the
-# dashboard while the daemon was writing a triggered status could be lost, and
+# dashboard while the manager was writing a triggered status could be lost, and
 # a crash mid-write left truncated JSON that took the Alerts tab down with it.
 #
 # The lock only covers writers inside one process. The atomic replace is what
@@ -252,7 +252,7 @@ def add_alert(alert, path=None):
     Append one alert under the lock.
 
     The dashboard and the MCP tool both used to hand-roll read-append-write,
-    which loses a concurrent write from the daemon. Going through one function
+    which loses a concurrent write from the manager. Going through one function
     means the read and the write cannot be separated by another writer.
     """
     with _ALERTS_LOCK:
@@ -262,62 +262,62 @@ def add_alert(alert, path=None):
     return alerts
 
 
-# Set while the loop is running, so the dashboard can report whether the daemon
+# Set while the loop is running, so the dashboard can report whether the manager
 # it claims to be running is in fact running. A thread that died on its first
 # iteration is indistinguishable from a healthy one without this.
-WATCHER_STATE = {"running": False, "last_pass": None, "passes": 0,
+MANAGER_STATE = {"running": False, "last_pass": None, "passes": 0,
                  "last_error": None, "started": None}
 
 
-def watcher_status(now=None):
+def manager_status(now=None):
     """
     Liveness, judged by whether a pass completed recently rather than by whether
     a thread object exists. Returns (healthy: bool, message: str).
     """
     now = now or time.time()
-    if not WATCHER_STATE["running"]:
-        return False, "Alert daemon is NOT running — no alert will fire."
+    if not MANAGER_STATE["running"]:
+        return False, "Alert manager is NOT running — no alert will fire."
 
-    last = WATCHER_STATE["last_pass"]
+    last = MANAGER_STATE["last_pass"]
     if last is None:
-        return False, "Alert daemon started but has not completed a pass yet."
+        return False, "Alert manager started but has not completed a pass yet."
 
     age = now - last
     # Two missed polls is the point at which "slow" becomes "stuck".
     if age > CHECK_INTERVAL_SECONDS * 3:
-        return False, (f"Alert daemon last completed a check {age / 60:.1f} minutes ago "
+        return False, (f"Alert manager last completed a check {age / 60:.1f} minutes ago "
                        f"(polls every {CHECK_INTERVAL_SECONDS}s) — it may be stuck.")
 
-    msg = (f"Alert daemon running — {WATCHER_STATE['passes']} checks, last "
+    msg = (f"Alert manager running — {MANAGER_STATE['passes']} checks, last "
            f"{age:.0f}s ago, polling every {CHECK_INTERVAL_SECONDS}s.")
-    if WATCHER_STATE["last_error"]:
-        return True, msg + f" Last error: {WATCHER_STATE['last_error']}"
+    if MANAGER_STATE["last_error"]:
+        return True, msg + f" Last error: {MANAGER_STATE['last_error']}"
     return True, msg
 
 
-def start_watcher_once():
+def start_manager_once():
     """
-    Start the daemon thread, at most once per process.
+    Start the manager thread, at most once per process.
 
     The dashboard guarded this with st.session_state, which is per browser
-    session -- so every additional tab started another watcher in the same
+    session -- so every additional tab started another manager in the same
     process, each polling the feed and each firing its own notification for the
     same alert. Returns True if this call started it.
     """
     with _ALERTS_LOCK:
-        if WATCHER_STATE["running"]:
+        if MANAGER_STATE["running"]:
             return False
-        thread = threading.Thread(target=run_watcher_loop, daemon=True,
-                                  name="finance-mcp-alert-watcher")
+        thread = threading.Thread(target=run_manager_loop, daemon=True,
+                                  name="finance-mcp-alert-manager")
         thread.start()
-        WATCHER_STATE["started"] = time.time()
+        MANAGER_STATE["started"] = time.time()
         return True
 
 
-def run_watcher_loop():
-    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting Finance MCP Alert Watcher Daemon...")
+def run_manager_loop():
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting Finance MCP Alert Manager...")
     print(f"Polling Interval: {CHECK_INTERVAL_SECONDS}s | Alert Cooldown: {ALERT_COOLDOWN_SECONDS // 60}m")
-    WATCHER_STATE["running"] = True
+    MANAGER_STATE["running"] = True
 
     try:
         while True:
@@ -325,20 +325,20 @@ def run_watcher_loop():
                 alerts = load_alerts()
                 if alerts and check_alerts(alerts, time.time()):
                     save_alerts(alerts)
-                WATCHER_STATE["last_error"] = None
+                MANAGER_STATE["last_error"] = None
             except Exception as e:
                 # Recorded as well as printed: stderr from a headless Streamlit
-                # run goes to a log nobody reads, so an alert daemon failing
+                # run goes to a log nobody reads, so an alert manager failing
                 # every pass looked exactly like one with nothing to do.
-                WATCHER_STATE["last_error"] = str(e)[:200]
-                print(f"Error in watcher loop: {str(e)}", file=sys.stderr)
+                MANAGER_STATE["last_error"] = str(e)[:200]
+                print(f"Error in manager loop: {str(e)}", file=sys.stderr)
 
-            WATCHER_STATE["last_pass"] = time.time()
-            WATCHER_STATE["passes"] += 1
+            MANAGER_STATE["last_pass"] = time.time()
+            MANAGER_STATE["passes"] += 1
             time.sleep(CHECK_INTERVAL_SECONDS)
     finally:
-        WATCHER_STATE["running"] = False
+        MANAGER_STATE["running"] = False
 
 
 if __name__ == "__main__":
-    run_watcher_loop()
+    run_manager_loop()

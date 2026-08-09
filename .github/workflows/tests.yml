@@ -40,8 +40,25 @@ jobs:
             echo "::error::Credential file is tracked by git"
             exit 1
           fi
-          if git grep -nIE '[a-f0-9]{32}' -- '*.py' | grep -viE 'hexdigest|md5|sha|test|fixture'; then
-            echo "::error::Possible hardcoded 32-char secret in source"
+
+          # This check used to exclude anything matching "test", to keep the
+          # false-positive rate down. The live Webull app key then sat in
+          # tests/test_data_integrity.py -- the fixture for the very test that
+          # proves credentials are scrubbed from logs -- through 28 commits,
+          # invisible to this guard. Test files are now scanned like any other,
+          # and a deliberate fixture has to look deliberate: repeated-word
+          # patterns (deadbeef..., cafebabe...) and obvious sequences are the
+          # only 32-hex literals allowed.
+          if git grep -nIE '[a-f0-9]{32}' -- '*.py' '*.md' '*.ps1' \
+             | grep -viE 'hexdigest|md5|sha[0-9]' \
+             | grep -viE 'deadbeef|cafebabe|0123456789abcdef|[a-f0-9]?(00000000|ffffffff)'; then
+            echo "::error::Possible hardcoded 32-char secret. If it is a fixture, make it obviously synthetic."
+            exit 1
+          fi
+
+          # The same mistake with a bearer token or a base64 signature.
+          if git grep -nIE '(x-access-token|x-app-key|app_secret)"?\s*[:=]\s*"[A-Za-z0-9+/=]{16,}' -- '*.py' '*.md'; then
+            echo "::error::A credential header appears with a literal value"
             exit 1
           fi
           echo "No credential files or literals tracked."
