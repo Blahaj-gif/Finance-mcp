@@ -516,6 +516,15 @@ input, [data-baseweb="select"] * {
   background: transparent; color: var(--fm-down);
   font-weight: 600; border-bottom: 1px dotted currentColor;
 }
+/* Defensive: a <mark> anywhere in our own markup must never fall through to
+   the browser default, which is pure yellow on black text. That is what the
+   filing table looked like before the What column stopped being highlighted --
+   the loudest thing on a dark terminal page, marking a date that every row had.
+   Highlighting belongs where text is long enough to scan, not in a column where
+   every row says the same shape of thing. */
+.fm-filings mark, .fm-card mark {
+  background: transparent; color: var(--fm-accent); font-weight: 650;
+}
 .fm-filings a { color: var(--fm-accent); text-decoration: none; }
 .fm-filings a:hover, .fm-filings a:focus { text-decoration: underline; }
 .fm-filings a:focus-visible { outline: 2px solid var(--fm-accent); outline-offset: 2px; }

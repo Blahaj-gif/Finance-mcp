@@ -175,3 +175,160 @@ def last_reported(symbol: str, limit: int = 4) -> list:
                            "accepted": (best.get("acceptance") or "").replace("T", " ")[:19],
                            "form": best.get("form", "8-K")}
     return rows
+
+
+# =====================================================================
+# QUARTERLY FUNDAMENTALS, FROM THE FILING
+# =====================================================================
+# EPS is a consensus-vs-actual comparison. Revenue, cash flow and capex are not:
+# no free source publishes consensus for them, so these tables show the *filed*
+# figure and its change, never a "surprise". That is a different question from
+# the EPS table and is labelled as one rather than sharing its columns.
+#
+# The numbers come from SEC XBRL -- the company's own tagged filing -- not from
+# a third-party aggregator, so they are authoritative and stamped with the form
+# that carried them.
+
+METRICS = {
+    "EPS":     {"label": "Diluted EPS", "unit": "per share", "kind": "eps"},
+    "Revenue": {"label": "Revenue", "unit": "USD", "kind": "xbrl",
+                "tags": ["RevenueFromContractWithCustomerExcludingAssessedTax",
+                         "Revenues", "SalesRevenueNet"]},
+    "FCF":     {"label": "Free cash flow", "unit": "USD", "kind": "derived",
+                "note": "Operating cash flow minus capital expenditure — derived "
+                        "here, not a tagged figure in the filing."},
+    "Capex":   {"label": "Capital expenditure", "unit": "USD", "kind": "xbrl",
+                "tags": ["PaymentsToAcquirePropertyPlantAndEquipment"]},
+    "Opex":    {"label": "Operating expenses", "unit": "USD", "kind": "xbrl",
+                "tags": ["OperatingExpenses"]},
+}
+
+_OCF_TAGS = ["NetCashProvidedByUsedInOperatingActivities",
+             "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"]
+_CAPEX_TAGS = ["PaymentsToAcquirePropertyPlantAndEquipment"]
+
+# A quarterly duration. XBRL mixes quarterly, half-year, nine-month and annual
+# facts under the same tag; taking them all would put a full year next to a
+# quarter in the same column and call both "Q".
+_QUARTER_MIN_DAYS, _QUARTER_MAX_DAYS = 80, 100
+
+
+def _duration_facts(cik: str, tags, unit_hint="USD") -> list:
+    """Every duration fact for the first tag that yields any, newest filing wins."""
+    for tag in tags:
+        try:
+            data = ec.xbrl_concept(cik, "us-gaap", tag)
+        except Exception:
+            continue
+        best = {}
+        for unit, points in ((data or {}).get("units") or {}).items():
+            if unit_hint not in unit:
+                continue
+            for p in points:
+                start, end, val = p.get("start"), p.get("end"), p.get("val")
+                if not (start and end) or val is None:
+                    continue
+                try:
+                    d0 = datetime.date.fromisoformat(start)
+                    d1 = datetime.date.fromisoformat(end)
+                except ValueError:
+                    continue
+                key = (start, end)
+                filed = p.get("filed", "")
+                # A figure can be restated; the most recently filed version of a
+                # period is the one the company stands behind now.
+                if key in best and filed <= best[key]["filed"]:
+                    continue
+                best[key] = {"start": d0, "end": d1, "days": (d1 - d0).days,
+                             "value": float(val), "form": p.get("form", ""),
+                             "filed": filed, "fp": p.get("fp", "")}
+        if best:
+            return sorted(best.values(), key=lambda f: f["end"])
+    return []
+
+
+def _quarterly_points(cik: str, tags, unit_hint="USD") -> dict:
+    """
+    {period_end: fact} for single quarters.
+
+    Cash-flow tags are filed year-to-date, not per quarter: Q1 is a 3-month
+    fact, Q2 a 6-month, Q3 a 9-month, Q4 the full year. Filtering to
+    quarter-length durations therefore returned exactly one row per year -- Q1 --
+    with the "previous quarter" a year back, so a QoQ change was really a YoY
+    one wearing the wrong label.
+
+    So: use a genuine 3-month fact where the company files one, and otherwise
+    difference consecutive year-to-date facts that share a fiscal-year start.
+    That subtraction is only valid within one fiscal year, which is why the
+    grouping is by start date rather than by proximity.
+    """
+    facts = _duration_facts(cik, tags, unit_hint)
+    out = {}
+
+    for f in facts:
+        if _QUARTER_MIN_DAYS <= f["days"] <= _QUARTER_MAX_DAYS:
+            out[f["end"].isoformat()] = f
+
+    by_start = {}
+    for f in facts:
+        by_start.setdefault(f["start"], []).append(f)
+    for start, group in by_start.items():
+        group.sort(key=lambda f: f["end"])
+        for prev, cur in zip(group, group[1:]):
+            end = cur["end"].isoformat()
+            if end in out:
+                continue          # a directly filed quarter beats a derived one
+            span = (cur["end"] - prev["end"]).days
+            if not (_QUARTER_MIN_DAYS <= span <= _QUARTER_MAX_DAYS):
+                continue
+            out[end] = {"start": prev["end"], "end": cur["end"], "days": span,
+                        "value": cur["value"] - prev["value"],
+                        "form": cur["form"], "filed": cur["filed"],
+                        "fp": cur["fp"], "derived": True}
+    return out
+
+
+def quarterly_metric(symbol: str, metric: str, limit: int = 4) -> dict:
+    """
+    The last `limit` quarters of one metric, newest first.
+
+    Returns {"metric", "label", "unit", "rows": [...], "source", "note"}.
+    Each row carries value, the change on the prior quarter and on the year-ago
+    quarter, and the form the figure was filed on.
+    """
+    spec = METRICS.get(metric)
+    if spec is None:
+        raise ValueError(f"Unknown metric {metric!r}. Available: {', '.join(METRICS)}")
+
+    info = ec.ticker_to_cik(symbol)
+    cik = info["cik"]
+
+    if spec["kind"] == "derived":                     # FCF
+        ocf = _quarterly_points(cik, _OCF_TAGS)
+        capex = _quarterly_points(cik, _CAPEX_TAGS)
+        points = {end: {"value": v["value"] - capex[end]["value"],
+                        "form": v["form"], "filed": v["filed"], "fp": v["fp"]}
+                  for end, v in ocf.items() if end in capex}
+    else:
+        points = _quarterly_points(cik, spec["tags"])
+
+    ends = sorted(points, reverse=True)
+    rows = []
+    for end in ends[:limit]:
+        p = points[end]
+        prior = next((e for e in ends if e < end), None)
+        year_ago = next((e for e in ends
+                         if abs((datetime.date.fromisoformat(end)
+                                 - datetime.date.fromisoformat(e)).days - 365) <= 20), None)
+        def pct(other):
+            if other is None or not points[other]["value"]:
+                return None
+            base = points[other]["value"]
+            return (p["value"] - base) / abs(base) * 100
+        rows.append({"period_end": end, "value": p["value"], "form": p["form"],
+                     "filed": p["filed"], "fiscal_period": p["fp"],
+                     "qoq_pct": pct(prior), "yoy_pct": pct(year_ago)})
+
+    return {"metric": metric, "label": spec["label"], "unit": spec["unit"],
+            "rows": rows, "source": "SEC XBRL (as filed)",
+            "note": spec.get("note", "")}

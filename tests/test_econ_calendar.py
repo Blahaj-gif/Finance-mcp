@@ -1000,3 +1000,92 @@ def test_dates_outside_the_horizon_are_excluded(monkeypatch):
                         lambda s: _FakeTicker({"Earnings Date": [datetime.date(2027, 6, 1)]}))
     rows, _ = em.upcoming(["AAPL"], days_ahead=30, today=datetime.date(2026, 10, 1))
     assert rows == []
+
+
+# =====================================================================
+# Quarterly fundamentals from XBRL
+# =====================================================================
+
+def _xbrl(points):
+    return {"units": {"USD": points}}
+
+
+def _pt(start, end, val, filed="2026-01-01", form="10-Q"):
+    return {"start": start, "end": end, "val": val, "filed": filed, "form": form, "fp": "Q1"}
+
+
+def test_year_to_date_facts_are_differenced_into_quarters(monkeypatch):
+    """
+    Cash-flow tags are filed cumulatively: Q1 is a 3-month fact, Q2 a 6-month,
+    Q3 a 9-month. Filtering to quarter-length durations returned exactly one row
+    per year -- Q1 -- with the "previous quarter" a year back, so a QoQ change
+    was really a YoY one wearing the wrong label.
+    """
+    from dashboard import earnings as em
+    ytd = _xbrl([
+        _pt("2026-01-01", "2026-03-31", 100.0),      # Q1        -> 100
+        _pt("2026-01-01", "2026-06-30", 250.0),      # H1        -> Q2 = 150
+        _pt("2026-01-01", "2026-09-30", 420.0),      # 9M        -> Q3 = 170
+    ])
+    monkeypatch.setattr(em.ec, "ticker_to_cik", lambda s: {"cik": "0000000001"})
+    monkeypatch.setattr(em.ec, "xbrl_concept", lambda cik, tax, tag: ytd)
+
+    got = em.quarterly_metric("X", "Capex", limit=4)
+    by_end = {r["period_end"]: r["value"] for r in got["rows"]}
+    assert by_end["2026-03-31"] == pytest.approx(100.0)
+    assert by_end["2026-06-30"] == pytest.approx(150.0)
+    assert by_end["2026-09-30"] == pytest.approx(170.0)
+
+
+def test_a_directly_filed_quarter_beats_a_derived_one(monkeypatch):
+    from dashboard import earnings as em
+    data = _xbrl([
+        _pt("2026-01-01", "2026-03-31", 100.0),
+        _pt("2026-01-01", "2026-06-30", 250.0),
+        _pt("2026-04-01", "2026-06-30", 999.0),      # the company's own Q2 fact
+    ])
+    monkeypatch.setattr(em.ec, "ticker_to_cik", lambda s: {"cik": "1"})
+    monkeypatch.setattr(em.ec, "xbrl_concept", lambda cik, tax, tag: data)
+    rows = {r["period_end"]: r["value"] for r in em.quarterly_metric("X", "Capex")["rows"]}
+    assert rows["2026-06-30"] == pytest.approx(999.0), "a filed quarter must win over 250-100"
+
+
+def test_ytd_facts_are_never_differenced_across_a_fiscal_year(monkeypatch):
+    """
+    Subtracting last year's full-year total from this year's Q1 is arithmetic
+    on unrelated periods. Grouping by fiscal-year start is what prevents it.
+    """
+    from dashboard import earnings as em
+    data = _xbrl([
+        _pt("2025-01-01", "2025-12-31", 1000.0),     # prior FY
+        _pt("2026-01-01", "2026-03-31", 100.0),      # this FY Q1
+    ])
+    monkeypatch.setattr(em.ec, "ticker_to_cik", lambda s: {"cik": "1"})
+    monkeypatch.setattr(em.ec, "xbrl_concept", lambda cik, tax, tag: data)
+    rows = {r["period_end"]: r["value"] for r in em.quarterly_metric("X", "Capex")["rows"]}
+    assert rows.get("2026-03-31") == pytest.approx(100.0)
+    assert -900.0 not in rows.values()
+
+
+def test_a_restated_figure_uses_the_most_recent_filing(monkeypatch):
+    from dashboard import earnings as em
+    data = _xbrl([
+        _pt("2026-01-01", "2026-03-31", 100.0, filed="2026-04-30"),
+        _pt("2026-01-01", "2026-03-31", 111.0, filed="2026-08-01"),   # restatement
+    ])
+    monkeypatch.setattr(em.ec, "ticker_to_cik", lambda s: {"cik": "1"})
+    monkeypatch.setattr(em.ec, "xbrl_concept", lambda cik, tax, tag: data)
+    rows = em.quarterly_metric("X", "Capex")["rows"]
+    assert rows[0]["value"] == pytest.approx(111.0)
+
+
+def test_free_cash_flow_is_labelled_as_derived():
+    """It is not a tagged figure in the filing; saying so is the point."""
+    from dashboard import earnings as em
+    assert "derived" in em.METRICS["FCF"]["note"].lower()
+
+
+def test_an_unknown_metric_is_refused():
+    from dashboard import earnings as em
+    with pytest.raises(ValueError, match="Unknown metric"):
+        em.quarterly_metric("AAPL", "Ebitda")

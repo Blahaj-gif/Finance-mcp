@@ -39,6 +39,25 @@ def render_html(markup: str, target=None):
         sink.markdown(cleaned, unsafe_allow_html=True)
 
 
+def _money(value) -> str:
+    """
+    A large USD figure at a glance. $109,420,000,000 is exact and unreadable;
+    $109.42B is the form these numbers are actually discussed in. Scale is
+    chosen per value so a $2.4B capex line and a $143.8B revenue line are both
+    legible without a shared axis to normalise them.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+    for cut, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if a >= cut:
+            return f"{sign}${a / cut:,.2f}{suffix}"
+    return f"{sign}${a:,.2f}"
+
+
 def as_html_text(value) -> str:
     """Escape free text for interpolation into markup, preserving line breaks."""
     return _html.escape(str(value)).replace("\n", "<br>")
@@ -1499,28 +1518,64 @@ with tab_events:
             st.warning("Earnings dates unavailable for: "
                        + "; ".join(f"`{p}`" for p in er_problems[:4]))
 
-        # Reported quarters, matched to the filing that announced them.
+        # Reported quarters. EPS is the only one with a consensus to compare
+        # against; the rest are filed figures, so they get a change column
+        # rather than a surprise column. Different question, different table.
         primary = watchlist[0]
-        history = []
-        try:
-            history = earnings.last_reported(primary, limit=4)
-        except Exception as e:
-            st.caption(f"Reported history unavailable: {str(e)[:100]}")
-        if history:
-            st.markdown(f"**{primary} — reported quarters**")
-            st.dataframe(pd.DataFrame([{
-                "Quarter end": h["date"].isoformat(),
-                "Estimate": "—" if pd.isna(h["estimate"]) else f"{h['estimate']:,.2f}",
-                "Reported": "—" if pd.isna(h["reported"]) else f"{h['reported']:,.2f}",
-                "Surprise": "—" if h["surprise_pct"] is None else f"{h['surprise_pct']:+.2f}%",
-                "8-K accepted (UTC)": (h["filing"] or {}).get("accepted", "not matched"),
-                "Filing": (h["filing"] or {}).get("url", ""),
-            } for h in history]), use_container_width=True, hide_index=True,
-                column_config={"Filing": st.column_config.LinkColumn("Filing",
-                                                                    display_text="open")})
-            st.caption("Surprise is computed from the estimate and the reported figure. "
-                       "The 8-K timestamp is the SEC's own, exact to the second — it is "
-                       "what proves the quarter was actually released.")
+        st.markdown(f"**{primary} — reported quarters**")
+        metric = st.radio("Metric", options=list(earnings.METRICS), horizontal=True,
+                          index=0, key="events_metric", label_visibility="collapsed")
+
+        if metric == "EPS":
+            history = []
+            try:
+                history = earnings.last_reported(primary, limit=4)
+            except Exception as e:
+                st.caption(f"Reported history unavailable: {str(e)[:100]}")
+            if history:
+                st.dataframe(pd.DataFrame([{
+                    "Quarter end": h["date"].isoformat(),
+                    # Money reads as money. "1.89" in a column headed "Estimate"
+                    # could be a dollar figure, a share count or a ratio.
+                    "EPS estimate": "—" if pd.isna(h["estimate"]) else f"${h['estimate']:,.2f}",
+                    "EPS reported": "—" if pd.isna(h["reported"]) else f"${h['reported']:,.2f}",
+                    "Surprise": "—" if h["surprise_pct"] is None else f"{h['surprise_pct']:+.2f}%",
+                    "8-K accepted (UTC)": (h["filing"] or {}).get("accepted", "not matched"),
+                    "Filing": (h["filing"] or {}).get("url", ""),
+                } for h in history]), use_container_width=True, hide_index=True,
+                    column_config={"Filing": st.column_config.LinkColumn(
+                        "Filing", display_text="open")})
+                st.caption(
+                    "**Diluted earnings per share, in USD** — not revenue. Estimate is the "
+                    "analyst consensus Yahoo publishes; reported is the company's figure; "
+                    "surprise is computed from the two. The 8-K timestamp is the SEC's own, "
+                    "exact to the second — it is what proves the quarter was released.")
+            elif not history:
+                st.info(f"No reported EPS history for {primary}.")
+        else:
+            try:
+                block = earnings.quarterly_metric(primary, metric, limit=4)
+            except Exception as e:
+                block = None
+                st.warning(f"{metric} unavailable for {primary}: {str(e)[:120]}")
+            if block and block["rows"]:
+                st.dataframe(pd.DataFrame([{
+                    "Quarter end": r["period_end"],
+                    block["label"]: _money(r["value"]),
+                    "QoQ": "—" if r["qoq_pct"] is None else f"{r['qoq_pct']:+.1f}%",
+                    "YoY": "—" if r["yoy_pct"] is None else f"{r['yoy_pct']:+.1f}%",
+                    "Filed on": r["form"],
+                } for r in block["rows"]]), use_container_width=True, hide_index=True)
+                caption = (f"**{block['label']}, in USD** — the filed figure from "
+                           f"{block['source']}, not an estimate. No free source publishes "
+                           "consensus for this, so there is no surprise column: the "
+                           "comparison is against the company's own prior quarter and the "
+                           "year-ago quarter.")
+                if block.get("note"):
+                    caption += f" {block['note']}"
+                st.caption(caption)
+            elif block:
+                st.info(f"{primary} does not tag {block['label']} quarterly in its filings.")
 
     # ---------------------------------------------------------------
     # Filings, with a hover preview
@@ -1558,7 +1613,11 @@ with tab_events:
                     f"<td>{as_html_text(f['_symbol'])}</td>"
                     f"<td>{as_html_text(f.get('filing_date', ''))}</td>"
                     f"<td>{as_html_text(f.get('form', ''))}</td>"
-                    f"<td class='fm-what'>{highlight.highlight(summary, limit=90)}</td>"
+                    # Plain text here on purpose. Every row's summary ends in
+                    # "Period <date>", so highlighting marked the same thing on
+                    # every line -- which is highlighting nothing, loudly. The
+                    # hover preview is where the text is long enough to scan.
+                    f"<td class='fm-what'>{as_html_text(summary)}</td>"
                     f"<td>{as_html_text((f.get('acceptance') or '')[:19].replace('T', ' '))}</td>"
                     f"<td><a href='{url}' target='_blank' rel='noopener noreferrer'>"
                     "source &#8599;</a></td>"
