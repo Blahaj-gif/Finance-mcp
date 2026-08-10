@@ -1,5 +1,9 @@
 # Finance MCP
 
+[![tests](https://github.com/Blahaj-gif/finance-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Blahaj-gif/finance-mcp/actions/workflows/tests.yml)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+
 An MCP server that gives an AI assistant read access to your real brokerage
 account and the market around it — and gives you, not the assistant, the only
 button that sends an order.
@@ -32,7 +36,21 @@ holidays are collapsed, so there are no blank stretches.*
 
 ---
 
-**[Installation guide →](INSTALL.md)**
+## What you need
+
+| | |
+|---|---|
+| **OS** | Windows. The alert manager uses native Windows notifications and the installer writes Windows paths. The server and dashboard are plain Python and run anywhere — only the installer is Windows-specific. |
+| **Python** | 3.10 or 3.12, both covered by CI. `uv` is installed for you. |
+| **Broker** | A Webull account with OpenAPI credentials. Without them prices fall back to Yahoo and the account and order tools do not work; everything else still does. |
+| **Keys** | `SEC_USER_AGENT` (a contact address, required by the SEC for filings) and optionally a free BLS key. |
+
+**[Installation guide →](INSTALL.md)** — fifteen minutes, most of it waiting for
+free API keys.
+
+> **This places real orders against a real account.** The consensus score is a
+> fixed-weight heuristic that underperformed buy-and-hold in backtest and is
+> labelled as such throughout. Not financial advice; see [LICENSE](LICENSE).
 
 ---
 

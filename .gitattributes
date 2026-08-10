@@ -1,0 +1,22 @@
+# Normalise line endings. Without this, every commit made on Windows warned
+# "LF will be replaced by CRLF", and a contributor on Linux would see a
+# whole-file diff for a one-line change -- which makes review impossible and
+# blame useless.
+* text=auto eol=lf
+
+# Windows-only launchers. cmd.exe needs CRLF; a .bat with LF endings can fail
+# in ways that look like a corrupt file rather than a line-ending problem.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary: never touched, never diffed as text.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.parquet binary
+
+# Recorded API payloads and captured pages. Diffing them line by line in a
+# review says nothing useful; they are replaced wholesale or not at all.
+tests/fixtures/** -diff

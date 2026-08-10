@@ -228,10 +228,34 @@ if (-not $secSet) {
     Write-Host "   to send requests without one rather than risk an IP ban." -ForegroundColor Gray
     Write-Host ""
 }
-Write-Host " 1. Restart Claude Desktop to load $toolCount MCP tools." -ForegroundColor White
-Write-Host " 2. Double-click 'Finance MCP Dashboard' on the Desktop for charts," -ForegroundColor White
-Write-Host "    the backtester, the portfolio view and the order approval desk." -ForegroundColor White
+$ready = $keySet -and $secSet
+if ($ready) {
+    Write-Host " 1. Restart your MCP client to load $toolCount tools." -ForegroundColor White
+    Write-Host " 2. Open the dashboard and work through the one-time briefing." -ForegroundColor White
+} else {
+    Write-Host " 1. Fill in the values above in:" -ForegroundColor White
+    Write-Host "      $envFile" -ForegroundColor White
+    Write-Host " 2. Restart your MCP client to load $toolCount tools." -ForegroundColor White
+    Write-Host " 3. Open the dashboard and work through the one-time briefing." -ForegroundColor White
+}
 Write-Host ""
-Write-Host " Claude drafts orders. Nothing is ever submitted without you" -ForegroundColor White
+Write-Host " The assistant drafts orders. Nothing is ever submitted without you" -ForegroundColor White
 Write-Host " approving it in the dashboard's Execution tab." -ForegroundColor White
 Write-Host "===================================================================" -ForegroundColor Green
+Write-Host ""
+
+# Offer to open the dashboard -- but only once it can actually work. Launching
+# it before the keys are in would open a window full of errors, which reads as
+# "the install failed" rather than "you have one step left". Offered, never
+# automatic: an installer that opens windows on its own is a nuisance when you
+# are installing on someone else's behalf or re-running it.
+if ($ready) {
+    $answer = Read-Host " Open the dashboard now? [y/N]"
+    if ($answer -match '^(y|yes)$') {
+        Start-Process -FilePath "$desktopDir\Finance MCP Dashboard.lnk"
+        Write-Host " -> Starting. It takes a few seconds to build the first chart." -ForegroundColor Green
+    }
+} else {
+    Write-Host " Not opening the dashboard yet -- it needs the values above first." -ForegroundColor DarkGray
+    Write-Host " Re-run this installer once .env is filled in and it will offer to." -ForegroundColor DarkGray
+}
