@@ -1,0 +1,35 @@
+MIT License
+
+Copyright (c) 2026 Blahaj-gif
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+NOT FINANCIAL ADVICE. This software can place real orders against a real
+brokerage account. Its consensus score is a hand-tuned heuristic that
+underperformed buy-and-hold in backtest, and is labelled as such throughout.
+Run with WEBULL_ENVIRONMENT=paper until you have rehearsed the approval flow.
+You are responsible for every order you approve.
+
+THIRD-PARTY DATA. Series sourced from FRED are redistributed by the Federal
+Reserve Bank of St. Louis under the terms of their original publishers. Two
+carry third-party copyright and are not licensed for redistribution:
+`hy_spread` (ICE BofA index data) and `vix` (CBOE). They are fetched live for
+personal use and no values are bundled here.
