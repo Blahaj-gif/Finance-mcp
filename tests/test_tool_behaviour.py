@@ -800,9 +800,17 @@ def test_a_draft_that_the_broker_would_refuse_never_reaches_the_queue(monkeypatc
     BUY 1 ZETA @ $0.01 previewed cleanly at $0.01 cost and was then refused at
     placement: a sub-$0.10 limit needs more than 1000 shares. Without a local
     check, that arrives as an opaque 417 *after* a human has approved it.
+
+    Deliberately no credentials are stubbed. This check needs no network, so it
+    must fire on a machine that has none -- CI caught this test passing locally
+    only because a developer .env happened to be present, which meant it was
+    really asserting on the account-risk path rather than on the rule.
     """
     monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
     monkeypatch.setattr(srv.webull_client, "get_provenance", lambda s, i="D": {})
+    monkeypatch.setattr(srv.webull_client, "get_api_client",
+                        lambda: (_ for _ in ()).throw(
+                            ValueError("Webull App Key and App Secret must be set in .env")))
     out = srv.draft_order("ZETA", "BUY", 1, "LMT", 0.01)
 
     assert "SAFETY BLOCK" in out
@@ -831,3 +839,19 @@ def test_the_rules_check_is_advisory_not_authoritative():
     order = srv.broker.build_order("ZETA", "BUY", 5, "LMT", 26.0)
     order["some_future_field"] = "unknown to us"
     assert srv.broker.order_rule_violations(order) == []
+
+
+def test_the_offline_rules_run_before_anything_that_needs_the_network():
+    """
+    Order matters. The account-risk checks need credentials and a round trip;
+    constructing the order and testing the broker's published rules needs
+    neither. With the networked checks first, a malformed order on a machine
+    with no credentials was refused for "App Key ... must be set" rather than
+    for the thing actually wrong with it -- which is how a developer .env made
+    the test above pass locally while CI failed.
+    """
+    body = dict(_tool_bodies())["draft_order"]
+    rules_at = body.index("order_rule_violations")
+    network_at = body.index("PRE-TRADE RISK CHECKS")
+    assert rules_at < network_at, (
+        "the offline construction and rule checks must precede the account checks")

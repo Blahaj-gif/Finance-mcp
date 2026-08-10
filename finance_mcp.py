@@ -1275,6 +1275,29 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         fingerprint = f"{symbol.upper()}_{action.upper()}_{quantity}_{limit_price}_{datetime.datetime.now().timestamp()}"
         draft_id = "DRFT_" + hashlib.md5(fingerprint.encode()).hexdigest()[:8]
         
+        # Cheap, offline checks first. Constructing the order and testing it
+        # against the broker's published rules needs no network and no
+        # credentials, so a malformed order should never cost an account round
+        # trip to reject -- and on a machine with no credentials configured, it
+        # should still be refused for the right reason rather than for a
+        # missing key.
+        try:
+            candidate = broker.build_order(
+                symbol=symbol, action=action, quantity=quantity,
+                order_type=order_type, limit_price=limit_price,
+                client_order_id=draft_id,
+            )
+        except ValueError as ve:
+            return f"SAFETY BLOCK: This order could not be constructed: {ve}"
+
+        # Rules the broker enforces at placement but not at preview. Without
+        # this, a draft can pass every local check, price cleanly, be approved
+        # by a human, and only then come back as an opaque 417.
+        violations = broker.order_rule_violations(candidate)
+        if violations:
+            return ("SAFETY BLOCK: Webull would refuse this order at submission — "
+                    + " ".join(violations))
+
         # --- PRE-TRADE RISK CHECKS ---
         try:
             from webull.core.client import ApiClient
@@ -1331,22 +1354,6 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         
         # Reject anything that could not be sent anyway, before it reaches the
         # human approval queue. A draft that cannot become an order is noise.
-        try:
-            candidate = broker.build_order(
-                symbol=symbol, action=action, quantity=quantity,
-                order_type=order_type, limit_price=limit_price,
-                client_order_id=draft_id,
-            )
-        except ValueError as ve:
-            return f"SAFETY BLOCK: This order could not be constructed: {ve}"
-
-        # Rules the broker enforces at placement but not at preview. Without
-        # this, a draft can pass every local check, price cleanly, be approved
-        # by a human, and only then come back as an opaque 417.
-        violations = broker.order_rule_violations(candidate)
-        if violations:
-            return ("SAFETY BLOCK: Webull would refuse this order at submission — "
-                    + " ".join(violations))
 
         new_draft = {
             "draft_id": draft_id,
