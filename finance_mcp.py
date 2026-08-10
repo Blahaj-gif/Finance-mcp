@@ -1557,17 +1557,42 @@ def get_news(symbol: str, count: int = 10) -> str:
 @mcp.tool()
 def get_insider_trades(symbol: str) -> str:
     """
-    Fetches recent insider transactions (executive buying/selling) for the ticker.
-    Useful for gauging the 'smart money' sentiment of the company's leadership.
+    Recent insider transactions as Yahoo reports them — a quick summary view.
+
+    Prefer `get_insider_activity` for anything you will act on: it parses the Form 4
+    XML from SEC EDGAR directly, so it can tell an open-market purchase (code P) from
+    a grant or from shares withheld to pay tax on a vest, and it reports whether a
+    sale was pre-scheduled under a Rule 10b5-1 plan. Yahoo's table flattens all of
+    those into one "Transaction" column, which is how routine compensation mechanics
+    get reported as "insiders sold $X".
+
+    Args:
+        symbol: Stock ticker (e.g. AAPL, NVDA).
     """
     try:
         tk = webull_client.yahoo_ticker(symbol)
         df = tk.insider_transactions
         if df is None or df.empty:
             return f"No recent insider transactions found for {symbol}."
-            
-        out = f"### Insider Transactions for {symbol.upper()}\n\n"
-        out += df.head(10).to_markdown()
+
+        table = df.head(10).copy()
+        # Yahoo leaves several columns empty per row. `to_markdown` renders those
+        # as the literal string "nan", which sits in a money column looking like
+        # a value. Blank is the honest rendering of a field the source omitted.
+        table = table.where(pd.notna(table), "")
+        for col in table.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                table[col] = df[col].head(10).map(
+                    lambda v: "" if pd.isna(v) else f"{v:,.2f}".rstrip("0").rstrip("."))
+
+        out = f"### Insider Transactions for {symbol.upper()} — via Yahoo\n\n"
+        try:
+            out += table.to_markdown(index=False)
+        except Exception:
+            out += table.to_string(index=False)
+        out += ("\n\n*Yahoo's summary. Blank cells are fields Yahoo did not supply, not "
+                "zeros. For transaction codes, 10b5-1 plan status and filing timestamps, "
+                "use `get_insider_activity`, which reads the Form 4 XML itself.*")
         return out
     except Exception as e:
         raise ToolError(f"Error fetching insider transactions for {symbol}: {e}") from e

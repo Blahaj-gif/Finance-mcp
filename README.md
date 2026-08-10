@@ -141,6 +141,15 @@ Use an **absolute** path, and forward slashes even on Windows. Claude Code users
 can instead run `claude mcp add finance -- uv run /absolute/path/to/finance_mcp.py`.
 
 **The dashboard** (what you look at). Run it from the **repo root**, not from
+**Module boundaries.** `dashboard/webull_client.py` is the market-data client and
+the shared signed-request plumbing; `dashboard/broker.py` is the trading surface
+(accounts, buying power, positions, the order lifecycle). They are separate
+because they fail differently: a price feed degrades to a fallback and says so,
+while an order path must refuse rather than substitute.
+`dashboard/barcache.py` is a small on-disk cache of *validated* bar frames shared
+between the MCP server and the dashboard — a hit skips the download, never the
+integrity gate. Disable it with `FINMCP_BAR_CACHE=0`.
+
 `dashboard/` — `app.py` resolves its sibling modules and `.streamlit/config.toml`
 relative to the working directory, and launching from elsewhere loses the theme:
 
@@ -204,7 +213,7 @@ Restart your Claude Desktop application. Ask Claude to analyze a ticker (e.g., *
 
 ### 2. The Command Center (Streamlit)
 Double-click the **Finance MCP Dashboard** shortcut, or run
-`streamlit run dashboard/app.py` from the repo root. Eight tabs:
+`streamlit run dashboard/app.py` from the repo root. Nine tabs:
 
 | Tab | What it is for |
 |---|---|
@@ -213,7 +222,8 @@ Double-click the **Finance MCP Dashboard** shortcut, or run
 | **Journal** | Theses Claude logged via `log_journal_entry`, with a drift warning when the logged price has moved away from the market. |
 | **Signals** | The four indicator verdicts behind the consensus score, and the regime weighting matrix that produced them. |
 | **Execution** | The approval desk. See below. |
-| **Portfolio** | Live balance, buying power and open positions with P&L, straight from the broker. |
+| **Portfolio** | Live balance, buying power and open positions with P&L, straight from the broker, plus a value-over-time chart. Position marks are labelled in their own currency — a USD holding inside a THB account is never summed with the account base. |
+| **Events** | The economic calendar (BLS, FOMC, BEA) with each row's actual or prior print, SEC filings for your watchlist, and a "what changed since" diff over filings and price moves. |
 | **Alerts** | Price, RSI and MACD-cross alerts; the manager fires Windows notifications and stamps which bar triggered. |
 | **Data** | Every computed indicator column for the loaded window, newest first. |
 
@@ -221,8 +231,8 @@ Double-click the **Finance MCP Dashboard** shortcut, or run
 default; **Research**; **Slate**), the chart overlay palette and row density.
 
 **The Execution tab is the only place an order can be submitted.** Submission is
-two-step by design: **1 — Preview with Webull** asks the broker to price and
-validate the order (non-binding), and only then does **2 — Approve and submit**
+two-step by design: **1 — Preview with Webull** asks the broker to price the
+order (non-binding), and only then does **2 — Approve and submit**
 unlock. An order the broker will not preview is never sent, and a failed
 submission leaves the draft pending rather than marking it executed.
 
