@@ -305,15 +305,26 @@ def test_figures_and_terms_are_marked_distinctly():
 
 def test_a_preview_never_ends_mid_number():
     """
-    A truncated "$1,2" reads as a different number from "$1,234,000". Cutting on
+    A truncated "$1,2" reads as a different number from "$1,234,567". Cutting on
     a word boundary is the difference between a short preview and a wrong one.
+
+    The limit is chosen so the raw cut lands *inside* the digits -- an earlier
+    version of this test used a limit that happened to fall on a letter, so it
+    passed with the word-boundary logic removed. A mutation run caught that.
     """
-    from dashboard import highlight as hl
-    text = "The company recorded a charge of $1,234,567 during the period. " * 20
-    out = hl.highlight(text, limit=80)
-    assert out.endswith("…")
     import re
-    assert not re.search(r"\d[\d,]*…$", out), f"cut mid-number: {out[-40:]}"
+    from dashboard import highlight as hl
+
+    prefix = "The company recorded a charge of "
+    number = "$1,234,567"
+    text = prefix + number + " during the period, which management attributes to one item."
+    limit = len(prefix) + 5                      # lands between the digits
+    assert text[limit].isdigit() or text[limit] == ",", "fixture no longer cuts mid-number"
+
+    out = hl.highlight(text, limit=limit)
+    assert out.endswith("…")
+    plain = re.sub(r"<[^>]+>", "", out)
+    assert not re.search(r"[\d,]…$", plain), f"cut mid-number: {plain[-40:]}"
 
 
 def test_highlighting_empty_text_is_empty_not_an_ellipsis():
