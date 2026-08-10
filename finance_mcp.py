@@ -21,6 +21,7 @@ import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
 import dashboard.broker as broker
+import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out

@@ -53,6 +53,8 @@ from dashboard import broker
 from dashboard import portfolio_history
 from dashboard import econ_calendar
 from dashboard import edgar_forms
+from dashboard import earnings
+from dashboard import highlight
 import indicators
 import backtester
 import forecaster
@@ -1445,6 +1447,84 @@ with tab_events:
     # ---------------------------------------------------------------
     # Filings
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Earnings
+    # ---------------------------------------------------------------
+    # The macro calendar says CPI is Wednesday. For a watchlist, "NVDA reports
+    # Thursday" is usually the more actionable of the two, and it lived only in
+    # the MCP tool where the dashboard never showed it.
+    st.markdown("#### Earnings")
+    if not watchlist:
+        st.info("Add a ticker above to see its earnings dates.")
+    else:
+        with st.spinner(f"Reading earnings dates for {', '.join(watchlist)}..."):
+            try:
+                er_rows, er_problems = earnings.upcoming(watchlist, days_ahead=days_ahead)
+            except Exception as e:
+                er_rows, er_problems = [], [str(e)[:120]]
+
+        if er_rows:
+            st.dataframe(pd.DataFrame([{
+                "Symbol": r["symbol"],
+                "Reports": r["date"].isoformat(),
+                "When": ("today" if r["days_away"] == 0 else
+                         f"in {r['days_away']}d" if r["days_away"] > 0 else
+                         f"{-r['days_away']}d ago"),
+                # The whole point of this column: an estimated date and a settled
+                # one look identical once formatted.
+                "Date is": r["status"].upper(),
+                "EPS est": (f"{r['estimate']['avg']:,.2f}"
+                            if r["estimate"].get("avg") is not None else "—"),
+                "Range": (f"{r['estimate']['low']:,.2f} – {r['estimate']['high']:,.2f}"
+                          if r["estimate"].get("low") is not None
+                          and r["estimate"].get("high") is not None else "—"),
+            } for r in er_rows]), use_container_width=True, hide_index=True,
+                column_config={"Symbol": st.column_config.TextColumn(width="small"),
+                               "When": st.column_config.TextColumn(width="small")})
+
+            statuses = {r["status"] for r in er_rows}
+            if earnings.STATUS_ESTIMATED in statuses or earnings.STATUS_DISPUTED in statuses:
+                st.caption(
+                    "**CONFIRMED** means Yahoo's two feeds agree — Yahoo's assessment, "
+                    "not the company's. **DISPUTED** means they disagree with each other. "
+                    "**ESTIMATED** means Yahoo publishes a window, not a date. Only the "
+                    "8-K below settles it, and only after the fact.")
+            else:
+                st.caption("Yahoo's assessment, not a company confirmation. Only an 8-K "
+                           "carrying Item 2.02 proves a quarter was released.")
+        elif not er_problems:
+            st.info(f"No earnings dates for these symbols in the next {days_ahead} days.")
+
+        if er_problems:
+            st.warning("Earnings dates unavailable for: "
+                       + "; ".join(f"`{p}`" for p in er_problems[:4]))
+
+        # Reported quarters, matched to the filing that announced them.
+        primary = watchlist[0]
+        history = []
+        try:
+            history = earnings.last_reported(primary, limit=4)
+        except Exception as e:
+            st.caption(f"Reported history unavailable: {str(e)[:100]}")
+        if history:
+            st.markdown(f"**{primary} — reported quarters**")
+            st.dataframe(pd.DataFrame([{
+                "Quarter end": h["date"].isoformat(),
+                "Estimate": "—" if pd.isna(h["estimate"]) else f"{h['estimate']:,.2f}",
+                "Reported": "—" if pd.isna(h["reported"]) else f"{h['reported']:,.2f}",
+                "Surprise": "—" if h["surprise_pct"] is None else f"{h['surprise_pct']:+.2f}%",
+                "8-K accepted (UTC)": (h["filing"] or {}).get("accepted", "not matched"),
+                "Filing": (h["filing"] or {}).get("url", ""),
+            } for h in history]), use_container_width=True, hide_index=True,
+                column_config={"Filing": st.column_config.LinkColumn("Filing",
+                                                                    display_text="open")})
+            st.caption("Surprise is computed from the estimate and the reported figure. "
+                       "The 8-K timestamp is the SEC's own, exact to the second — it is "
+                       "what proves the quarter was actually released.")
+
+    # ---------------------------------------------------------------
+    # Filings, with a hover preview
+    # ---------------------------------------------------------------
     st.markdown("#### Recent SEC Filings")
     form_filter = st.multiselect(
         "Forms", options=["8-K", "10-Q", "10-K", "4", "13D", "13G", "144", "S-1", "DEF 14A"],
@@ -1460,33 +1540,46 @@ with tab_events:
             for tkr in watchlist:
                 try:
                     for f in econ_calendar.company_filings(tkr, forms=form_filter or None, limit=12):
-                        filing_rows.append({
-                            "Symbol": tkr,
-                            "Filed": f.get("filing_date", ""),
-                            "Form": f.get("form", ""),
-                            # EDGAR's own description for a Form 4 is "FORM 4",
-                            # and for an 8-K it omits the item codes that carry
-                            # the actual news.
-                            "What": edgar_forms.describe_form(
-                                f.get("form", ""), f.get("items", ""))[:80],
-                            "Accepted": (f.get("acceptance") or "")[:16].replace("T", " "),
-                            "Link": f.get("url", ""),
-                        })
+                        f["_symbol"] = tkr
+                        filing_rows.append(f)
                 except Exception as e:
                     filing_errors.append(f"{tkr}: {str(e)[:90]}")
 
         if filing_rows:
-            filing_rows.sort(key=lambda r: r["Filed"], reverse=True)
-            st.dataframe(
-                pd.DataFrame(filing_rows), use_container_width=True, hide_index=True,
-                column_config={
-                    "Link": st.column_config.LinkColumn("Filing", display_text="open"),
-                    "Symbol": st.column_config.TextColumn(width="small"),
-                    "Form": st.column_config.TextColumn(width="small"),
-                })
-            st.caption(f"{len(filing_rows)} filings across {len(watchlist)} symbol(s). "
-                       "`Accepted` is the SEC's acceptance timestamp, which is what makes "
-                       "this near-real-time — the filing date alone is only day-resolution.")
+            filing_rows.sort(key=lambda r: r.get("filing_date", ""), reverse=True)
+            body = []
+            for f in filing_rows:
+                summary = highlight.summarise_filing(f, edgar_forms.describe_form)
+                url = as_html_text(f.get("url", ""))
+                # rel="noopener noreferrer" because target="_blank" otherwise
+                # hands the opened page a reference back to this one.
+                body.append(
+                    "<tr class='fm-row'>"
+                    f"<td>{as_html_text(f['_symbol'])}</td>"
+                    f"<td>{as_html_text(f.get('filing_date', ''))}</td>"
+                    f"<td>{as_html_text(f.get('form', ''))}</td>"
+                    f"<td class='fm-what'>{highlight.highlight(summary, limit=90)}</td>"
+                    f"<td>{as_html_text((f.get('acceptance') or '')[:19].replace('T', ' '))}</td>"
+                    f"<td><a href='{url}' target='_blank' rel='noopener noreferrer'>"
+                    "source &#8599;</a></td>"
+                    "<td style='position:relative;padding:0'>"
+                    "<div class='fm-peek'>"
+                    "<div class='fm-peek-head'>Parsed summary</div>"
+                    f"{highlight.highlight(summary, limit=700)}"
+                    "</div></td>"
+                    "</tr>")
+            render_html(
+                "<table class='fm-filings'><thead><tr>"
+                "<th>Symbol</th><th>Filed</th><th>Form</th><th>What</th>"
+                "<th>Accepted (UTC)</th><th>Source</th><th></th>"
+                "</tr></thead><tbody>" + "".join(body) + "</tbody></table>")
+            st.caption(
+                f"{len(filing_rows)} filings across {len(watchlist)} symbol(s). "
+                "Hover a row for the parsed summary, with figures and notable terms "
+                "highlighted. `Source` opens the filing on sec.gov in a new tab — "
+                "the SEC's copy stays authoritative; only the summary is ours. "
+                "`Accepted` is the SEC's own timestamp, which is what makes this "
+                "near-real-time.")
         elif not filing_errors:
             st.info("No filings matching those forms for these symbols.")
 

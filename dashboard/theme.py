@@ -468,6 +468,58 @@ input, [data-baseweb="select"] * {
 }
 
 /* ---- cards (journal, order drafts) ---- */
+/* ------------------------------------------------------------------
+   Filing rows with a hover preview.
+
+   The preview is CSS-only: no JS, no rerun, no network. Streamlit reruns the
+   whole script on any interaction, so a click-to-expand would cost a round
+   trip to read one summary. Hover costs nothing and leaves the row itself
+   scannable.
+
+   It is positioned relative to the row and clipped to the table's width, so a
+   long summary on the last row cannot push the page sideways.
+   ------------------------------------------------------------------ */
+.fm-filings { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.fm-filings th {
+  text-align: left; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; font-size: 0.68rem; color: var(--fm-dim);
+  border-bottom: 1px solid var(--fm-rule); padding: 0.4rem 0.6rem;
+}
+.fm-filings td {
+  padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--fm-hairline);
+  vertical-align: top; white-space: nowrap;
+}
+.fm-filings tr.fm-row { position: relative; }
+.fm-filings tr.fm-row:hover { background: var(--fm-panel-alt); }
+.fm-filings td.fm-what { white-space: normal; color: var(--fm-ink); }
+
+.fm-peek {
+  position: absolute; left: 0.6rem; right: 0.6rem; top: 100%; z-index: 40;
+  display: none; padding: 0.7rem 0.85rem; margin-top: -0.2rem;
+  background: var(--fm-panel-alt); border: 1px solid var(--fm-accent);
+  border-radius: 3px; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  font-size: 0.8rem; line-height: 1.5; white-space: normal; color: var(--fm-ink);
+}
+.fm-filings tr.fm-row:hover .fm-peek,
+.fm-filings tr.fm-row:focus-within .fm-peek { display: block; }
+.fm-peek .fm-peek-head {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fm-dim); margin-bottom: 0.35rem;
+}
+/* Figures and notable terms, marked by dashboard/highlight.py. Two weights so
+   a number and a word like "impairment" are distinguishable at a glance. */
+.fm-peek mark.fm-fig {
+  background: transparent; color: var(--fm-accent); font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.fm-peek mark.fm-term {
+  background: transparent; color: var(--fm-down);
+  font-weight: 600; border-bottom: 1px dotted currentColor;
+}
+.fm-filings a { color: var(--fm-accent); text-decoration: none; }
+.fm-filings a:hover, .fm-filings a:focus { text-decoration: underline; }
+.fm-filings a:focus-visible { outline: 2px solid var(--fm-accent); outline-offset: 2px; }
+
 .fm-card {
     background: var(--fm-panel); border: 1px solid var(--fm-rule);
     border-left: 3px solid var(--fm-accent); border-radius: var(--fm-radius);

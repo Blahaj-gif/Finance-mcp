@@ -279,3 +279,83 @@ def test_the_main_container_clears_streamlits_fixed_header():
     assert padding_px >= STREAMLIT_HEADER_PX, (
         f"padding-top is {padding_px:.0f}px; the fixed header is "
         f"{STREAMLIT_HEADER_PX}px and will paint over the masthead")
+
+
+# =====================================================================
+# The filing hover preview
+# =====================================================================
+
+def test_filing_text_is_escaped_before_it_is_highlighted():
+    """
+    The preview renders text pulled from a third-party document. Highlighting is
+    cosmetic and must never become a way for a filing to inject markup.
+    """
+    from dashboard import highlight as hl
+    out = hl.highlight("<script>alert(1)</script> and <img src=x onerror=1>")
+    assert "<script>" not in out and "<img" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_figures_and_terms_are_marked_distinctly():
+    from dashboard import highlight as hl
+    out = hl.highlight("a goodwill impairment of $1.2 billion, down 14.5%")
+    assert 'class="fm-term"' in out, "notable terms should be marked"
+    assert out.count('class="fm-fig"') >= 2, "money and percent are both figures"
+
+
+def test_a_preview_never_ends_mid_number():
+    """
+    A truncated "$1,2" reads as a different number from "$1,234,000". Cutting on
+    a word boundary is the difference between a short preview and a wrong one.
+    """
+    from dashboard import highlight as hl
+    text = "The company recorded a charge of $1,234,567 during the period. " * 20
+    out = hl.highlight(text, limit=80)
+    assert out.endswith("…")
+    import re
+    assert not re.search(r"\d[\d,]*…$", out), f"cut mid-number: {out[-40:]}"
+
+
+def test_highlighting_empty_text_is_empty_not_an_ellipsis():
+    from dashboard import highlight as hl
+    assert hl.highlight("") == ""
+    assert hl.highlight(None) == ""
+
+
+def test_the_hover_preview_styles_exist_in_every_theme():
+    from dashboard import theme as th
+    for name in th.THEMES:
+        css = th.css(name)
+        for selector in (".fm-peek", "tr.fm-row:hover .fm-peek",
+                         ".fm-peek mark.fm-fig", ".fm-peek mark.fm-term"):
+            assert selector in css, f"{name} is missing {selector}"
+
+
+def test_external_filing_links_open_safely():
+    """
+    target="_blank" without rel="noopener" hands the opened page a reference
+    back to this one. The SEC's copy stays authoritative, so we link out --
+    which makes the rel attribute load-bearing rather than decorative.
+    """
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "dashboard", "app.py"), encoding="utf-8").read()
+    for match in re.finditer(r"target='_blank'", src):
+        window = src[max(0, match.start() - 200):match.start() + 200]
+        assert "noopener" in window, "every target=_blank link needs rel=noopener"
+
+
+@pytest.mark.parametrize("text,expected_marks", [
+    ("Period 2026-06-27", 1),                       # ISO -- the format this app uses
+    ("filed 08/07/2026", 1),                        # US
+    ("on August 7, 2026", 1),                       # long form
+    ("$1.2 billion", 1),
+    ("down 14.5%", 1),
+    ("Insider transaction", 0),                     # nothing to mark
+])
+def test_the_date_and_figure_forms_this_project_actually_produces(text, expected_marks):
+    """
+    ISO dates were missed originally, which meant every filing period -- the
+    most common figure in our own summaries -- rendered unmarked.
+    """
+    from dashboard import highlight as hl
+    assert hl.highlight(text).count("<mark") == expected_marks

@@ -911,3 +911,92 @@ def test_earnings_filings_respects_the_limit(monkeypatch):
                         lambda *a, **k: [{"accession": str(i), "items": "2.02"}
                                          for i in range(20)])
     assert len(ec.earnings_filings("AAPL", limit=3)) == 3
+
+
+# =====================================================================
+# Earnings: the three states a report date can be in
+# =====================================================================
+
+class _FakeTicker:
+    def __init__(self, calendar=None, dates=None):
+        self.calendar = calendar or {}
+        self.earnings_dates = dates
+
+
+def _pending_frame(date_str):
+    import pandas as pd
+    return pd.DataFrame({"EPS Estimate": [1.0], "Reported EPS": [float("nan")],
+                         "Surprise(%)": [float("nan")]},
+                        index=pd.to_datetime([date_str]))
+
+
+@pytest.fixture
+def earnings_mod(monkeypatch):
+    from dashboard import earnings as em
+
+    def install(calendar, dates=None, filings=()):
+        monkeypatch.setattr(em.wc, "yahoo_ticker", lambda s: _FakeTicker(calendar, dates))
+        monkeypatch.setattr(em.ec, "earnings_filings", lambda s, limit=8: list(filings))
+    return em, install
+
+
+def test_agreeing_feeds_read_as_confirmed(earnings_mod):
+    em, install = earnings_mod
+    install({"Earnings Date": [datetime.date(2026, 10, 30)]}, _pending_frame("2026-10-30"))
+    assert em.next_report("AAPL")["status"] == em.STATUS_CONFIRMED
+
+
+def test_disagreeing_yahoo_feeds_read_as_disputed(earnings_mod):
+    """
+    Live AAPL: the calendar endpoint says 30 Oct, the earnings table says 29
+    Oct. A date the provider cannot agree with itself on is not settled.
+    """
+    em, install = earnings_mod
+    install({"Earnings Date": [datetime.date(2026, 10, 30)]}, _pending_frame("2026-10-29"))
+    got = em.next_report("AAPL")
+    assert got["status"] == em.STATUS_DISPUTED
+    assert got["table_date"] == datetime.date(2026, 10, 29)
+
+
+def test_a_window_reads_as_estimated(earnings_mod):
+    em, install = earnings_mod
+    install({"Earnings Date": [datetime.date(2026, 10, 28), datetime.date(2026, 11, 3)]})
+    got = em.next_report("AAPL")
+    assert got["status"] == em.STATUS_ESTIMATED
+    assert got["window"] == [datetime.date(2026, 10, 28), datetime.date(2026, 11, 3)]
+
+
+def test_no_date_is_a_status_not_an_exception(earnings_mod):
+    em, install = earnings_mod
+    install({})
+    assert em.next_report("NOPE")["status"] == em.STATUS_UNKNOWN
+
+
+def test_every_status_carries_an_explanation(earnings_mod):
+    em, _ = earnings_mod
+    for status in (em.STATUS_CONFIRMED, em.STATUS_DISPUTED,
+                   em.STATUS_ESTIMATED, em.STATUS_UNKNOWN):
+        assert em.STATUS_NOTE[status].strip()
+
+
+def test_one_bad_symbol_does_not_empty_the_watchlist(monkeypatch):
+    from dashboard import earnings as em
+
+    def flaky(sym):
+        if sym == "BAD":
+            raise RuntimeError("no such ticker")
+        return _FakeTicker({"Earnings Date": [datetime.date(2026, 10, 30)]},
+                           _pending_frame("2026-10-30"))
+
+    monkeypatch.setattr(em.wc, "yahoo_ticker", flaky)
+    rows, problems = em.upcoming(["AAPL", "BAD"], today=datetime.date(2026, 10, 1))
+    assert [r["symbol"] for r in rows] == ["AAPL"]
+    assert any("BAD" in p for p in problems)
+
+
+def test_dates_outside_the_horizon_are_excluded(monkeypatch):
+    from dashboard import earnings as em
+    monkeypatch.setattr(em.wc, "yahoo_ticker",
+                        lambda s: _FakeTicker({"Earnings Date": [datetime.date(2027, 6, 1)]}))
+    rows, _ = em.upcoming(["AAPL"], days_ahead=30, today=datetime.date(2026, 10, 1))
+    assert rows == []
