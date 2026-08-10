@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import finance_mcp as srv
 from dashboard import webull_client as wc
+from dashboard import broker
 from fastmcp.exceptions import ToolError
 
 BALANCE = {
@@ -60,7 +61,7 @@ def fake_account(monkeypatch):
     monkeypatch.setattr(tc, "TradeClient", lambda api: type("T", (), {"account_v2": FakeAccountV2()})())
     monkeypatch.setattr(wc, "get_api_client", lambda: object())
     monkeypatch.setattr(srv.webull_client, "get_api_client", lambda: object())
-    monkeypatch.setattr(wc, "WEBULL_ACCOUNT_ID", "")
+    monkeypatch.setattr(broker, "WEBULL_ACCOUNT_ID", "")
 
 
 # =====================================================================
@@ -184,12 +185,12 @@ def test_multiple_accounts_refuse_to_guess(monkeypatch):
             return [{"account_id": "A1", "account_label": "Cash"},
                     {"account_id": "A2", "account_label": "Margin"}]
 
-    monkeypatch.setattr(wc, "WEBULL_ACCOUNT_ID", "")
+    monkeypatch.setattr(broker, "WEBULL_ACCOUNT_ID", "")
     monkeypatch.setattr(wc, "call_webull", lambda fn, *a, **k: fn(*a, **k))
     client = type("T", (), {"account_v2": Multi()})()
 
     with pytest.raises(RuntimeError, match="WEBULL_ACCOUNT_ID"):
-        wc.get_primary_account_id(client)
+        broker.get_primary_account_id(client)
 
 
 def test_pinned_account_is_honoured(monkeypatch):
@@ -197,10 +198,10 @@ def test_pinned_account_is_honoured(monkeypatch):
         def get_account_list(self):
             return [{"account_id": "A1"}, {"account_id": "A2"}]
 
-    monkeypatch.setattr(wc, "WEBULL_ACCOUNT_ID", "A2")
+    monkeypatch.setattr(broker, "WEBULL_ACCOUNT_ID", "A2")
     monkeypatch.setattr(wc, "call_webull", lambda fn, *a, **k: fn(*a, **k))
     client = type("T", (), {"account_v2": Multi()})()
-    assert wc.get_primary_account_id(client) == "A2"
+    assert broker.get_primary_account_id(client) == "A2"
 
 
 def test_pinned_account_must_actually_exist(monkeypatch):
@@ -208,11 +209,11 @@ def test_pinned_account_must_actually_exist(monkeypatch):
         def get_account_list(self):
             return [{"account_id": "A1"}, {"account_id": "A2"}]
 
-    monkeypatch.setattr(wc, "WEBULL_ACCOUNT_ID", "NOPE")
+    monkeypatch.setattr(broker, "WEBULL_ACCOUNT_ID", "NOPE")
     monkeypatch.setattr(wc, "call_webull", lambda fn, *a, **k: fn(*a, **k))
     client = type("T", (), {"account_v2": Multi()})()
     with pytest.raises(RuntimeError, match="not among"):
-        wc.get_primary_account_id(client)
+        broker.get_primary_account_id(client)
 
 
 # =====================================================================
@@ -220,7 +221,7 @@ def test_pinned_account_must_actually_exist(monkeypatch):
 # =====================================================================
 
 def test_build_order_normalises_aliases():
-    o = wc.build_order("mu", "buy", 1, "LMT", 500.0)
+    o = broker.build_order("mu", "buy", 1, "LMT", 500.0)
     assert o["symbol"] == "MU"
     assert o["side"] == "BUY"
     assert o["order_type"] == "LIMIT"
@@ -232,7 +233,7 @@ def test_build_order_normalises_aliases():
 
 
 def test_build_order_market_has_no_limit_price():
-    o = wc.build_order("MU", "SELL", 2, "MKT")
+    o = broker.build_order("MU", "SELL", 2, "MKT")
     assert o["order_type"] == "MARKET"
     assert "limit_price" not in o
 
@@ -245,12 +246,12 @@ def test_build_order_market_has_no_limit_price():
 ])
 def test_build_order_rejects_unsendable_orders(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        wc.build_order(**kwargs)
+        broker.build_order(**kwargs)
 
 
 def test_build_order_ids_are_unique():
-    a = wc.build_order("MU", "BUY", 1, "MKT")
-    b = wc.build_order("MU", "BUY", 1, "MKT")
+    a = broker.build_order("MU", "BUY", 1, "MKT")
+    b = broker.build_order("MU", "BUY", 1, "MKT")
     assert a["client_order_id"] != b["client_order_id"]
 
 
@@ -324,7 +325,29 @@ def test_preview_is_documented_as_weaker_than_placement():
     refused at submission for a quantity-step rule. Anything that presents
     preview as a guarantee of acceptance is overstating it.
     """
-    src = open(_repo("dashboard", "webull_client.py"), encoding="utf-8").read()
+    src = open(_repo("dashboard", "broker.py"), encoding="utf-8").read()
     body = src[src.index("def preview_order("):]
     body = body[:body.index("def place_order(")]
     assert "does not run every rule" in body or "weaker" in body
+
+
+def test_the_data_client_no_longer_offers_a_way_to_trade():
+    """
+    webull_client is the market-data client plus shared plumbing; broker.py is
+    the trading surface. They fail differently -- a price feed degrades to a
+    fallback and says so, an order path must refuse rather than substitute --
+    and keeping both behind one import is how cancel_order ended up on an API
+    generation that does not serve this region.
+    """
+    from dashboard import webull_client as data_client
+    for name in ("place_order", "cancel_order", "preview_order", "build_order",
+                 "get_primary_account_id", "get_buying_power"):
+        assert not hasattr(data_client, name), (
+            f"webull_client still exposes {name}; it belongs in broker.py")
+
+
+def test_the_broker_module_does_not_reimplement_the_signed_client():
+    """One place builds the signed request, and it is not this module."""
+    src = open(_repo("dashboard", "broker.py"), encoding="utf-8").read()
+    assert "ApiClient(" not in src
+    assert "from dashboard.webull_client import" in src or "from webull_client import" in src

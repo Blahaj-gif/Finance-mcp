@@ -641,3 +641,81 @@ def test_an_unknown_interval_does_not_silently_become_daily_on_yahoo():
 def test_both_interval_maps_agree_on_what_exists():
     """A name one side knows and the other does not is a silent fallback."""
     assert set(wc.WEBULL_TIMESPAN) <= set(wc.INTERVAL_WEBULL_TO_YF)
+
+
+# =====================================================================
+# The shared on-disk bar cache
+# =====================================================================
+
+def test_a_stored_frame_comes_back_intact(tmp_path, monkeypatch):
+    from dashboard import barcache
+    monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
+    frame = rising_frame(20) if "rising_frame" in dir() else None
+    frame = pd.DataFrame({
+        "time": ["2026-08-06 04:00:00", "2026-08-07 04:00:00"],
+        "open": [1.0, 2.0], "high": [2.0, 3.0], "low": [0.5, 1.5],
+        "close": [1.5, 2.5], "volume": [10, 20],
+    })
+    assert barcache.store("AAPL", "D", 2, frame, "Webull OpenAPI")
+    got = barcache.load("AAPL", "D", 2)
+    assert got is not None
+    back, source, age = got
+    assert list(back["close"]) == [1.5, 2.5]
+    assert source == "Webull OpenAPI"
+    assert age < 5
+
+
+def test_the_time_column_comes_back_as_strings(tmp_path, monkeypatch):
+    """
+    Everything downstream reads `time` as the "%Y-%m-%d %H:%M:%S" string form.
+    A CSV round trip would otherwise hand back whatever pandas inferred.
+    """
+    from dashboard import barcache
+    monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
+    frame = pd.DataFrame({"time": ["2026-08-07 04:00:00"], "open": [1.0], "high": [1.0],
+                          "low": [1.0], "close": [1.0], "volume": [1]})
+    barcache.store("X", "D", 1, frame, "src")
+    back, _, _ = barcache.load("X", "D", 1)
+    assert isinstance(back["time"].iloc[0], str)
+
+
+def test_an_expired_entry_is_not_served(tmp_path, monkeypatch):
+    from dashboard import barcache
+    monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
+    frame = pd.DataFrame({"time": ["2026-08-07 04:00:00"], "open": [1.0], "high": [1.0],
+                          "low": [1.0], "close": [1.0], "volume": [1]})
+    barcache.store("X", "D", 1, frame, "src")
+    assert barcache.load("X", "D", 1, ttl=0) is None
+
+
+def test_a_corrupt_entry_means_refetch_not_failure(tmp_path, monkeypatch):
+    """A cache is an optimisation; it must never be able to fail a request."""
+    from dashboard import barcache
+    monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
+    frame = pd.DataFrame({"time": ["2026-08-07 04:00:00"], "open": [1.0], "high": [1.0],
+                          "low": [1.0], "close": [1.0], "volume": [1]})
+    barcache.store("X", "D", 1, frame, "src")
+    data_path, meta_path = barcache._paths("X", "D", 1)
+    open(data_path, "wb").write(b"not a dataframe")
+    assert barcache.load("X", "D", 1) is None
+
+
+def test_different_requests_do_not_collide(tmp_path, monkeypatch):
+    from dashboard import barcache
+    monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
+    a = barcache._paths("AAPL", "D", 300)[0]
+    for other in (("AAPL", "D", 200), ("AAPL", "H1", 300), ("NVDA", "D", 300)):
+        assert barcache._paths(*other)[0] != a
+
+
+def test_a_disk_hit_still_passes_through_the_integrity_gate():
+    """
+    The cache skips the download, never the validation. A frame that has aged
+    past its staleness tolerance on disk must be rejected exactly as a stale
+    live one is -- otherwise the cache becomes a way to serve stale prices.
+    """
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "dashboard", "webull_client.py"), encoding="utf-8").read()
+    body = src[src.index("disk = barcache.load("):]
+    body = body[:body.index("errors = []")]
+    assert "_validate_frame(" in body, "a disk hit must be revalidated before it is returned"

@@ -37,3 +37,6 @@ iv_history.json
 # adopted are vendored explicitly (dashboard/ta_core.py, tests/fixtures/).
 extract-chart-dsl/
 dashboard/portfolio_history.json
+
+# Shared on-disk bar cache. Derived data, regenerated on demand.
+conf/barcache/

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import finance_mcp as srv
 from dashboard import webull_client as wc
+from dashboard import broker
 
 
 def rising_frame(n=40, start=100.0, step=2.0):
@@ -252,19 +253,19 @@ def test_buying_power_read_from_the_matching_currency_line():
     Buying power is per-currency. The old code read a top-level `buyingPower`
     key that does not exist in this API, so it always saw zero.
     """
-    assert wc.get_buying_power(BALANCE_PAYLOAD, "USD") == pytest.approx(333.83)
-    assert wc.get_buying_power(BALANCE_PAYLOAD, "HKD") == pytest.approx(0.0)
+    assert broker.get_buying_power(BALANCE_PAYLOAD, "USD") == pytest.approx(333.83)
+    assert broker.get_buying_power(BALANCE_PAYLOAD, "HKD") == pytest.approx(0.0)
 
 
 def test_buying_power_raises_for_a_currency_that_is_absent():
     with pytest.raises(ValueError, match="No JPY buying power"):
-        wc.get_buying_power(BALANCE_PAYLOAD, "JPY")
+        broker.get_buying_power(BALANCE_PAYLOAD, "JPY")
 
 
 def test_position_quantity_lookup():
-    assert wc.get_position_quantity(POSITION_PAYLOAD, "MU") == pytest.approx(0.3)
-    assert wc.get_position_quantity(POSITION_PAYLOAD, "rklb") == pytest.approx(2.0)
-    assert wc.get_position_quantity(POSITION_PAYLOAD, "NVDA") == 0.0
+    assert broker.get_position_quantity(POSITION_PAYLOAD, "MU") == pytest.approx(0.3)
+    assert broker.get_position_quantity(POSITION_PAYLOAD, "rklb") == pytest.approx(2.0)
+    assert broker.get_position_quantity(POSITION_PAYLOAD, "NVDA") == 0.0
 
 
 def test_primary_account_id_extracted_from_account_list():
@@ -275,7 +276,7 @@ def test_primary_account_id_extracted_from_account_list():
     class FakeTradeClient:
         account_v2 = FakeAccountV2()
 
-    assert wc.get_primary_account_id(FakeTradeClient()) == "1208285034570579968"
+    assert broker.get_primary_account_id(FakeTradeClient()) == "1208285034570579968"
 
 
 def test_primary_account_id_raises_when_no_accounts():
@@ -287,7 +288,7 @@ def test_primary_account_id_raises_when_no_accounts():
         account_v2 = FakeAccountV2()
 
     with pytest.raises(RuntimeError, match="no accounts"):
-        wc.get_primary_account_id(FakeTradeClient())
+        broker.get_primary_account_id(FakeTradeClient())
 
 
 # =====================================================================
@@ -788,3 +789,45 @@ def test_every_supported_condition_is_accepted(monkeypatch):
     monkeypatch.setattr(srv.webull_client, "get_provenance", lambda s, i: {})
     for cond in srv.alert_manager.CONDITIONS:
         srv.set_alert("AAPL", cond, 50.0)
+
+
+# =====================================================================
+# Pre-flight order rules
+# =====================================================================
+
+def test_a_draft_that_the_broker_would_refuse_never_reaches_the_queue(monkeypatch, tmp_path):
+    """
+    BUY 1 ZETA @ $0.01 previewed cleanly at $0.01 cost and was then refused at
+    placement: a sub-$0.10 limit needs more than 1000 shares. Without a local
+    check, that arrives as an opaque 417 *after* a human has approved it.
+    """
+    monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(srv.webull_client, "get_provenance", lambda s, i="D": {})
+    out = srv.draft_order("ZETA", "BUY", 1, "LMT", 0.01)
+
+    assert "SAFETY BLOCK" in out
+    assert "1,000 shares" in out
+    assert not os.path.exists(os.path.join(str(tmp_path), "dashboard", "order_drafts.json"))
+
+
+@pytest.mark.parametrize("qty,price,clean", [
+    (1, 0.01, False),
+    (1000, 0.01, False),      # the rule is *more than* 1000
+    (1001, 0.01, True),
+    (1, 26.0, True),
+    (1, 0.10, True),          # at the boundary the step no longer applies
+])
+def test_the_penny_quantity_step_matches_what_the_broker_enforces(qty, price, clean):
+    order = srv.broker.build_order("ZETA", "BUY", qty, "LMT", price)
+    assert (srv.broker.order_rule_violations(order) == []) is clean
+
+
+def test_the_rules_check_is_advisory_not_authoritative():
+    """
+    It exists to move common refusals earlier, not to become a second opinion
+    the broker has to agree with. Anything it does not know about must still
+    reach the broker.
+    """
+    order = srv.broker.build_order("ZETA", "BUY", 5, "LMT", 26.0)
+    order["some_future_field"] = "unknown to us"
+    assert srv.broker.order_rule_violations(order) == []

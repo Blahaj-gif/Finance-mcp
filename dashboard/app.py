@@ -49,6 +49,7 @@ sys.path.append(BASE_DIR)
 import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
 from dashboard import market_calendar
+from dashboard import broker
 from dashboard import portfolio_history
 from dashboard import econ_calendar
 from dashboard import edgar_forms
@@ -980,16 +981,21 @@ with tab_execution:
                                 import webull_client
 
                                 trade_client = TradeClient(webull_client.get_api_client())
-                                account_id = webull_client.get_primary_account_id(trade_client)
-                                order = webull_client.build_order(
+                                account_id = broker.get_primary_account_id(trade_client)
+                                order = broker.build_order(
                                     symbol=draft["symbol"], action=draft["action"],
                                     quantity=draft["quantity"], order_type=draft["order_type"],
                                     limit_price=draft.get("limit_price"),
                                     client_order_id=draft["draft_id"],
                                 )
-                                quote = webull_client.preview_order(trade_client, account_id, order)
-                                st.session_state[preview_key] = {"order": order, "quote": quote,
-                                                                 "account_id": account_id}
+                                quote = broker.preview_order(trade_client, account_id, order)
+                                # Rules the broker applies at placement but not
+                                # at preview. Checked here so the refusal
+                                # arrives before someone approves rather than
+                                # as an opaque 417 afterwards.
+                                st.session_state[preview_key] = {
+                                    "order": order, "quote": quote, "account_id": account_id,
+                                    "violations": broker.order_rule_violations(order)}
                             except Exception as e:
                                 st.session_state.pop(preview_key, None)
                                 st.error(f"Webull refused to preview this order: {e}")
@@ -1024,6 +1030,10 @@ with tab_execution:
                         f"Broker preview — estimated cost **\\${q.get('estimated_cost', '?')} "
                         f"{ccy}**, fee **\\${q.get('estimated_transaction_fee', '?')} {ccy}**"
                     )
+                    # A clean preview is not a promise of acceptance: the same
+                    # order priced fine and was then refused at placement.
+                    for problem in preview.get("violations") or []:
+                        st.warning(f"Webull will refuse this at submission: {problem}")
 
                 # --- Step 2: submit, only ever after a successful preview ---
                 with col_exec:
@@ -1031,6 +1041,11 @@ with tab_execution:
                         st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
                                   use_container_width=True, disabled=True,
                                   help="Preview the order first — we never submit an order the broker has not validated.")
+                    elif preview.get("violations"):
+                        st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
+                                  use_container_width=True, disabled=True,
+                                  help="This order breaks a broker rule that preview does not "
+                                       "check. Fix the draft rather than submitting it to be refused.")
                     elif st.button(f"2 — APPROVE AND SUBMIT {draft['action']} {draft['quantity']} {draft['symbol']}",
                                    key=f"exec_{draft['draft_id']}", use_container_width=True):
                         with st.spinner("Submitting order to Webull..."):
@@ -1039,7 +1054,7 @@ with tab_execution:
                                 import webull_client
 
                                 trade_client = TradeClient(webull_client.get_api_client())
-                                res = webull_client.place_order(
+                                res = broker.place_order(
                                     trade_client, preview["account_id"], preview["order"])
 
                                 # Reached only if the broker call genuinely returned. This block
@@ -1095,7 +1110,7 @@ with tab_portfolio:
         # Every one of these endpoints is account-scoped. The bare calls that
         # used to be here raised TypeError, so this panel only ever showed
         # "Failed to fetch Webull account data".
-        account_id = webull_client.get_primary_account_id(trade_client)
+        account_id = broker.get_primary_account_id(trade_client)
         acc_list = webull_client.unwrap(webull_client.call_webull(
             trade_client.account_v2.get_account_list))
         balances = webull_client.unwrap(webull_client.call_webull(
@@ -1109,7 +1124,7 @@ with tab_portfolio:
             float(balances.get("total_cash_balance", 0) or 0)
         day_pnl = float(balances.get("total_unrealized_profit_loss", 0) or 0)
         try:
-            buying_power = webull_client.get_buying_power(balances, "USD")
+            buying_power = broker.get_buying_power(balances, "USD")
         except Exception:
             buying_power = 0.0
         currency = balances.get("total_asset_currency", "")

@@ -20,6 +20,7 @@ import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
+import dashboard.broker as broker
 import dashboard.alert_manager as alert_manager
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
@@ -834,7 +835,7 @@ def get_open_positions() -> str:
         # This previously called get_account_list(), which returns accounts, not
         # holdings -- the tool never returned a position despite its name. The
         # SDK method is singular and account-scoped: get_account_position(account_id).
-        account_id = webull_client.get_primary_account_id(trade_client)
+        account_id = broker.get_primary_account_id(trade_client)
         positions = webull_client.unwrap(webull_client.call_webull(trade_client.account_v2.get_account_position, account_id))
 
         if not positions:
@@ -1286,12 +1287,12 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             # Every trade endpoint is account-scoped; calling these with no
             # argument raised TypeError, which the outer handler turned into a
             # blanket "failed to verify" block. The guardrails never actually ran.
-            account_id = webull_client.get_primary_account_id(trade_client)
+            account_id = broker.get_primary_account_id(trade_client)
 
             if action.upper() == "SELL":
                 positions = webull_client.unwrap(
                     webull_client.call_webull(trade_client.account_v2.get_account_position, account_id))
-                inventory = webull_client.get_position_quantity(positions, symbol)
+                inventory = broker.get_position_quantity(positions, symbol)
 
                 if quantity > inventory:
                     return f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, but account inventory only shows {inventory} shares. Naked short-selling is blocked."
@@ -1299,7 +1300,7 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             elif action.upper() == "BUY":
                 balances = webull_client.unwrap(
                     webull_client.call_webull(trade_client.account_v2.get_account_balance, account_id))
-                bp = webull_client.get_buying_power(balances, "USD")
+                bp = broker.get_buying_power(balances, "USD")
 
                 est_price = limit_price
                 if est_price is None:
@@ -1331,13 +1332,21 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         # Reject anything that could not be sent anyway, before it reaches the
         # human approval queue. A draft that cannot become an order is noise.
         try:
-            webull_client.build_order(
+            candidate = broker.build_order(
                 symbol=symbol, action=action, quantity=quantity,
                 order_type=order_type, limit_price=limit_price,
                 client_order_id=draft_id,
             )
         except ValueError as ve:
             return f"SAFETY BLOCK: This order could not be constructed: {ve}"
+
+        # Rules the broker enforces at placement but not at preview. Without
+        # this, a draft can pass every local check, price cleanly, be approved
+        # by a human, and only then come back as an opaque 417.
+        violations = broker.order_rule_violations(candidate)
+        if violations:
+            return ("SAFETY BLOCK: Webull would refuse this order at submission — "
+                    + " ".join(violations))
 
         new_draft = {
             "draft_id": draft_id,
@@ -1381,13 +1390,13 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
     """
     from webull.trade.trade_client import TradeClient
     try:
-        order = webull_client.build_order(
+        order = broker.build_order(
             symbol=symbol, action=action, quantity=quantity,
             order_type=order_type, limit_price=limit_price,
         )
         trade_client = TradeClient(webull_client.get_api_client())
-        account_id = webull_client.get_primary_account_id(trade_client)
-        quote = webull_client.preview_order(trade_client, account_id, order)
+        account_id = broker.get_primary_account_id(trade_client)
+        quote = broker.preview_order(trade_client, account_id, order)
 
         cost = float(quote.get("estimated_cost", 0) or 0)
         fee = float(quote.get("estimated_transaction_fee", 0) or 0)
@@ -1404,7 +1413,7 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
         try:
             balances = webull_client.unwrap(webull_client.call_webull(
                 trade_client.account_v2.get_account_balance, account_id))
-            bp = webull_client.get_buying_power(balances, "USD")
+            bp = broker.get_buying_power(balances, "USD")
             affordable = order["side"] == "SELL" or (cost + fee) <= bp
             out += (f"* **USD buying power**: `${bp:,.2f}`\n"
                     f"* **Affordable**: {'yes' if affordable else 'NO - exceeds buying power'}\n")
@@ -1434,7 +1443,7 @@ def get_open_orders() -> str:
 
         trade_client = TradeClient(api_client)
         # get_order_open is account-scoped: calling it bare raised TypeError.
-        account_id = webull_client.get_primary_account_id(trade_client)
+        account_id = broker.get_primary_account_id(trade_client)
         res = webull_client.unwrap(webull_client.call_webull(trade_client.order_v3.get_order_open, account_id))
 
         if not res:
@@ -1458,8 +1467,8 @@ def cancel_order(order_id: str) -> str:
 
     try:
         trade_client = TradeClient(webull_client.get_api_client())
-        account_id = webull_client.get_primary_account_id(trade_client)
-        res = webull_client.cancel_order(trade_client, account_id, order_id)
+        account_id = broker.get_primary_account_id(trade_client)
+        res = broker.cancel_order(trade_client, account_id, order_id)
         return (f"Cancellation request sent for client_order_id {order_id} "
                 f"(account {account_id}). Response:\n```json\n{res}\n```")
     except Exception as e:
@@ -1767,10 +1776,10 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
         direction = "LONG" if stop < entry else "SHORT"
 
         trade_client = TradeClient(webull_client.get_api_client())
-        account_id = webull_client.get_primary_account_id(trade_client)
+        account_id = broker.get_primary_account_id(trade_client)
         balances = webull_client.unwrap(webull_client.call_webull(
             trade_client.account_v2.get_account_balance, account_id))
-        buying_power = webull_client.get_buying_power(balances, account_currency)
+        buying_power = broker.get_buying_power(balances, account_currency)
 
         # Equity, not buying power, is the correct base for a risk budget.
         equity = 0.0
@@ -1919,7 +1928,7 @@ def get_portfolio_risk() -> str:
     import numpy as np
     try:
         trade_client = TradeClient(webull_client.get_api_client())
-        account_id = webull_client.get_primary_account_id(trade_client)
+        account_id = broker.get_primary_account_id(trade_client)
         positions = webull_client.unwrap(webull_client.call_webull(
             trade_client.account_v2.get_account_position, account_id))
 
@@ -2837,6 +2846,15 @@ def get_data_sources() -> str:
                         f"{delay['last_print_utc']} UTC, so the gap is the session, "
                         "not feed delay.\n")
         out += "* Fundamentals are cross-checked against SEC filings where possible.\n\n"
+
+        cache = webull_client.barcache.stats()
+        out += "**Bar cache** — shared between this server and the dashboard\n"
+        out += (f"* {'On' if cache['enabled'] else 'Off'} · {cache['format']} · "
+                f"{cache['entries']} entries · {cache['ttl_seconds']:.0f}s TTL\n")
+        out += ("* A hit skips the download, never the integrity gate: cached frames are "
+                "revalidated for ordering and staleness before they are returned, so this "
+                "cannot serve a stale price.\n")
+        out += f"* `FINMCP_BAR_CACHE=0` disables it. Location: `{cache['dir']}`\n\n"
 
         out += f"**BLS** — macroeconomic data — `{bls['tier']}`\n"
         out += f"* Daily cap: {bls['daily_cap']} API queries"
