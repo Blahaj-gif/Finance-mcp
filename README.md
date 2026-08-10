@@ -1,19 +1,73 @@
 # Finance MCP
 
-A **Human-In-The-Loop (HITL) market research and trading desk** for Claude Desktop.
+An MCP server that gives an AI assistant read access to your real brokerage
+account and the market around it — and gives you, not the assistant, the only
+button that sends an order.
 
-Finance MCP bridges the gap between LLM reasoning (Claude) and market execution (Webull OpenAPI). It provides Claude with 39 market intelligence tools while maintaining a strict, localized safety firewall via a Streamlit Dashboard.
+39 tools over Webull OpenAPI, Yahoo Finance, SEC EDGAR, BLS, the Federal Reserve
+and the BEA, plus a Streamlit dashboard that is the sole path to execution.
+
+**The assistant can draft an order. It cannot place one.** Drafts go to a local
+queue; sending requires a broker preview and your click in the dashboard. That
+path does not exist on the tool side, so no prompt can reach it.
 
 ---
 
-## Features
-* **Comprehensive AI Market Brain:** Live OHLCV, 50+ technical indicators, short interest, unusual options activity, news, earnings, insider trades, and SEC filings.
-* **One-Call Company Profile:** `get_company_profile` fetches the business, filed financials, SEC filings, insider activity, short interest, price and news **concurrently** (2.3x faster than sequential), each section labelled with how much weight its numbers carry.
-* **Risk Tooling:** `calculate_position_size` sizes trades from an account risk budget and an ATR-aware stop; `get_portfolio_risk` reports concentration, portfolio volatility, beta and correlated clusters; `get_options_analytics` adds IV rank, implied move, skew and Black-Scholes greeks.
-* **Human-In-The-Loop Execution Desk:** Claude **cannot** execute trades. Suggestions are written to a local draft file, and submission requires a successful broker preview followed by your manual approval in the dashboard.
-* **Pre-Trade Firewall:** Inspects live account inventory to block naked shorts and verifies per-currency buying power before a draft is accepted. An order that cannot be priced is blocked, never waved through.
-* **Streamlit Visual Analytics:** Plotly charts, quantitative backtesting, live portfolio analytics, and adaptive signal breakdown.
-* **Background Alert Manager:** Native Windows notifications when price or volatility alerts are met, stamped with the bar that triggered them.
+![Charts tab](docs/img/charts.png)
+
+*Candles with overlays, a volume pane and the forecast cone. Weekends and market
+holidays are collapsed, so there are no blank stretches.*
+
+---
+
+## What it does
+
+| | |
+|---|---|
+| **Prices** | Live OHLCV from Webull with a Yahoo fallback, behind an integrity gate that checks bar ordering, staleness in trading sessions, and OHLC sanity. Every price says which bar it came from and how old that bar is. |
+| **Analysis** | 96 pinned technical indicators, volume profile with POC and value area, Black-Scholes greeks and implied volatility, backtesting, position sizing from an ATR-aware stop, portfolio concentration and correlation. |
+| **Filings** | SEC EDGAR parsed rather than forwarded: Form 4 with transaction codes and 10b5-1 status, 8-K by item code, 13F, 13D/G, 144, NPORT, inline XBRL. One Form 4 is ~6,600 tokens of XML; the tool returns the answer instead. |
+| **Macro** | Economic calendar from BLS, the Fed (FOMC, dot-plot meetings flagged) and BEA (PCE, GDP), each row carrying the print that happened or the prior one, never a forecast. |
+| **Execution** | Draft, broker preview, human approval. Pre-trade checks block naked shorts, verify per-currency buying power, and refuse orders the broker's own rules would reject. |
+
+---
+
+**[Installation guide →](INSTALL.md)**
+
+---
+
+## Works with any MCP client
+
+Nothing in the server is specific to one assistant. It speaks MCP over stdio, so
+anything that speaks MCP can run it. The installer registers it with every
+client it finds on the machine; to wire one up by hand, add this to that
+client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "finance": {
+      "command": "uv",
+      "args": ["run", "--with", "pandas", "--with", "numpy", "--with", "fastmcp",
+               "--with", "yfinance", "--with", "tabulate", "--with", "lxml",
+               "--with", "html5lib", "--with", "webull-openapi-python-sdk",
+               "C:/path/to/finance_mcp.py"]
+    }
+  }
+}
+```
+
+| Client | Where that goes |
+|---|---|
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Code | `claude mcp add finance -- uv run ... finance_mcp.py` |
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code | `.vscode/mcp.json`, or the user-level MCP settings |
+| Anything else | Whatever that client calls its MCP config; the JSON above is the standard shape |
+
+The dashboard is a separate Streamlit app and does not care which client you
+use. Order approval happens there regardless.
 
 ---
 
@@ -206,12 +260,15 @@ your account. **`check_connection`** confirms the Webull session specifically.
 
 ---
 
-## Usage Architecture
+## Using it
 
-### 1. The Brain (Claude Desktop)
-Restart your Claude Desktop application. Ask Claude to analyze a ticker (e.g., *"Run a comprehensive scan on NVDA and draft a trade if the MACD is crossing over"*). Claude will dynamically ingest the live Webull data and reason through the logic.
+### From the assistant
+Restart your MCP client so it picks up the server, then ask for what you want:
+*"How does NVDA look on the daily?"*, *"What's due on the economic calendar this
+week?"*, *"Draft a limit buy for 10 AAPL at 300."* The last one writes a draft to
+the queue and stops there.
 
-### 2. The Command Center (Streamlit)
+### In the dashboard
 Double-click the **Finance MCP Dashboard** shortcut, or run
 `streamlit run dashboard/app.py` from the repo root. Nine tabs:
 
@@ -226,6 +283,17 @@ Double-click the **Finance MCP Dashboard** shortcut, or run
 | **Events** | The economic calendar (BLS, FOMC, BEA) with each row's actual or prior print, SEC filings for your watchlist, and a "what changed since" diff over filings and price moves. |
 | **Alerts** | Price, RSI and MACD-cross alerts; the manager fires Windows notifications and stamps which bar triggered. |
 | **Data** | Every computed indicator column for the loaded window, newest first. |
+
+![Events tab](docs/img/events.png)
+
+*The Events tab: the economic calendar with each row's actual or prior print,
+earnings dates flagged as confirmed, disputed or estimated, and watchlist
+filings with a hover preview.*
+
+![Execution tab](docs/img/execution.png)
+
+*The Execution tab — the only path to the market. Preview with the broker, then
+approve.*
 
 **DISPLAY** in the top right switches the visual theme (**Terminal**, the
 default; **Research**; **Slate**), the chart overlay palette and row density.

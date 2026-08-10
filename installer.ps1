@@ -16,30 +16,16 @@ if (-not $uvPath) {
     Write-Host "  -> UV is already installed." -ForegroundColor Green
 }
 
-# 2. Inject into Claude Desktop Config
-Write-Host "[2/5] Configuring Claude Desktop MCP Integration..." -ForegroundColor Yellow
-$claudeConfigDir = "$env:APPDATA\Claude"
-$claudeConfigFile = "$claudeConfigDir\claude_desktop_config.json"
+# 2. Register the server with every MCP client on this machine
+Write-Host "[2/5] Registering with MCP clients..." -ForegroundColor Yellow
 
-if (-not (Test-Path $claudeConfigDir)) {
-    New-Item -ItemType Directory -Path $claudeConfigDir -Force | Out-Null
-}
-
-$config = @{ mcpServers = @{} }
-if (Test-Path $claudeConfigFile) {
-    try {
-        $raw = Get-Content $claudeConfigFile -Raw
-        if ($raw.Trim()) {
-            $config = $raw | ConvertFrom-Json
-        }
-    } catch {
-        Write-Host "  -> Warning: Could not parse existing Claude config. Creating new structure." -ForegroundColor Yellow
-    }
-}
-
-if (-not $config.mcpServers) {
-    $config | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value @{} -Force
-}
+# Nothing about this server is Claude-specific. It speaks MCP over stdio, so any
+# client that speaks MCP can run it -- Claude Desktop, Claude Code, Cursor,
+# Windsurf, VS Code, Codex. Only this registration step ever knew about Claude,
+# which is why it is the only thing that had to change.
+#
+# Config files are only touched where the client is already installed. Writing a
+# config for an app someone does not have leaves litter they will never find.
 
 $scriptDir = $PSScriptRoot -replace '\\','/'
 $financeConfig = [ordered]@{
@@ -58,14 +44,80 @@ $financeConfig = [ordered]@{
     )
 }
 
-# Remove the pre-rename key so the old entry does not linger alongside the new one.
-if ($config.mcpServers.PSObject.Properties.Name -contains "webull") {
-    $config.mcpServers.PSObject.Properties.Remove("webull")
-    Write-Host "  -> Removed legacy 'webull' server entry." -ForegroundColor DarkGray
+# name -> config path. Each entry keeps an mcpServers object at the top level.
+$targets = [ordered]@{
+    "Claude Desktop" = "$env:APPDATA\Claude\claude_desktop_config.json"
+    "Cursor"         = "$env:USERPROFILE\.cursor\mcp.json"
+    "Windsurf"       = "$env:USERPROFILE\.codeium\windsurf\mcp_config.json"
 }
-$config.mcpServers | Add-Member -MemberType NoteProperty -Name "finance" -Value $financeConfig -Force
-$config | ConvertTo-Json -Depth 100 | Set-Content $claudeConfigFile -Encoding UTF8
-Write-Host "  -> Successfully configured Claude Desktop config: $claudeConfigFile" -ForegroundColor Green
+
+function Register-McpServer {
+    param([string]$Name, [string]$Path, $ServerConfig)
+
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path $dir)) {
+        Write-Host "  -> $Name not installed; skipped." -ForegroundColor DarkGray
+        return $false
+    }
+
+    $config = [pscustomobject]@{ mcpServers = [pscustomobject]@{} }
+    if (Test-Path $Path) {
+        try {
+            $raw = Get-Content $Path -Raw
+            if ($raw.Trim()) { $config = $raw | ConvertFrom-Json }
+        } catch {
+            # Refuse rather than overwrite. Someone's other MCP servers live in
+            # this file, and replacing it because we could not parse it would
+            # silently remove them.
+            Write-Host "  -> $Name config exists but could not be parsed; left untouched." -ForegroundColor Yellow
+            Write-Host "     Add the server by hand, or fix the JSON and re-run." -ForegroundColor DarkGray
+            return $false
+        }
+    }
+
+    if (-not $config.mcpServers) {
+        $config | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value ([pscustomobject]@{}) -Force
+    }
+    # The pre-rename key, so the old entry does not linger beside the new one.
+    if ($config.mcpServers.PSObject.Properties.Name -contains "webull") {
+        $config.mcpServers.PSObject.Properties.Remove("webull")
+    }
+    $config.mcpServers | Add-Member -MemberType NoteProperty -Name "finance" -Value $ServerConfig -Force
+
+    $backup = "$Path.bak"
+    if (Test-Path $Path) { Copy-Item $Path $backup -Force }
+    $config | ConvertTo-Json -Depth 100 | Set-Content $Path -Encoding UTF8
+    Write-Host "  -> $Name configured: $Path" -ForegroundColor Green
+    if (Test-Path $backup) { Write-Host "     (previous config saved as $backup)" -ForegroundColor DarkGray }
+    return $true
+}
+
+$registered = 0
+foreach ($name in $targets.Keys) {
+    if (Register-McpServer -Name $name -Path $targets[$name] -ServerConfig $financeConfig) {
+        $registered++
+    }
+}
+
+# Claude Code keeps its own registry and owns the format, so ask it rather than
+# writing the file ourselves.
+if (Get-Command claude -ErrorAction SilentlyContinue) {
+    try {
+        $argList = ($financeConfig.args | ForEach-Object { $_ }) -join ' '
+        claude mcp add finance -- uv $argList 2>&1 | Out-Null
+        Write-Host "  -> Claude Code configured via 'claude mcp add'." -ForegroundColor Green
+        $registered++
+    } catch {
+        Write-Host "  -> Claude Code found but registration failed; run 'claude mcp add' by hand." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  -> Claude Code CLI not found; skipped." -ForegroundColor DarkGray
+}
+
+if ($registered -eq 0) {
+    Write-Host "  -> No MCP client detected. The server still works: point any" -ForegroundColor Yellow
+    Write-Host "     MCP client at $scriptDir/finance_mcp.py (see README)." -ForegroundColor Yellow
+}
 
 # 2.5 Generate .env template if missing
 $envFile = Join-Path $PSScriptRoot ".env"

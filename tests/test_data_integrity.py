@@ -719,3 +719,35 @@ def test_a_disk_hit_still_passes_through_the_integrity_gate():
     body = src[src.index("disk = barcache.load("):]
     body = body[:body.index("errors = []")]
     assert "_validate_frame(" in body, "a disk hit must be revalidated before it is returned"
+
+
+# =====================================================================
+# stdio transport purity
+# =====================================================================
+
+def test_nothing_the_server_imports_writes_to_stdout():
+    """
+    The MCP server speaks JSON-RPC over stdio. One stray print to stdout
+    corrupts the stream for every client connected to it -- and the failure
+    looks like a broken tool, not like a log line in the wrong place.
+    """
+    import ast
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for name in ("webull_client.py", "broker.py", "alert_manager.py", "econ_calendar.py",
+                 "edgar_forms.py", "earnings.py", "barcache.py", "indicators.py",
+                 "options_math.py", "volume_profile.py", "central_banks.py",
+                 "normalization.py", "market_calendar.py", "live_consent.py"):
+        path = os.path.join(root, "dashboard", name)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "print"):
+                continue
+            targets = [k.arg for k in node.keywords]
+            if "file" not in targets:
+                offenders.append(f"{name}:{node.lineno}")
+    assert not offenders, (
+        "print() without file=sys.stderr writes to stdout and breaks the "
+        f"JSON-RPC stream: {offenders}")

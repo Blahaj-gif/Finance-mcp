@@ -874,3 +874,44 @@ def test_the_batch_launcher_checks_the_installer_is_present():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     bat = open(os.path.join(root, "install.bat"), encoding="utf-8").read()
     assert "if not exist" in bat.lower()
+
+
+def test_the_docs_reference_images_that_exist():
+    """A broken image in a README is the first thing a visitor sees."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    missing = []
+    for doc in ("README.md", "INSTALL.md"):
+        text = open(os.path.join(root, doc), encoding="utf-8").read()
+        for path in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text):
+            if path.startswith("http"):
+                continue
+            if not os.path.exists(os.path.join(root, path)):
+                missing.append(f"{doc} -> {path}")
+    assert not missing, f"referenced images do not exist: {missing}"
+
+
+def test_the_docs_do_not_link_to_missing_local_files():
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    missing = []
+    for doc in ("README.md", "INSTALL.md"):
+        text = open(os.path.join(root, doc), encoding="utf-8").read()
+        for target in re.findall(r"(?<!!)\[[^\]]+\]\(([^)#]+)(?:#[^)]*)?\)", text):
+            if target.startswith(("http", "mailto:")):
+                continue
+            if not os.path.exists(os.path.join(root, target)):
+                missing.append(f"{doc} -> {target}")
+    assert not missing, f"broken local links: {missing}"
+
+
+def test_the_readme_states_the_server_is_client_agnostic():
+    """
+    Nothing in the server is Claude-specific; only the installer ever was. If
+    the README says otherwise, users of other MCP clients bounce off it.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    text = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    assert "Works with any MCP client" in text
+    for client in ("Claude Code", "Cursor", "Windsurf", "VS Code"):
+        assert client in text, f"{client} missing from the client table"

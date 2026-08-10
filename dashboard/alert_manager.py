@@ -315,8 +315,15 @@ def start_manager_once():
 
 
 def run_manager_loop():
-    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting Finance MCP Alert Manager...")
-    print(f"Polling Interval: {CHECK_INTERVAL_SECONDS}s | Alert Cooldown: {ALERT_COOLDOWN_SECONDS // 60}m")
+    # stderr, not stdout. The MCP server speaks JSON-RPC over stdio, and this
+    # module is imported into that process for set_alert -- one stray line on
+    # stdout corrupts the stream for every client, not just ours. Nothing here
+    # starts the loop in the server today; this is so that staying true does
+    # not depend on nobody ever doing it.
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting Finance MCP Alert Manager...",
+          file=sys.stderr)
+    print(f"Polling Interval: {CHECK_INTERVAL_SECONDS}s | Alert Cooldown: "
+          f"{ALERT_COOLDOWN_SECONDS // 60}m", file=sys.stderr)
     MANAGER_STATE["running"] = True
 
     try:
