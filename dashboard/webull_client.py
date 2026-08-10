@@ -1106,8 +1106,16 @@ def preview_order(trade_client, account_id: str, order: dict) -> dict:
     """
     Ask the broker to price and validate an order without placing it.
 
-    Non-binding. This is the gate every submission passes through: if the broker
-    will not preview it, we do not send it.
+    Non-binding, and a *weaker* check than it looks. Verified live: a BUY of 1
+    ZETA at $0.01 previewed cleanly, returning a $0.01 cost and a $0.00 fee, and
+    was then refused at submission with OPENAPI_ORDER_LMT_PRICE_QTY_STEP_1000 --
+    a sub-$0.10 limit requires quantity above 1000. Preview prices an order; it
+    does not run every rule the placement endpoint runs.
+
+    So "the broker previewed it" means the order is priceable, not that it is
+    acceptable. It remains the right gate -- an order the broker will not price
+    should never be sent -- but a submission can still be refused after it, and
+    the UI has to be able to say so rather than treating preview as a promise.
     """
     return unwrap(call_webull(trade_client.order_v3.preview_order, account_id, [order]))
 
@@ -1115,6 +1123,23 @@ def preview_order(trade_client, account_id: str, order: dict) -> dict:
 def place_order(trade_client, account_id: str, order: dict) -> dict:
     """Submit an order for execution. Callers must preview first."""
     return unwrap(call_webull(trade_client.order_v3.place_order, account_id, [order]))
+
+
+def cancel_order(trade_client, account_id: str, client_order_id: str) -> dict:
+    """
+    Cancel a working order by the client id we generated for it.
+
+    Uses order_v3, like preview and place. The MCP tool used order_v2, whose own
+    docstring says it covers "Webull HK and Webull US" only -- so every cancel
+    from a TH account returned 404 SDK.UnknownServerError. The emergency stop
+    had never worked in this region, which only surfaced when a live test order
+    needed cancelling. v3 lists TH explicitly.
+
+    Takes the *client* order id (`DRFT_9a32c8d5`), not the broker's `order_id`
+    (`037VACVVDO80O0KCJR84000000`); passing the latter also 404s.
+    """
+    return unwrap(call_webull(trade_client.order_v3.cancel_order,
+                              account_id, client_order_id))
 
 
 def get_provenance(symbol: str, interval: str = "D") -> dict:

@@ -1423,7 +1423,7 @@ def get_open_orders() -> str:
         trade_client = TradeClient(api_client)
         # get_order_open is account-scoped: calling it bare raised TypeError.
         account_id = webull_client.get_primary_account_id(trade_client)
-        res = webull_client.unwrap(webull_client.call_webull(trade_client.order_v2.get_order_open, account_id))
+        res = webull_client.unwrap(webull_client.call_webull(trade_client.order_v3.get_order_open, account_id))
 
         if not res:
             return f"### Open Orders\n\nNo working orders in account {account_id}."
@@ -1435,22 +1435,21 @@ def get_open_orders() -> str:
 def cancel_order(order_id: str) -> str:
     """
     Cancels a pending or active order on the Webull account immediately.
+
+    Args:
+        order_id: The order's **client_order_id** — the id this server generated
+            when the order was drafted (it looks like `DRFT_9a32c8d5`), NOT the
+            broker's own `order_id`. `get_open_orders` shows both; the cancel
+            endpoint only accepts the client one.
     """
-    from webull.core.client import ApiClient
     from webull.trade.trade_client import TradeClient
-    import logging
-    import sys
-    import os
-    
+
     try:
-        api_client = webull_client.get_api_client()
-
-        trade_client = TradeClient(api_client)
-        # cancel_order(account_id, client_order_id) -- both arguments required.
+        trade_client = TradeClient(webull_client.get_api_client())
         account_id = webull_client.get_primary_account_id(trade_client)
-        res = webull_client.unwrap(webull_client.call_webull(trade_client.order_v2.cancel_order, account_id, order_id))
-
-        return f"Cancellation request sent for Order ID {order_id} (account {account_id}). Response:\n```json\n{res}\n```"
+        res = webull_client.cancel_order(trade_client, account_id, order_id)
+        return (f"Cancellation request sent for client_order_id {order_id} "
+                f"(account {account_id}). Response:\n```json\n{res}\n```")
     except Exception as e:
         raise ToolError(f"Error cancelling order {order_id}: {e}") from e
 

@@ -273,3 +273,58 @@ def test_provenance_never_raises(monkeypatch):
     p = wc.get_provenance("AAA")
     assert p["source"] == "UNAVAILABLE"
     assert "feed down" in p["error"]
+
+
+# =====================================================================
+# The broker API version actually reaches this region
+# =====================================================================
+# The SDK ships three generations of the order API and they do not cover the
+# same regions. order_v2.cancel_order documents "Webull HK and Webull US" only,
+# and returned 404 SDK.UnknownServerError from a TH account -- so the emergency
+# stop had never worked here. Only order_v3 lists TH, JP, SG, AU, MY, UK, BR,
+# MX, ZA and EU alongside HK and US.
+
+def _repo(*parts):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, *parts)
+
+
+def test_every_order_call_uses_the_generation_that_covers_this_region():
+    import re
+    offenders = []
+    for path in (_repo("finance_mcp.py"), _repo("dashboard", "webull_client.py"),
+                 _repo("dashboard", "app.py")):
+        for i, line in enumerate(open(path, encoding="utf-8"), 1):
+            # Comments explaining *why* v2 is wrong are the point, not a breach.
+            if line.lstrip().startswith(("#", "*")) or '"""' in line:
+                continue
+            if re.search(r"\border_v[12]\s*\.", line):
+                offenders.append(f"{os.path.basename(path)}:{i}: {line.strip()[:90]}")
+    assert not offenders, (
+        "order_v1/order_v2 do not cover every region the client supports; "
+        f"use order_v3: {offenders}")
+
+
+def test_cancel_takes_the_client_order_id_not_the_broker_order_id():
+    """
+    Webull's cancel endpoint keys on the id we generated (DRFT_9a32c8d5), not
+    the broker's own order_id (037VACVVDO80O0KCJR84000000). get_open_orders
+    shows both, and passing the broker one 404s -- so the tool has to say which.
+    """
+    src = open(_repo("finance_mcp.py"), encoding="utf-8").read()
+    body = src[src.index("def cancel_order("):]
+    body = body[:body.index("\n@mcp.tool()")] if "\n@mcp.tool()" in body else body
+    assert "client_order_id" in body, "the tool must name which id it needs"
+    assert "NOT the" in body or "not the" in body, "and must say which id it is not"
+
+
+def test_preview_is_documented_as_weaker_than_placement():
+    """
+    Verified live: BUY 1 ZETA @ $0.01 previewed cleanly at $0.01 cost, then was
+    refused at submission for a quantity-step rule. Anything that presents
+    preview as a guarantee of acceptance is overstating it.
+    """
+    src = open(_repo("dashboard", "webull_client.py"), encoding="utf-8").read()
+    body = src[src.index("def preview_order("):]
+    body = body[:body.index("def place_order(")]
+    assert "does not run every rule" in body or "weaker" in body
