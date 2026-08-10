@@ -525,7 +525,12 @@ def headline(key, unit, obs, prev_value):
             "index_level": value}
 
 
-def attach_release_values(entries, today=None):
+def release_series_for(entries):
+    """Which BLS series the releases in this window actually publish."""
+    return sorted({k for e in entries for k in RELEASE_SERIES.get(e.get("slug"), [])})
+
+
+def attach_release_values(entries, today=None, data=None):
     """
     Add the published numbers to schedule rows, in place. Returns (entries, warnings).
 
@@ -550,7 +555,7 @@ def attach_release_values(entries, today=None):
     today = today or datetime.date.today()
     warnings = []
 
-    wanted = sorted({k for e in entries for k in RELEASE_SERIES.get(e.get("slug"), [])})
+    wanted = release_series_for(entries)
     if not wanted:
         for e in entries:
             e.setdefault("values", [])
@@ -559,14 +564,29 @@ def attach_release_values(entries, today=None):
 
     # One API call for every series across every row: the unregistered quota is
     # 25 queries a *day*, so a per-row fetch would exhaust it on one calendar.
-    try:
-        data = fetch_bls_series(wanted, start_year=min(e["date"].year for e in entries) - 1)
-    except Exception as exc:
-        warnings.append(f"Release values unavailable: {str(exc)[:120]}")
-        for e in entries:
-            e.setdefault("values", [])
-            e.setdefault("value_status", "unavailable")
-        return entries, warnings
+    # `data` lets a caller that already needs some of these series hand its own
+    # result in -- get_economic_calendar was spending two of the day's queries
+    # per call, one here and one for its "latest prints" table, because the two
+    # key sets differ and so miss each other's cache entry.
+    if data is None:
+        try:
+            data = fetch_bls_series(wanted, start_year=min(e["date"].year for e in entries) - 1)
+        except Exception as exc:
+            warnings.append(f"Release values unavailable: {str(exc)[:120]}")
+            for e in entries:
+                e.setdefault("values", [])
+                e.setdefault("value_status", "unavailable")
+            return entries, warnings
+
+    missing = [k for k in wanted if k not in data]
+    if missing:
+        warnings.append("No data supplied for: " + ", ".join(missing))
+        wanted = [k for k in wanted if k in data]
+        if not wanted:
+            for e in entries:
+                e.setdefault("values", [])
+                e.setdefault("value_status", "unavailable")
+            return entries, warnings
 
     index = {}      # key -> {(year, month): observation}
     newest = {}     # key -> newest observation
@@ -581,7 +601,10 @@ def attach_release_values(entries, today=None):
         return got["value"] if got else None
 
     for entry in entries:
-        keys = RELEASE_SERIES.get(entry.get("slug"), [])
+        # Intersect with what we actually have: a caller-supplied `data` may
+        # legitimately omit a series, and indexing it blindly would take the
+        # whole calendar down over one absent row.
+        keys = [k for k in RELEASE_SERIES.get(entry.get("slug"), []) if k in data]
         entry["values"] = []
         if not keys:
             entry["value_status"] = "unmapped"
@@ -896,7 +919,7 @@ CALENDAR_SOURCES = ("bls", "fomc", "bea")
 
 
 def economic_calendar(days_ahead=30, days_back=7, sources=None, with_values=True,
-                      today=None):
+                      today=None, values=None):
     """
     Every tracked release inside the window, from every source, chronologically.
 
@@ -912,25 +935,44 @@ def economic_calendar(days_ahead=30, days_back=7, sources=None, with_values=True
 
     entries, warnings = [], []
 
-    if "bls" in wanted:
-        found, failed = upcoming_releases(days_ahead=days_ahead, days_back=days_back)
+    # Three different hosts, so the per-host limiters do not contend with each
+    # other and the waiting overlaps instead of stacking. Sequentially this was
+    # bls.gov (~1.1s) + federalreserve.gov (~0.2s) + bea.gov (~1.6s); the
+    # limiters stay authoritative, concurrency only removes the dead time.
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        if "bls" in wanted:
+            jobs["bls"] = pool.submit(upcoming_releases, days_ahead=days_ahead,
+                                      days_back=days_back)
+        if "fomc" in wanted:
+            jobs["fomc"] = pool.submit(fetch_fomc_meetings)
+        if "bea" in wanted:
+            jobs["bea"] = pool.submit(fetch_bea_schedule)
+
+    if "bls" in jobs:
+        try:
+            found, failed = jobs["bls"].result()
+        except Exception as exc:
+            found, failed = [], [f"schedules unavailable: {str(exc)[:120]}"]
         for e in found:
             e.setdefault("source", "BLS")
         if with_values and found:
-            found, value_warnings = attach_release_values(found, today=today)
+            found, value_warnings = attach_release_values(found, today=today, data=values)
             warnings.extend(value_warnings)
         entries.extend(found)
         warnings.extend(f"BLS {f}" for f in failed)
 
-    if "fomc" in wanted:
+    if "fomc" in jobs:
         try:
-            entries.extend(m for m in fetch_fomc_meetings() if lo <= m["date"] <= hi)
+            entries.extend(m for m in jobs["fomc"].result() if lo <= m["date"] <= hi)
         except Exception as exc:
             warnings.append(f"FOMC calendar unavailable: {str(exc)[:120]}")
 
-    if "bea" in wanted:
+    if "bea" in jobs:
         try:
-            found, skipped = fetch_bea_schedule()
+            found, skipped = jobs["bea"].result()
             entries.extend(e for e in found if lo <= e["date"] <= hi)
         except Exception as exc:
             warnings.append(f"BEA schedule unavailable: {str(exc)[:120]}")

@@ -747,3 +747,15 @@ def test_a_10q_is_numbered_differently_from_a_10k():
 def test_an_unknown_section_passes_through_rather_than_guessing():
     """Substituting a nearby section would answer a question nobody asked."""
     assert ef.resolve_section("Nonsense", "10-K") == "NONSENSE"
+
+
+@pytest.mark.parametrize("items", ["2.02,9.01", "2.02;9.01", "2.02 | 9.01",
+                                   "Item 2.02,Item 9.01", " 2.02 , 9.01 ", "2.02."])
+def test_item_codes_survive_the_separators_edgar_actually_uses(items):
+    """
+    The submissions JSON uses commas; the full-text index uses semicolons and
+    sometimes an "Item " prefix. Splitting on comma alone turned "2.02;9.01"
+    into one unrecognised token and silently lost both codes, falling back to
+    the generic "Material event".
+    """
+    assert "Results of operations" in ef.describe_form("8-K", items)

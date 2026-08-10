@@ -118,7 +118,7 @@ def describe_form(form: str, items: str = "") -> str:
         # code as "99.99 - Other", which is less informative than the form's
         # own meaning and would otherwise win over it.
         known = [f"{c} — {EIGHT_K_ITEMS[c]}"
-                 for c in (p.strip() for p in items.split(",")) if c in EIGHT_K_ITEMS]
+                 for c in _item_codes(items) if c in EIGHT_K_ITEMS]
         if known:
             return "; ".join(known)
 
@@ -1135,12 +1135,24 @@ def extract_headline_figures(text: str) -> dict:
     return found
 
 
-def describe_8k_items(items: str) -> list:
-    """Turn an 8-K's comma-separated item codes into their meanings."""
+def _item_codes(items: str) -> list:
+    """
+    Split an items field into bare codes.
+
+    EDGAR's submissions JSON uses commas, but the same field arrives
+    semicolon-separated from the full-text index and sometimes carries an
+    "Item " prefix. Splitting on comma alone turned "2.02;9.01" into one
+    unrecognised token and lost both codes silently.
+    """
+    parts = re.split(r"[,;|]", items or "")
     out = []
-    for raw in (items or "").split(","):
-        code = raw.strip()
-        if not code:
-            continue
-        out.append(f"{code} — {EIGHT_K_ITEMS.get(code, 'Other')}")
+    for raw in parts:
+        code = re.sub(r"^\s*items?\s+", "", raw.strip(), flags=re.I).strip().rstrip(".")
+        if code:
+            out.append(code)
     return out
+
+
+def describe_8k_items(items: str) -> list:
+    """Turn an 8-K's item codes into their meanings."""
+    return [f"{code} — {EIGHT_K_ITEMS.get(code, 'Other')}" for code in _item_codes(items)]

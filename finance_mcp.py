@@ -620,6 +620,8 @@ def get_multi_timeframe(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. AAPL, KBANK).
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     tf_weights = {"D": 0.5, "H1": 0.3, "M15": 0.2}
     rows = []
     total_confluence = 0.0
@@ -627,9 +629,19 @@ def get_multi_timeframe(symbol: str) -> str:
     sources = set()
     ages = []
 
+    # Three independent fetches whose round trips dominate. Sequentially they
+    # cost the sum (~2.8s); overlapped they cost the slowest (~1.0s). The
+    # process-wide 0.25s pacer still governs the request rate, so this removes
+    # dead waiting rather than raising pressure on the broker beyond its cap.
+    # Order is preserved below by iterating tf_weights, not completion order --
+    # the weights are positional in the report and must not shuffle.
+    with ThreadPoolExecutor(max_workers=len(tf_weights)) as pool:
+        fetched = {tf: pool.submit(webull_client.fetch_data, symbol, tf, 250)
+                   for tf in tf_weights}
+
     for tf, weight in tf_weights.items():
         try:
-            df, src = webull_client.fetch_data(symbol, tf, 250)
+            df, src = fetched[tf].result()
             ages.append(webull_client.bar_age(df, tf))
             sources.add(webull_client.base_source(src))
             res_df = indicators.calculate_all_indicators(df)
@@ -2915,8 +2927,27 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
                 f"Available: {', '.join(econ_calendar.CALENDAR_SOURCES)}.")
 
         today = _dt.date.today()
+
+        # One BLS data call, not two. The row readings and the "latest prints"
+        # table below want overlapping but different series, so each used to
+        # fetch its own set -- two different cache keys, two of the day's
+        # queries per calendar. On the unregistered tier that is 25/day, so it
+        # halved the usable number of calendar calls to twelve.
+        headline_keys = ["cpi", "core_cpi", "unemployment", "payrolls", "ppi"]
+        values = None
+        if "bls" in wanted:
+            try:
+                values = econ_calendar.fetch_bls_series(
+                    sorted(set(headline_keys) | set(econ_calendar.RELEASE_SERIES["cpi"])
+                           | set(econ_calendar.RELEASE_SERIES["ppi"])
+                           | set(econ_calendar.RELEASE_SERIES["empsit"])))
+            except Exception as e:
+                values = None
+                bls_data_error = str(e)[:120]
+
         upcoming, failed = econ_calendar.economic_calendar(
-            days_ahead=days_ahead, days_back=days_back, sources=wanted, today=today)
+            days_ahead=days_ahead, days_back=days_back, sources=wanted, today=today,
+            values=values)
 
         out = f"### US Economic Calendar — as of {today} ({days_back}d back, {days_ahead}d ahead)\n\n"
 
@@ -2946,16 +2977,16 @@ def get_economic_calendar(days_ahead: int = 30, days_back: int = 7,
         else:
             out += "*No scheduled releases in this window.*\n"
 
+        # Reuses the single fetch above. Isolated from the schedule either way:
+        # a 503 on the data API must not discard a calendar that was already
+        # fetched successfully -- one flaky call taking down an unrelated answer.
+        data = None
         if include_latest_data:
-            # Isolated from the schedule above. A transient 503 on the data API
-            # used to discard a calendar that had already been fetched
-            # successfully -- one flaky call taking down an unrelated answer.
-            try:
-                data = econ_calendar.fetch_bls_series(
-                    ["cpi", "core_cpi", "unemployment", "payrolls", "ppi"])
-            except Exception as e:
-                data = None
-                out += f"\n*Latest prints unavailable: {str(e)[:120]}*\n"
+            if values is not None:
+                data = {k: v for k, v in values.items() if k in headline_keys}
+            else:
+                out += (f"\n*Latest prints unavailable: "
+                        f"{locals().get('bls_data_error', 'BLS not queried')}*\n")
 
         if include_latest_data and data:
             out += "\n**Latest prints**\n\n"

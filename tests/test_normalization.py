@@ -118,3 +118,33 @@ def test_normalize_record_applies_the_right_parser_per_field():
     assert out["name"] == "Société Générale"
     assert out["value"] == pytest.approx(1234.56)
     assert out["other"] == "untouched"
+
+
+# =====================================================================
+# Scientific notation
+# =====================================================================
+
+@pytest.mark.parametrize("text,expected", [
+    ("1.2e3", 1200.0),
+    ("1.2E9", 1.2e9),
+    ("-3.5e-2", -0.035),
+    ("(1.5e3)", -1500.0),
+    ("2.5e0", 2.5),
+])
+def test_scientific_notation_keeps_its_exponent(text, expected):
+    """
+    The character strip that removes currency symbols also removed the "e", so
+    "1.2e3" came back as 1.23 -- not a refusal, a confidently wrong number three
+    orders of magnitude out. XBRL and JSON feeds both emit this form.
+    """
+    assert nz.parse_number(text) == pytest.approx(expected)
+
+
+def test_an_overflowing_exponent_is_refused_not_returned_as_infinity():
+    assert nz.parse_number("1e400") is None
+
+
+def test_ordinary_numbers_are_unaffected_by_the_exponent_path():
+    assert nz.parse_number("1,234.56") == pytest.approx(1234.56)
+    assert nz.parse_number("(1,234.56)") == pytest.approx(-1234.56)
+    assert nz.parse_number("1.234,56") == pytest.approx(1234.56)

@@ -146,6 +146,20 @@ def parse_number(value, locale_hint: str = None):
     if s.startswith("(") and s.endswith(")"):        # (1,234) == -1234
         negative, s = True, s[1:-1]
 
+    # Scientific notation, handled before the character strip below removes the
+    # "e". Without this, "1.2e3" lost its exponent and came back as 1.23 -- not
+    # a refusal, a confidently wrong number three orders of magnitude out. XBRL
+    # and JSON feeds both emit this form for large figures.
+    sci = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)[eE]([+-]?\d+)\s*", s)
+    if sci:
+        try:
+            out = float(sci.group(1) + "e" + sci.group(2))
+        except (ValueError, OverflowError):
+            return None
+        if out != out or out in (float("inf"), float("-inf")):
+            return None
+        return -out if negative else out
+
     s = re.sub(r"[^\d,.\-+−\s'  ]", "", s)   # drop currency/percent
     s = s.replace("−", "-")                             # unicode minus
     s = re.sub(r"[\s  ']", "", s)                  # space/apostrophe grouping
