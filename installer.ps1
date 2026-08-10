@@ -77,11 +77,16 @@ WEBULL_APP_KEY=YOUR_WEBULL_APP_KEY_HERE
 WEBULL_APP_SECRET=YOUR_WEBULL_APP_SECRET_HERE
 WEBULL_REGION_ID=th
 
-# paper = Webull's sandbox. An approved order goes to the sandbox and spends
-# nothing. Change to prod when you have rehearsed the approval flow and want
-# orders to reach the real account and real money. A fresh install does not
-# point at your live account by default.
-WEBULL_ENVIRONMENT=paper
+# prod = your real account. This is the default on purpose: the point of the
+# tool is your actual portfolio and actual quotes, and reads are safe -- no
+# order can be sent without you approving it in the dashboard.
+#
+# paper does NOT mean "live data, simulated orders". It repoints the entire
+# client at Webull's sandbox, quotes included, and the sandbox is a separate
+# deployment with its own app registry -- so production keys return 401 there
+# and nothing works at all. Use paper only with sandbox credentials, to
+# rehearse the approval flow.
+WEBULL_ENVIRONMENT=prod
 
 # Webull's sandbox is a SEPARATE deployment with its own app registry, so a
 # production key authenticates against it as 401. Register a sandbox app and put

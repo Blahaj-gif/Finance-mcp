@@ -40,3 +40,6 @@ dashboard/portfolio_history.json
 
 # Shared on-disk bar cache. Derived data, regenerated on demand.
 conf/barcache/
+
+# One-time live-trading acknowledgement, per account. Local state.
+dashboard/live_consent.json

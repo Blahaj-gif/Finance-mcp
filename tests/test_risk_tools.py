@@ -351,3 +351,111 @@ def test_the_broker_module_does_not_reimplement_the_signed_client():
     src = open(_repo("dashboard", "broker.py"), encoding="utf-8").read()
     assert "ApiClient(" not in src
     assert "from dashboard.webull_client import" in src or "from webull_client import" in src
+
+
+# =====================================================================
+# The one-time live acknowledgement
+# =====================================================================
+# Deliberately narrow: reads are never gated, because real quotes and a real
+# portfolio are the reason to run this tool. The gate sits on the only action
+# that spends money.
+
+def test_consent_is_not_granted_until_it_is(tmp_path):
+    from dashboard import live_consent as lc
+    path = str(tmp_path / "c.json")
+    assert lc.has_consented("ACC1", path) is False
+    lc.grant("ACC1", "detail", path)
+    assert lc.has_consented("ACC1", path) is True
+
+
+def test_consent_is_per_account(tmp_path):
+    """A second account is a different pile of money."""
+    from dashboard import live_consent as lc
+    path = str(tmp_path / "c.json")
+    lc.grant("ACC1", "", path)
+    assert lc.has_consented("ACC1", path)
+    assert not lc.has_consented("ACC2", path)
+
+
+def test_an_unreadable_record_fails_towards_asking_again(tmp_path):
+    """
+    The file records that consent was given. Unreadable must mean "ask", never
+    "assume yes" -- the whole value is in the asking.
+    """
+    from dashboard import live_consent as lc
+    path = tmp_path / "c.json"
+    path.write_text("{corrupt", encoding="utf-8")
+    assert lc.has_consented("ACC1", str(path)) is False
+
+
+def test_consent_survives_a_crash_mid_write(tmp_path):
+    from dashboard import live_consent as lc
+    path = str(tmp_path / "c.json")
+    lc.grant("ACC1", "detail", path)
+    assert not os.path.exists(path + ".tmp")
+    import json
+    json.loads(open(path, encoding="utf-8").read())
+
+
+def test_consent_can_be_revoked(tmp_path):
+    from dashboard import live_consent as lc
+    path = str(tmp_path / "c.json")
+    lc.grant("ACC1", "", path)
+    assert lc.revoke("ACC1", path) is True
+    assert lc.has_consented("ACC1", path) is False
+    assert lc.revoke("ACC1", path) is False, "revoking twice is not an error, just a no-op"
+
+
+def test_consent_requires_an_account_id(tmp_path):
+    from dashboard import live_consent as lc
+    with pytest.raises(ValueError, match="per account"):
+        lc.grant("", "", str(tmp_path / "c.json"))
+
+
+def test_reading_data_is_never_gated_by_consent():
+    """
+    The gate is on submission alone. If it ever reaches the data path, a fresh
+    install shows nothing and the tool looks broken -- which is exactly what
+    defaulting the environment to paper did, and why that was reverted.
+    """
+    src = open(_repo("dashboard", "webull_client.py"), encoding="utf-8").read()
+    assert "live_consent" not in src, "the data client must not know about consent"
+    broker_src = open(_repo("dashboard", "broker.py"), encoding="utf-8").read()
+    assert "live_consent" not in broker_src, (
+        "place_order stays mechanical; the acknowledgement belongs in the UI "
+        "that a human actually clicks")
+
+
+def test_paper_mode_needs_no_acknowledgement():
+    """Nothing to lose in the sandbox, so nothing to acknowledge."""
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("needs_consent = ("):src.index("if needs_consent:")]
+    assert "is_paper_environment()" in block
+
+
+def test_the_submit_button_is_disabled_until_acknowledged():
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("with col_exec:"):]
+    block = block[:block.index("elif not preview:") + 40]
+    assert "needs_consent" in block and "disabled=True" in block
+
+
+def test_the_acknowledgement_names_the_funded_currency_not_the_first_one():
+    """
+    This account lists four currency lines with HKD 0.00 first and the real
+    money in USD. Taking [0] printed "buying power 0.00 HKD" on the one message
+    whose job is to make the account concrete -- which a reader would take as
+    "nothing can happen here", the opposite of the intent.
+    """
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("bp_line = \"\""):src.index("detail = f\"account {acct_id}{bp_line}\"")]
+    assert "account_currency_assets\") or []" in block, "must iterate every line"
+    assert "[0]" not in block, "must not take the first currency line"
+    assert "if amount:" in block, "must skip unfunded lines"
+
+
+def test_an_unreadable_balance_does_not_skip_the_acknowledgement():
+    """The account id alone still names it; the gate must not fall open."""
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("bp_line = \"\""):src.index("st.markdown(\n                            f\"Approving sends")]
+    assert "except Exception:" in block and "pass" in block

@@ -69,6 +69,7 @@ import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import broker
+from dashboard import live_consent
 from dashboard import portfolio_history
 from dashboard import econ_calendar
 from dashboard import edgar_forms
@@ -1056,9 +1057,66 @@ with tab_execution:
                     for problem in preview.get("violations") or []:
                         st.warning(f"Webull will refuse this at submission: {problem}")
 
+                # --- The one-time live acknowledgement --------------------
+                # Reads are never gated: real quotes and a real portfolio are
+                # the reason to run this at all. This sits on the single action
+                # that spends money, fires once per account, and names what is
+                # behind the button so "approve" is not an abstraction.
+                acct_id = (preview or {}).get("account_id")
+                needs_consent = (preview is not None
+                                 and not webull_client.is_paper_environment()
+                                 and acct_id
+                                 and not live_consent.has_consented(acct_id))
+                if needs_consent:
+                    with st.container(border=True):
+                        st.markdown("**First live order from this install**")
+                        # Every currency line with something in it, not just the
+                        # first one. This account lists HKD at 0.00 ahead of the
+                        # currency it actually trades, so taking [0] printed
+                        # "buying power 0.00 HKD" on the one message whose job is
+                        # to make the account concrete -- a reader would take
+                        # that as "nothing can happen here".
+                        bp_line = ""
+                        try:
+                            from webull.trade.trade_client import TradeClient as _TC
+                            _tc = _TC(webull_client.get_api_client())
+                            bal = webull_client.unwrap(webull_client.call_webull(
+                                _tc.account_v2.get_account_balance, acct_id))
+                            funded = []
+                            for line in (bal.get("account_currency_assets") or []):
+                                try:
+                                    amount = float(line.get("buying_power") or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                                if amount:
+                                    funded.append(f"{amount:,.2f} {line.get('currency', '')}".strip())
+                            if funded:
+                                bp_line = " · buying power " + " + ".join(funded)
+                        except Exception:
+                            # A balance we cannot read is not a reason to skip the
+                            # acknowledgement; the account id alone still names it.
+                            pass
+                        detail = f"account {acct_id}{bp_line}"
+                        st.markdown(
+                            f"Approving sends this order to **{detail}** — a real account, "
+                            "with real money. Nothing you have done so far could do that; "
+                            "this button can.")
+                        if st.checkbox("I understand this account is live",
+                                       key=f"consent_{draft['draft_id']}"):
+                            if st.button("Enable live submission for this account",
+                                         key=f"consent_go_{draft['draft_id']}"):
+                                live_consent.grant(acct_id, detail)
+                                st.rerun()
+                        st.caption("Asked once per account. Revoke from the Data tab to be "
+                                   "asked again.")
+
                 # --- Step 2: submit, only ever after a successful preview ---
                 with col_exec:
-                    if not preview:
+                    if needs_consent:
+                        st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
+                                  use_container_width=True, disabled=True,
+                                  help="Acknowledge the live account above first.")
+                    elif not preview:
                         st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
                                   use_container_width=True, disabled=True,
                                   help="Preview the order first — we never submit an order the broker has not validated.")
@@ -1814,5 +1872,28 @@ with tab_alerts:
 
 # Tab 6: Raw Data Table
 with tab_data:
+    # Live-order acknowledgement, so it can be withdrawn without editing a file.
+    if not webull_client.is_paper_environment():
+        try:
+            _tc_d = TradeClient(webull_client.get_api_client())
+            _acct_d = broker.get_primary_account_id(_tc_d)
+        except Exception:
+            _acct_d = None
+        if _acct_d:
+            when = live_consent.granted_at(_acct_d)
+            if when:
+                cdl, cdr = st.columns([3, 1])
+                with cdl:
+                    st.caption(f"Live submission enabled for account `{_acct_d}` "
+                               f"since {when}.")
+                with cdr:
+                    if st.button("Revoke", key="revoke_live_consent",
+                                 use_container_width=True):
+                        live_consent.revoke(_acct_d)
+                        st.rerun()
+            else:
+                st.caption(f"Live submission not yet acknowledged for account "
+                           f"`{_acct_d}` — the first order will ask.")
+
     st.markdown("### Raw Historical and Calculated Indicator Columns")
     st.dataframe(res.sort_values("time", ascending=False), use_container_width=True)
