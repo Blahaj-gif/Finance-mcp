@@ -70,6 +70,7 @@ from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import broker
 from dashboard import live_consent
+from webull.trade.trade_client import TradeClient
 from dashboard import portfolio_history
 from dashboard import econ_calendar
 from dashboard import edgar_forms
@@ -406,6 +407,67 @@ if "manager_start_error" not in st.session_state:
         alert_manager.start_manager_once()
     except Exception as e:
         st.session_state["manager_start_error"] = str(e)
+
+# ------------------------------------------------------------------
+# First-run briefing
+# ------------------------------------------------------------------
+# This used to sit on the submit button, which was the wrong place. By the time
+# someone has drafted an order, opened Execution and clicked Preview, they have
+# already told you three times that they mean it -- a fourth confirmation there
+# is ceremony, and ceremony teaches people to click through warnings.
+#
+# What is actually worth saying once is what the tool *is*: it reads your real
+# account, an assistant can draft orders into a queue, and only you can send
+# them. That belongs at first run, when someone is still reading, not mid-task.
+# Acknowledging it is also what unlocks submission -- so the briefing does the
+# job the button gate was doing, at the moment it can actually land.
+_briefing_account = None
+_briefing_lookup_error = None
+if not webull_client.is_paper_environment():
+    try:
+        _briefing_account = broker.get_primary_account_id(
+            TradeClient(webull_client.get_api_client()))
+    except Exception as e:
+        # A broker that cannot be reached is a legitimate reason to have no
+        # account to name. A NameError is not -- and a bare handler here hid
+        # exactly that: the module-level TradeClient import was missing, so this
+        # swallowed it and the briefing silently never rendered. Programming
+        # errors are surfaced; connectivity ones are not.
+        _briefing_account = None
+        if isinstance(e, (NameError, AttributeError, ImportError, TypeError)):
+            _briefing_lookup_error = f"{type(e).__name__}: {e}"
+
+if _briefing_lookup_error:
+    st.error(f"Could not identify the account for the first-run briefing "
+             f"({_briefing_lookup_error}). Order submission stays blocked until "
+             "this is fixed.")
+
+_needs_briefing = bool(_briefing_account) and not live_consent.has_consented(_briefing_account)
+
+if _needs_briefing:
+    with st.container(border=True):
+        st.markdown("### Before you start")
+        st.markdown(
+            f"This dashboard is connected to **account `{_briefing_account}`** — "
+            "a real Webull account, in live mode. Reading is why the tool exists, "
+            "so quotes, balances and positions are live from the start and nothing "
+            "here changes that.\n\n"
+            "**What Claude can do:** read your account and the market, and *draft* "
+            "orders into the queue on the Execution tab.\n\n"
+            "**What Claude cannot do:** send one. Every order needs you to preview "
+            "it with the broker and press approve, in this window. That is the only "
+            "path to the market and it cannot be reached from the assistant side.\n\n"
+            "**What to keep in mind:** the consensus score is a fixed-weight "
+            "heuristic that underperformed buy-and-hold in backtest, prices carry "
+            "the age of the bar they came from, and an approved order spends "
+            "real money at the real account named above.")
+        if st.checkbox("I understand — enable order submission for this account",
+                       key="briefing_ack"):
+            if st.button("Continue", key="briefing_go", type="primary"):
+                live_consent.grant(_briefing_account, f"account {_briefing_account}")
+                st.rerun()
+        st.caption("Shown once per account. Everything except order submission "
+                   "works before you acknowledge it. Revoke from the Data tab.")
 
 # ------------------------------------------------------------------
 # Dashboard Tab Selection
@@ -1057,58 +1119,19 @@ with tab_execution:
                     for problem in preview.get("violations") or []:
                         st.warning(f"Webull will refuse this at submission: {problem}")
 
-                # --- The one-time live acknowledgement --------------------
-                # Reads are never gated: real quotes and a real portfolio are
-                # the reason to run this at all. This sits on the single action
-                # that spends money, fires once per account, and names what is
-                # behind the button so "approve" is not an abstraction.
+                # The briefing at the top of the page carries the
+                # acknowledgement now. Repeating it here would be a fourth
+                # confirmation on an action already behind three deliberate
+                # steps, and warnings people click through stop being warnings.
                 acct_id = (preview or {}).get("account_id")
                 needs_consent = (preview is not None
                                  and not webull_client.is_paper_environment()
                                  and acct_id
                                  and not live_consent.has_consented(acct_id))
                 if needs_consent:
-                    with st.container(border=True):
-                        st.markdown("**First live order from this install**")
-                        # Every currency line with something in it, not just the
-                        # first one. This account lists HKD at 0.00 ahead of the
-                        # currency it actually trades, so taking [0] printed
-                        # "buying power 0.00 HKD" on the one message whose job is
-                        # to make the account concrete -- a reader would take
-                        # that as "nothing can happen here".
-                        bp_line = ""
-                        try:
-                            from webull.trade.trade_client import TradeClient as _TC
-                            _tc = _TC(webull_client.get_api_client())
-                            bal = webull_client.unwrap(webull_client.call_webull(
-                                _tc.account_v2.get_account_balance, acct_id))
-                            funded = []
-                            for line in (bal.get("account_currency_assets") or []):
-                                try:
-                                    amount = float(line.get("buying_power") or 0)
-                                except (TypeError, ValueError):
-                                    continue
-                                if amount:
-                                    funded.append(f"{amount:,.2f} {line.get('currency', '')}".strip())
-                            if funded:
-                                bp_line = " · buying power " + " + ".join(funded)
-                        except Exception:
-                            # A balance we cannot read is not a reason to skip the
-                            # acknowledgement; the account id alone still names it.
-                            pass
-                        detail = f"account {acct_id}{bp_line}"
-                        st.markdown(
-                            f"Approving sends this order to **{detail}** — a real account, "
-                            "with real money. Nothing you have done so far could do that; "
-                            "this button can.")
-                        if st.checkbox("I understand this account is live",
-                                       key=f"consent_{draft['draft_id']}"):
-                            if st.button("Enable live submission for this account",
-                                         key=f"consent_go_{draft['draft_id']}"):
-                                live_consent.grant(acct_id, detail)
-                                st.rerun()
-                        st.caption("Asked once per account. Revoke from the Data tab to be "
-                                   "asked again.")
+                    st.warning(
+                        "Order submission is not enabled for this account yet. "
+                        "The one-time briefing at the top of this page unlocks it.")
 
                 # --- Step 2: submit, only ever after a successful preview ---
                 with col_exec:

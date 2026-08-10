@@ -440,22 +440,59 @@ def test_the_submit_button_is_disabled_until_acknowledged():
     assert "needs_consent" in block and "disabled=True" in block
 
 
-def test_the_acknowledgement_names_the_funded_currency_not_the_first_one():
+def test_the_briefing_runs_before_the_tabs_not_on_the_submit_button():
     """
-    This account lists four currency lines with HKD 0.00 first and the real
-    money in USD. Taking [0] printed "buying power 0.00 HKD" on the one message
-    whose job is to make the account concrete -- which a reader would take as
-    "nothing can happen here", the opposite of the intent.
+    By the time someone has drafted an order, opened Execution and clicked
+    Preview, they have said they mean it three times. A fourth confirmation
+    there is ceremony, and ceremony teaches people to click through warnings.
+    First run is when someone is still reading.
     """
     src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
-    block = src[src.index("bp_line = \"\""):src.index("detail = f\"account {acct_id}{bp_line}\"")]
-    assert "account_currency_assets\") or []" in block, "must iterate every line"
-    assert "[0]" not in block, "must not take the first currency line"
-    assert "if amount:" in block, "must skip unfunded lines"
+    assert src.index("_needs_briefing") < src.index("st.tabs("), (
+        "the briefing must render before the tabs")
 
 
-def test_an_unreadable_balance_does_not_skip_the_acknowledgement():
-    """The account id alone still names it; the gate must not fall open."""
+def test_the_briefing_states_what_the_assistant_can_and_cannot_do():
     src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
-    block = src[src.index("bp_line = \"\""):src.index("st.markdown(\n                            f\"Approving sends")]
-    assert "except Exception:" in block and "pass" in block
+    block = src[src.index("### Before you start"):src.index("Shown once per account")]
+    assert "What Claude can do" in block and "What Claude cannot do" in block
+    assert "draft" in block.lower() and "approve" in block.lower()
+    assert "heuristic" in block, "the consensus score's nature belongs here"
+    assert "real money" in block
+
+
+def test_everything_except_submission_works_before_the_briefing():
+    """
+    The gate must never reach the read path. A fresh install that shows nothing
+    is the failure mode that defaulting the environment to paper produced.
+    """
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    briefing = src[src.index("if _needs_briefing:"):src.index("# Dashboard Tab Selection")]
+    assert "st.stop()" not in briefing, "the briefing must not halt the page"
+
+
+def test_the_execution_tab_points_at_the_briefing_rather_than_repeating_it():
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("needs_consent = ("):src.index("# --- Step 2: submit")]
+    assert "briefing" in block.lower()
+
+
+def test_the_briefings_account_lookup_does_not_swallow_a_programming_error():
+    """
+    The module-level TradeClient import was missing, so the account lookup
+    raised NameError, a bare `except Exception` caught it, and the briefing
+    silently never rendered -- a feature that appeared to work because the thing
+    reporting its absence was the thing that was broken. A broker that cannot be
+    reached is a real reason to have no account; a NameError is not.
+    """
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    block = src[src.index("_briefing_account = None"):src.index("_needs_briefing = ")]
+    assert "NameError" in block, "programming errors must not be silently absorbed"
+    assert "_briefing_lookup_error" in block
+
+
+def test_the_dashboard_imports_tradeclient_at_module_level():
+    """Three call sites imported it locally; the briefing needed it at the top."""
+    src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
+    header = src[:src.index("# ---")]
+    assert "from webull.trade.trade_client import TradeClient" in header

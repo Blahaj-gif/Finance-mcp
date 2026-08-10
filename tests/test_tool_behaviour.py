@@ -855,3 +855,22 @@ def test_the_offline_rules_run_before_anything_that_needs_the_network():
     network_at = body.index("PRE-TRADE RISK CHECKS")
     assert rules_at < network_at, (
         "the offline construction and rule checks must precede the account checks")
+
+
+def test_the_batch_launcher_does_not_claim_success_on_failure():
+    """
+    install.bat printed "Installation Process Complete!" unconditionally, so an
+    installer that threw still ended on a success banner -- the one line a
+    person actually reads.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bat = open(os.path.join(root, "install.bat"), encoding="utf-8").read()
+    assert "errorlevel 1" in bat.lower(), "must check the installer's exit code"
+    assert "INSTALLATION FAILED" in bat
+    assert "exit /b 1" in bat, "must propagate a failure to whatever ran it"
+
+
+def test_the_batch_launcher_checks_the_installer_is_present():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bat = open(os.path.join(root, "install.bat"), encoding="utf-8").read()
+    assert "if not exist" in bat.lower()
