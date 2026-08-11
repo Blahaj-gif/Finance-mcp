@@ -1,6 +1,6 @@
 # Finance MCP
 
-[![tests](https://github.com/Blahaj-gif/finance-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Blahaj-gif/finance-mcp/actions/workflows/tests.yml)
+[![tests](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](pyproject.toml)
 [![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 
@@ -40,7 +40,8 @@ holidays are collapsed, so there are no blank stretches.*
 
 | | |
 |---|---|
-| **OS** | Windows. The alert manager uses native Windows notifications and the installer writes Windows paths. The server and dashboard are plain Python and run anywhere — only the installer is Windows-specific. |
+| **OS** | Windows, macOS, Linux. Desktop alerts use each platform's own notifier (PowerShell, `osascript`, `notify-send`) and report plainly when a machine has none, which a headless server will not. |
+| **Install** | `uv tool install --with streamlit --with plotly finance-mcp`, then point your client at the `finance-mcp` command. Scripted installers (`install.sh`, `install.bat`) add a config template, client registration and a shortcut. |
 | **Python** | 3.10 or 3.12, both covered by CI. `uv` is installed for you. |
 | **Broker** | A Webull account with OpenAPI credentials. Without them prices fall back to Yahoo and the account and order tools do not work; everything else still does. |
 | **Keys** | `SEC_USER_AGENT` (a contact address, required by the SEC for filings) and optionally a free BLS key. |
@@ -65,11 +66,8 @@ client's MCP config:
 {
   "mcpServers": {
     "finance": {
-      "command": "uv",
-      "args": ["run", "--with", "pandas", "--with", "numpy", "--with", "fastmcp",
-               "--with", "yfinance", "--with", "tabulate", "--with", "lxml",
-               "--with", "html5lib", "--with", "webull-openapi-python-sdk",
-               "C:/path/to/finance_mcp.py"]
+      "command": "finance-mcp",
+      "args": []
     }
   }
 }
@@ -78,7 +76,7 @@ client's MCP config:
 | Client | Where that goes |
 |---|---|
 | Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Claude Code | `claude mcp add finance -- uv run ... finance_mcp.py` |
+| Claude Code | `claude mcp add finance -- finance-mcp` |
 | Cursor | `~/.cursor/mcp.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | VS Code | `.vscode/mcp.json`, or the user-level MCP settings |

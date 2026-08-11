@@ -1,12 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Blahaj-gif/finance-mcp",
+  "name": "io.github.Blahaj-gif/Finance-mcp",
   "version": "0.2.0",
   "title": "Finance MCP",
   "description": "Market data, macro calendar, SEC filings and risk tooling, with order execution behind a human approval step the assistant cannot reach.",
-  "websiteUrl": "https://github.com/Blahaj-gif/finance-mcp",
+  "websiteUrl": "https://github.com/Blahaj-gif/Finance-mcp",
   "repository": {
-    "url": "https://github.com/Blahaj-gif/finance-mcp",
+    "url": "https://github.com/Blahaj-gif/Finance-mcp",
     "source": "github"
   },
   "packages": [

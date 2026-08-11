@@ -2,9 +2,28 @@
 
 Fifteen minutes, most of it waiting for two free API keys to arrive by email.
 
-Windows only for now: the alert manager uses native Windows notifications, and
-the installer writes Windows config paths. The MCP server and the dashboard are
-plain Python and will run anywhere; only the installer is Windows-specific.
+Windows, macOS and Linux. Desktop alerts use each platform's own notifier —
+PowerShell, `osascript`, `notify-send` — and say so plainly if the machine has
+none, which a headless server will not.
+
+---
+
+## The short version
+
+```bash
+uvx --from 'finance-mcp[dashboard]' finance-mcp-dashboard   # one-off run
+# or
+uv tool install --with streamlit --with plotly finance-mcp  # keep it around
+```
+
+Then put this in your MCP client's config and restart it:
+
+```json
+{ "mcpServers": { "finance": { "command": "finance-mcp", "args": [] } } }
+```
+
+That is the whole install. The scripted paths below do the same thing plus a
+config template, client registration and a Desktop shortcut.
 
 ---
 
@@ -13,13 +32,19 @@ plain Python and will run anywhere; only the installer is Windows-specific.
 **Download a release**, or clone:
 
 ```
-git clone https://github.com/Blahaj-gif/finance-mcp.git
-cd finance-mcp
+git clone https://github.com/Blahaj-gif/Finance-mcp.git
+cd Finance-mcp
 ```
 
 ## 2. Run the installer
 
-Double-click **`install.bat`**.
+**macOS / Linux:**
+
+```bash
+./install.sh
+```
+
+**Windows:** double-click **`install.bat`**.
 
 You cannot double-click `installer.ps1` — Windows blocks running a `.ps1` that
 way, and there is no setting on the file that changes it. `install.bat` exists
@@ -43,7 +68,19 @@ success banner, it worked.
 
 ## 3. Fill in `.env`
 
-Open `.env` in the project folder. Two entries need you:
+Where it lives depends on how you installed. Run **`finance-mcp-config`** and it
+prints the search order and which file it is actually using — a git checkout
+keeps it beside the code, an installed copy uses your per-user config directory,
+because site-packages is wiped on upgrade.
+
+| | |
+|---|---|
+| Windows | `%APPDATA%inance-mcp\.env` |
+| macOS | `~/Library/Application Support/finance-mcp/.env` |
+| Linux | `~/.config/finance-mcp/.env` |
+| Any | `FINANCE_MCP_ENV=/path/to/.env` overrides all of it |
+
+Three entries need you:
 
 ```ini
 WEBULL_APP_KEY=...        # from Webull's developer portal
@@ -72,7 +109,8 @@ account is the point, and no order can be sent without you approving it.
 
 ## 4. Open the dashboard and read the briefing
 
-Double-click the **Finance MCP Dashboard** shortcut.
+Double-click the **Finance MCP Dashboard** shortcut, or run
+**`finance-mcp-dashboard`**.
 
 ![First-run briefing](docs/img/first-run-briefing.png)
 
@@ -111,9 +149,11 @@ including which broker environment is live.
 | `Daily request cap ... reached` | BLS's 25/day unregistered limit. Get the free key. |
 | Prices work, account tools do not | Webull keys missing or wrong; prices fall back to Yahoo, the account has no fallback. |
 | Dashboard opens but the chart is empty | Look at the error above the chart — it names the source and the reason rather than showing a blank. |
+| Keys are filled in but tools say "not set" | You edited a different `.env` than the one in use. Run `finance-mcp-config`. |
+| Alerts never appear on Linux | No notification daemon. Install `libnotify-bin`; on a headless box there is nothing to show them and alerts are recorded in `alerts.json` instead. |
 
 ## Uninstalling
 
-Delete the folder and the Desktop shortcut, then remove the `"finance"` entry
-from your MCP client's config. Nothing is written outside the project folder
-except those config entries and the shortcut.
+`uv tool uninstall finance-mcp`, or delete the folder for a checkout. Then
+remove the `"finance"` entry from your MCP client's config, and the per-user
+config directory if you used one (`finance-mcp-config` prints the path).

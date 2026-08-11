@@ -29,9 +29,9 @@ finance-mcp-dashboard = "dashboard.cli:dashboard"
 finance-mcp-config = "dashboard.cli:where"
 
 [project.urls]
-Homepage = "https://github.com/Blahaj-gif/finance-mcp"
-Repository = "https://github.com/Blahaj-gif/finance-mcp"
-Issues = "https://github.com/Blahaj-gif/finance-mcp/issues"
+Homepage = "https://github.com/Blahaj-gif/Finance-mcp"
+Repository = "https://github.com/Blahaj-gif/Finance-mcp"
+Issues = "https://github.com/Blahaj-gif/Finance-mcp/issues"
 
 # Flat layout: name the packages explicitly so auto-discovery does not sweep
 # `tests` into the distribution.

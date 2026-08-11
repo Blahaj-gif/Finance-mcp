@@ -299,14 +299,23 @@ def test_the_note_is_never_interpolated_into_the_powershell_script():
     def fake_run(argv, **kw):
         captured["argv"] = argv
         captured["env"] = kw.get("env", {})
-        return None
+        return type("R", (), {"returncode": 0, "stderr": b""})()
 
     payload = '$(Remove-Item C:\\ -Recurse); `whoami`; "quoted"'
     import subprocess
+    import sys as _s
+    import unittest.mock as _m
+
     real_run = subprocess.run
     subprocess.run = fake_run
     try:
-        am.send_windows_notification("title", payload)
+        # Pin the platform and the notifier lookup. This assumed the host was
+        # Windows, so once notifications learned to dispatch per platform it
+        # returned before subprocess.run on a Linux CI runner and died on an
+        # empty capture rather than on the thing it checks.
+        with _m.patch.object(_s, "platform", "win32"), \
+             _m.patch.object(am.shutil, "which", return_value=r"C:\powershell.exe"):
+            am.send_windows_notification("title", payload)
     finally:
         subprocess.run = real_run
 
