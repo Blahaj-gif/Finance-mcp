@@ -423,3 +423,42 @@ def test_the_console_commands_are_stable_across_a_rename():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
     assert 'finance-mcp = "dashboard.cli:serve"' in toml
+
+
+def test_every_dashboard_subpackage_ships_in_the_distribution():
+    """
+    `packages = ["dashboard"]` is an explicit list, not a prefix: it shipped a
+    wheel with dashboard/brokers/ missing entirely, so the installed server died
+    on `import dashboard.brokers`. A source checkout cannot reproduce that --
+    there the directory is simply present -- so only building and installing
+    finds it.
+    """
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    assert "[tool.setuptools.packages.find]" in toml, (
+        "enumerate packages with find, or the next subpackage is omitted silently")
+    assert 'include = ["dashboard*"]' in toml
+
+    # Anything importable as dashboard.<name> must be covered by that glob.
+    subpackages = [d for d in os.listdir(os.path.join(root, "dashboard"))
+                   if os.path.isfile(os.path.join(root, "dashboard", d, "__init__.py"))]
+    assert "brokers" in subpackages, "the case that produced this test"
+
+
+def test_the_server_imports_everything_it_declares():
+    """
+    The import that broke was at module scope in finance_mcp.py, so the failure
+    was immediate and total rather than confined to one tool.
+    """
+    import ast, os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tree = ast.parse(open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names if a.name.startswith("dashboard"))
+    for name in imported:
+        path = os.path.join(root, *name.split(".")) 
+        assert os.path.isdir(path) or os.path.isfile(path + ".py"), (
+            f"finance_mcp imports {name}, which does not exist")

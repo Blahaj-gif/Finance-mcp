@@ -35,8 +35,17 @@ Issues = "https://github.com/Blahaj-gif/Finance-mcp/issues"
 
 # Flat layout: name the packages explicitly so auto-discovery does not sweep
 # `tests` into the distribution.
+# Subpackages are NOT implied by naming the parent. `packages = ["dashboard"]`
+# shipped a wheel with dashboard/brokers/ missing entirely, so the installed
+# server died on `import dashboard.brokers` -- a break that a source checkout
+# cannot reproduce, because there the directory is simply there. Found by
+# installing the wheel into a clean venv and starting it; find_packages keeps
+# it from recurring as more subpackages appear.
+[tool.setuptools.packages.find]
+include = ["dashboard*"]
+exclude = ["tests*", "docs*"]
+
 [tool.setuptools]
-packages = ["dashboard"]
 py-modules = ["finance_mcp"]
 
 # The Streamlit theme and the golden vectors travel with the package. Without

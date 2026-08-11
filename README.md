@@ -17,7 +17,7 @@ path does not exist on the tool side, so no prompt can reach it.
 
 ---
 
-![Charts tab](docs/img/charts.png)
+![Charts tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/charts.png)
 
 *Candles with overlays, a volume pane and the forecast cone. Weekends and market
 holidays are collapsed, so there are no blank stretches.*
@@ -46,12 +46,12 @@ holidays are collapsed, so there are no blank stretches.*
 | **Broker** | A Webull account with OpenAPI credentials. Without them prices fall back to Yahoo and the account and order tools do not work; everything else still does. |
 | **Keys** | `SEC_USER_AGENT` (a contact address, required by the SEC for filings) and optionally a free BLS key. |
 
-**[Installation guide →](INSTALL.md)** — fifteen minutes, most of it waiting for
+**[Installation guide →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/INSTALL.md)** — fifteen minutes, most of it waiting for
 free API keys.
 
 > **This places real orders against a real account.** The consensus score is a
 > fixed-weight heuristic that underperformed buy-and-hold in backtest and is
-> labelled as such throughout. Not financial advice; see [LICENSE](LICENSE).
+> labelled as such throughout. Not financial advice; see [LICENSE](https://github.com/Blahaj-gif/Finance-mcp/blob/master/LICENSE).
 
 ---
 
@@ -65,7 +65,7 @@ free API keys.
 `dashboard/broker_protocol.py` is the interface; `tests/test_broker_conformance.py`
 runs the same suite against every adapter. Select one with `FINANCE_BROKER=saxo`.
 
-**[Help wanted →](HELP-WANTED.md)** — an hour with a Saxo simulation token would
+**[Help wanted →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)** — an hour with a Saxo simulation token would
 close the verification gap. The script that does it reads only; it never places
 an order.
 
@@ -148,7 +148,7 @@ Two things where an hour from someone else is worth more than a day from me:
 - **Verify the Saxo adapter.** It is written from Saxo's published reference and
   has never been run against their API. A 24-hour simulation token is free and
   needs no approval, and `tests/verify_saxo.py` answers the six open questions
-  without placing an order. → **[HELP-WANTED.md](HELP-WANTED.md)**
+  without placing an order. → **[HELP-WANTED.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)**
 - **Install it on a clean machine.** `install.bat` and `install.sh` are covered
   by unit tests and inspection, never by a fresh OS — the first thing every new
   user touches is the least proven path here.
@@ -336,13 +336,13 @@ Double-click the **Finance MCP Dashboard** shortcut, or run
 | **Alerts** | Price, RSI and MACD-cross alerts; the manager fires Windows notifications and stamps which bar triggered. |
 | **Data** | Every computed indicator column for the loaded window, newest first. |
 
-![Events tab](docs/img/events.png)
+![Events tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/events.png)
 
 *The Events tab: the economic calendar with each row's actual or prior print,
 earnings dates flagged as confirmed, disputed or estimated, and watchlist
 filings with a hover preview.*
 
-![Execution tab](docs/img/execution.png)
+![Execution tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/execution.png)
 
 *The Execution tab — the only path to the market. Preview with the broker, then
 approve.*
