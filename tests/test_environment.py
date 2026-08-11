@@ -293,3 +293,96 @@ def test_paper_mode_injects_the_sandbox_endpoints_for_a_real_region(monkeypatch,
     assert all(region == "th" for region, _h, _t in calls)
     # And nothing production-shaped slipped through.
     assert not any("api.webull.co.th" == host for _r, host, _t in calls)
+
+
+# =====================================================================
+# Config discovery for an INSTALLED copy
+# =====================================================================
+# Resolving .env against the package's own directory is right for a git
+# checkout and wrong for an installed package, where it points into
+# site-packages and silently finds nothing -- so the SEC and broker tools would
+# refuse with "not set" on a machine where the user had filled in a .env
+# perfectly well, just not in a directory they could guess.
+
+def test_an_explicit_env_var_beats_every_guess(tmp_path, monkeypatch):
+    from dashboard import envfile
+    target = tmp_path / "custom.env"
+    target.write_text("FM_PROBE=explicit\n", encoding="utf-8")
+    monkeypatch.setenv("FINANCE_MCP_ENV", str(target))
+    assert envfile.candidate_paths()[0] == str(target)
+    assert envfile.resolve() == str(target)
+
+
+def test_the_current_directory_is_searched(tmp_path, monkeypatch):
+    """Someone standing in a project expects the file they can see to win."""
+    from dashboard import envfile
+    monkeypatch.delenv("FINANCE_MCP_ENV", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("FM_PROBE=cwd\n", encoding="utf-8")
+    assert envfile.resolve() == str(tmp_path / ".env")
+
+
+def test_the_user_config_directory_is_platform_correct(monkeypatch):
+    import sys
+    from dashboard import envfile
+    import unittest.mock as mock
+
+    with mock.patch.object(sys, "platform", "darwin"):
+        assert "Library/Application Support" in envfile.user_config_dir().replace("\\", "/")
+    with mock.patch.object(sys, "platform", "linux"):
+        monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/xdg")
+        assert envfile.user_config_dir().replace("\\", "/").startswith("/tmp/xdg")
+    with mock.patch.object(sys, "platform", "win32"):
+        monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
+        assert "finance-mcp" in envfile.user_config_dir()
+
+
+def test_the_search_order_is_stable_and_deduplicated(monkeypatch):
+    from dashboard import envfile
+    monkeypatch.delenv("FINANCE_MCP_ENV", raising=False)
+    paths = envfile.candidate_paths()
+    import os
+    keys = [os.path.normcase(os.path.abspath(p)) for p in paths]
+    assert len(keys) == len(set(keys)), "a path must not be searched twice"
+    assert paths[-1].endswith(os.path.join("finance-mcp", ".env")), (
+        "the per-user config directory is the last resort, not the first guess")
+
+
+def test_quoted_values_are_unquoted(tmp_path):
+    """Editors that do not know this is not shell add quotes."""
+    from dashboard import envfile
+    env = tmp_path / ".env"
+    env.write_text('FM_Q1="quoted"\nFM_Q2=\'single\'\nFM_Q3=bare\n', encoding="utf-8")
+    import os
+    for k in ("FM_Q1", "FM_Q2", "FM_Q3"):
+        os.environ.pop(k, None)
+    envfile.load_env(str(env))
+    assert os.environ["FM_Q1"] == "quoted"
+    assert os.environ["FM_Q2"] == "single"
+    assert os.environ["FM_Q3"] == "bare"
+
+
+def test_console_entry_points_are_declared():
+    """
+    The MCP registry distributes from PyPI and has no way to describe a
+    git-clone install, so being launchable as a command is what makes listing
+    possible at all.
+    """
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    assert "[project.scripts]" in toml
+    for cmd in ("finance-mcp =", "finance-mcp-dashboard =", "finance-mcp-config ="):
+        assert cmd in toml, f"missing console script: {cmd}"
+
+
+def test_server_json_matches_the_package_version():
+    """A registry entry pointing at a version that does not exist is worse than none."""
+    import json, os, re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    manifest = json.load(open(os.path.join(root, "server.json"), encoding="utf-8"))
+    toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    version = re.search(r'^version = "([^"]+)"', toml, re.M).group(1)
+    assert manifest["version"] == version
+    assert manifest["packages"][0]["version"] == version
+    assert manifest["packages"][0]["identifier"] == "finance-mcp"

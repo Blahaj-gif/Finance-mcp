@@ -1,0 +1,57 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Blahaj-gif/finance-mcp",
+  "version": "0.2.0",
+  "title": "Finance MCP",
+  "description": "Market data, macro calendar, SEC filings and risk tooling, with order execution behind a human approval step the assistant cannot reach.",
+  "websiteUrl": "https://github.com/Blahaj-gif/finance-mcp",
+  "repository": {
+    "url": "https://github.com/Blahaj-gif/finance-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "finance-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "WEBULL_APP_KEY",
+          "description": "Webull OpenAPI app key. Without it prices fall back to Yahoo and the account and order tools are unavailable; everything else still works.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "WEBULL_APP_SECRET",
+          "description": "Webull OpenAPI app secret. Signs every request; the app key alone cannot authenticate.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "WEBULL_REGION_ID",
+          "description": "Webull region: us, hk, jp, sg, th, my, uk, au, eu, br, mx, za.",
+          "default": "us"
+        },
+        {
+          "name": "WEBULL_ENVIRONMENT",
+          "description": "prod trades the real account. paper repoints the ENTIRE client at Webull's sandbox, quotes included, and needs separate sandbox credentials — production keys return 401 there.",
+          "default": "prod"
+        },
+        {
+          "name": "SEC_USER_AGENT",
+          "description": "A descriptive User-Agent with a real contact address, e.g. 'Jane Doe (jane@example.com)'. The SEC's fair-access policy requires it and the filings tools refuse to send requests without one rather than risk an IP ban.",
+          "isRequired": false
+        },
+        {
+          "name": "BLS_API_KEY",
+          "description": "Optional. BLS allows 25 macro queries a day without a key; a free key raises it to 500 and extends history from 10 to 20 years.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

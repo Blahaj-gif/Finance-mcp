@@ -1,7 +1,10 @@
 [project]
 name = "finance-mcp"
 version = "0.2.0"
-description = "Finance MCP — market data, macro calendar, SEC filings and risk tooling for Claude"
+description = "MCP server for market data, macro calendar, SEC filings and risk tooling, with human-approved order execution"
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["mcp", "model-context-protocol", "finance", "trading", "market-data", "sec-edgar"]
 requires-python = ">=3.10"
 dependencies = [
     "pandas",
@@ -18,11 +21,29 @@ dependencies = [
 dev = ["pytest"]
 dashboard = ["streamlit", "plotly"]
 
+# Console commands, so an installed copy is launchable without knowing where
+# pip put it. `finance-mcp` is what an MCP client runs.
+[project.scripts]
+finance-mcp = "dashboard.cli:serve"
+finance-mcp-dashboard = "dashboard.cli:dashboard"
+finance-mcp-config = "dashboard.cli:where"
+
+[project.urls]
+Homepage = "https://github.com/Blahaj-gif/finance-mcp"
+Repository = "https://github.com/Blahaj-gif/finance-mcp"
+Issues = "https://github.com/Blahaj-gif/finance-mcp/issues"
+
 # Flat layout: name the packages explicitly so auto-discovery does not sweep
 # `tests` into the distribution.
 [tool.setuptools]
 packages = ["dashboard"]
 py-modules = ["finance_mcp"]
+
+# The Streamlit theme and the golden vectors travel with the package. Without
+# the config the dashboard loses its theme when installed; without the vectors
+# the TA core cannot be re-verified from an install.
+[tool.setuptools.package-data]
+dashboard = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -475,3 +475,91 @@ def test_the_manager_starts_at_most_once_per_process():
         assert am.start_manager_once() is False
     finally:
         am.MANAGER_STATE.update(saved)
+
+
+# =====================================================================
+# Cross-platform notification
+# =====================================================================
+# This was Windows-only and named for it. On Linux or macOS every alert fired
+# into nothing, with the failure caught and printed to stderr -- an alert
+# manager that evaluates correctly and then tells nobody, which looks exactly
+# like a market that never moved.
+
+import sys as _sys
+import unittest.mock as _mock
+
+
+@pytest.mark.parametrize("platform,expected", [
+    ("win32", "powershell"),
+    ("darwin", "osascript"),
+    ("linux", "notify-send"),
+    ("freebsd13", "notify-send"),      # anything else gets the libnotify path
+])
+def test_each_platform_gets_a_notifier(platform, expected):
+    with _mock.patch.object(_sys, "platform", platform):
+        argv, _ = am._notifier_command("Title", "Body")
+        assert argv[0] == expected
+
+
+HOSTILE = "note with $(whoami) and `backtick` and ; rm -rf /"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_alert_text_is_an_argv_element_never_shell_text(platform):
+    """
+    An alert note is free text somebody typed into the dashboard. Interpolating
+    it into a script would execute it; passing it as an argument displays it.
+    """
+    with _mock.patch.object(_sys, "platform", platform):
+        argv, _ = am._notifier_command("Alert", HOSTILE)
+        assert HOSTILE in argv, "the note must be its own argv element"
+        assert not any(HOSTILE in part for part in argv if part is not HOSTILE)
+
+
+def test_windows_keeps_the_note_out_of_the_script_body():
+    with _mock.patch.object(_sys, "platform", "win32"):
+        argv, env = am._notifier_command("Alert", HOSTILE)
+        assert HOSTILE not in " ".join(argv)
+        assert env["FINMCP_ALERT_BODY"] == HOSTILE
+
+
+def test_a_missing_notifier_is_reported_rather_than_swallowed():
+    """
+    A headless Linux box has no notification daemon at all. Saying so beats
+    failing silently, and the message names the package to install.
+    """
+    with _mock.patch.object(_sys, "platform", "linux"), \
+         _mock.patch.object(am.shutil, "which", return_value=None):
+        available, reason = am.notifier_available()
+        assert available is False
+        assert "libnotify" in reason
+        assert "alerts still evaluate" in reason
+
+
+def test_send_notification_reports_whether_it_delivered():
+    """
+    The old function returned None whether or not anything was shown, so no
+    caller could tell the difference.
+    """
+    with _mock.patch.object(_sys, "platform", "linux"), \
+         _mock.patch.object(am.shutil, "which", return_value=None):
+        assert am.send_notification("t", "b") is False
+
+    with _mock.patch.object(_sys, "platform", "linux"), \
+         _mock.patch.object(am.shutil, "which", return_value="/usr/bin/notify-send"), \
+         _mock.patch.object(am.subprocess, "run",
+                            return_value=_mock.Mock(returncode=0, stderr=b"")):
+        assert am.send_notification("t", "b") is True
+
+
+def test_a_nonzero_exit_from_the_notifier_is_not_treated_as_delivered():
+    with _mock.patch.object(_sys, "platform", "linux"), \
+         _mock.patch.object(am.shutil, "which", return_value="/usr/bin/notify-send"), \
+         _mock.patch.object(am.subprocess, "run",
+                            return_value=_mock.Mock(returncode=1, stderr=b"no display")):
+        assert am.send_notification("t", "b") is False
+
+
+def test_the_old_windows_name_still_resolves():
+    """Anything that imported send_windows_notification keeps working."""
+    assert am.send_windows_notification is am.send_notification

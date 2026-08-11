@@ -13,6 +13,7 @@ import json
 import math
 import datetime
 import subprocess
+import shutil
 import threading
 
 # Ensure local path is accessible
@@ -32,17 +33,7 @@ class AlertEvaluationError(ValueError):
     """The alert cannot be evaluated -- unknown condition, or missing/NaN input."""
 
 
-def send_windows_notification(title: str, message: str):
-    """
-    Sends a native Windows balloon/toast notification using built-in System.Windows.Forms.
-    Requires zero third-party pip dependencies.
-
-    Title and body are handed over as environment variables rather than
-    interpolated into the script text. Alert notes are free text typed into the
-    dashboard, and a note containing `$(...)` or a backtick would otherwise be
-    executed by PowerShell rather than displayed.
-    """
-    ps_cmd = '''
+_WINDOWS_PS = """
     [reflection.assembly]::loadwithpartialname("System.Windows.Forms") | Out-Null
     $notification = New-Object System.Windows.Forms.NotifyIcon
     $notification.Icon = [System.Drawing.SystemIcons]::Information
@@ -50,15 +41,94 @@ def send_windows_notification(title: str, message: str):
     $notification.BalloonTipText = $env:FINMCP_ALERT_BODY
     $notification.Visible = $True
     $notification.ShowBalloonTip(5000)
-    '''
-    try:
-        env = dict(os.environ)
+    """
+
+# macOS: osascript quotes its own string literals, so the text is passed as an
+# argument rather than pasted into the script -- same reasoning as the env vars
+# on Windows. An alert note is free text a user typed.
+_MACOS_OSA = (
+    "on run argv\n"
+    "  display notification (item 2 of argv) with title (item 1 of argv)\n"
+    "end run"
+)
+
+
+def _notifier_command(title: str, message: str):
+    """
+    (argv, env) for this platform's notifier, or None if there is not one.
+
+    The text never reaches a shell as text. On Windows it travels in environment
+    variables and on macOS as osascript arguments, because a note containing
+    `$(...)` or a backtick would otherwise be executed rather than displayed.
+    """
+    env = dict(os.environ)
+    if sys.platform == "win32":
         env["FINMCP_ALERT_TITLE"] = str(title)
         env["FINMCP_ALERT_BODY"] = str(message)
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
-                       capture_output=True, timeout=5, env=env)
+        return ["powershell", "-NoProfile", "-Command", _WINDOWS_PS], env
+    if sys.platform == "darwin":
+        return ["osascript", "-e", _MACOS_OSA, str(title), str(message)], env
+    # Linux and the BSDs: notify-send is part of libnotify and present on every
+    # mainstream desktop. Headless servers have no notification daemon at all,
+    # which is why its absence is reported rather than treated as a failure.
+    return ["notify-send", "--app-name=Finance MCP", str(title), str(message)], env
+
+
+def notifier_available() -> tuple[bool, str]:
+    """
+    Whether this machine can actually show a notification, and what to do if not.
+
+    Checked and surfaced rather than discovered at fire time. An alert manager
+    that evaluates conditions correctly and then tells nobody is worse than one
+    that plainly is not running: the first looks like a market that never moved.
+    """
+    if sys.platform == "win32":
+        found = shutil.which("powershell") is not None
+        return found, "" if found else "PowerShell not found on PATH."
+    if sys.platform == "darwin":
+        found = shutil.which("osascript") is not None
+        return found, "" if found else "osascript not found — unexpected on macOS."
+    if shutil.which("notify-send"):
+        return True, ""
+    return False, ("notify-send not found. Install libnotify "
+                   "(Debian/Ubuntu: apt install libnotify-bin, "
+                   "Fedora: dnf install libnotify). On a headless machine there "
+                   "is no notification daemon; alerts still evaluate and are "
+                   "recorded in alerts.json.")
+
+
+def send_notification(title: str, message: str) -> bool:
+    """
+    Show a desktop notification. Returns whether it was delivered.
+
+    Was Windows-only and named for it, shelling out to PowerShell with the
+    failure caught and printed to stderr -- so on Linux or macOS every alert
+    fired into nothing and the only trace was a log line nobody reads.
+    """
+    ok, reason = notifier_available()
+    if not ok:
+        print(f"Alert not shown ({sys.platform}): {reason}", file=sys.stderr)
+        return False
+
+    argv, env = _notifier_command(title, message)
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=5, env=env)
+        if result.returncode != 0:
+            print(f"Notifier exited {result.returncode}: "
+                  f"{result.stderr.decode('utf-8', 'replace')[:200]}", file=sys.stderr)
+            return False
+        return True
+    except FileNotFoundError:
+        print(f"Notifier {argv[0]!r} not found on PATH.", file=sys.stderr)
+        return False
     except Exception as e:
-        print(f"Failed to send Windows notification: {str(e)}", file=sys.stderr)
+        print(f"Failed to send notification: {e}", file=sys.stderr)
+        return False
+
+
+# The old name, kept so nothing that imported it breaks. It was never Windows
+# specific in intent -- only in implementation.
+send_windows_notification = send_notification
 
 
 def _finite(value, field: str) -> float:
