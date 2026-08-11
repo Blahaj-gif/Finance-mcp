@@ -25,6 +25,7 @@ import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
 import dashboard.capabilities as capabilities
+import dashboard.live_signals as live_signals
 import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 
@@ -237,7 +238,14 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
             verdict_score += 1
         else:
             signals.append("- **SuperTrend**: Bearish Trend **SELL**")
-            
+
+        # Three readings the list above cannot make, from the same helper the
+        # dashboard strip uses -- two surfaces describing one bar differently is
+        # worse than either describing it poorly. Deliberately NOT scored into
+        # the verdict: they are context for a reader, not another vote in a
+        # heuristic that already underperformed buy-and-hold.
+        signals.extend(live_signals.signal_lines(res))
+
         # Determine Verdict Text
         if verdict_score >= 3:
             verdict = "STRONG BUY"

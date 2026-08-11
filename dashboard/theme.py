@@ -337,9 +337,23 @@ input, [data-baseweb="select"] * {
 }
 
 /* ---- metric strip ---- */
+/* Six cells, and the count is fixed rather than auto-fit: an auto-fit grid
+   wrapped 5 + 1 at this width, leaving one cell alone on a second row looking
+   like a rendering fault. Six equal columns fit because the values are short --
+   a price, a ratio, two words, a percentage, a score. */
 .fm-strip {
-    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
     border-bottom: 1px solid var(--fm-rule); margin-bottom: 0.4rem;
+}
+/* Breakpoints are on the viewport but the strip sits inside Streamlit's
+   content column, which is ~300px narrower because of the sidebar. Set at
+   1400 these fired on a 1600px desktop and split the strip across two rows --
+   which undoes the point of a strip. */
+@media (max-width: 1000px) {
+    .fm-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+    .fm-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .fm-cell { padding: var(--fm-strip-pad) 0.7rem; border-right: 1px solid var(--fm-hairline); min-width: 0; }
 .fm-cell:last-child { border-right: 0; }

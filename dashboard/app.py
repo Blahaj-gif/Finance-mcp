@@ -76,6 +76,7 @@ from dashboard import econ_calendar
 from dashboard import edgar_forms
 from dashboard import earnings
 from dashboard import highlight
+from dashboard import live_signals
 import indicators
 import backtester
 import forecaster
@@ -360,6 +361,21 @@ else:
 # vertical on five numbers; this reads in a single scan and leaves the fold for
 # the chart.
 price_tone = "fm-up" if price_change >= 0 else "fm-dn"
+
+# Three readings the strip could not make. Shared with get_market_analysis so
+# the dashboard and the MCP tool cannot describe the same bar differently.
+_sig = live_signals.live_signals(res, precomputed=None)
+_vol, _trend, _auction = _sig["volume"], _sig["trend"], _sig["auction"]
+_vol_sub = (f"{_vol['ratio']:.2f}x 20-bar avg" if _vol["ratio"] is not None
+            else "no comparison window")
+_vol_tone = {"heavy": "fm-up", "light": "fm-dn"}.get(_vol["verdict"], "")
+_adx_sub = f"ADX {_trend['adx']:.1f}" if _trend["adx"] is not None else "ADX pending"
+if _auction["node"] is not None:
+    _auction_v = f"{_auction['distance_pct']:+.2f}%"
+    _auction_sub = f"{'POC' if _auction.get('is_poc') else 'node'} {_auction['node']:,.2f}"
+    _auction_tone = "fm-am" if _auction["verdict"] == "at a node" else ""
+else:
+    _auction_v, _auction_sub, _auction_tone = "n/a", "no profile", ""
 render_html(f"""
 <div class="fm-strip">
     <div class="fm-cell">
@@ -370,12 +386,17 @@ render_html(f"""
     <div class="fm-cell">
         <div class="fm-k">Volume</div>
         <div class="fm-v">{vol_val:,.0f}</div>
-        <div class="fm-d">shares traded</div>
+        <div class="fm-d {_vol_tone}">{as_html_text(_vol_sub)}</div>
     </div>
     <div class="fm-cell">
         <div class="fm-k">Regime</div>
         <div class="fm-v word fm-am">{as_html_text(current_regime)}</div>
-        <div class="fm-d">classifier</div>
+        <div class="fm-d">{as_html_text(_adx_sub)}</div>
+    </div>
+    <div class="fm-cell">
+        <div class="fm-k">Auction</div>
+        <div class="fm-v {_auction_tone}">{as_html_text(_auction_v)}</div>
+        <div class="fm-d">{as_html_text(_auction_sub)}</div>
     </div>
     <div class="fm-cell">
         <div class="fm-k">Consensus</div>
