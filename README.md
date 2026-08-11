@@ -455,3 +455,9 @@ the human from that step would require editing the source.
 
 ---
 *Disclaimer: This is an open-source project for educational and experimental quantitative research. Algorithmic trading carries significant financial risk.*
+
+<!-- Ownership proof for the MCP registry: it checks that whoever lists this
+     server also controls the PyPI package, by looking for this name in the
+     published README. -->
+mcp-name: io.github.Blahaj-gif/hitl-finance-mcp
+
