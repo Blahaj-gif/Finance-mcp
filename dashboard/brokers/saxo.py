@@ -49,8 +49,10 @@ import urllib.parse
 import urllib.request
 
 try:
+    from dashboard import capabilities as _cap
     from dashboard.envfile import load_env
 except ImportError:  # imported as a top-level module from dashboard/
+    import capabilities as _cap
     from envfile import load_env
 
 load_env()
@@ -84,6 +86,10 @@ _DEFAULT_ASSET_TYPE = "Stock"
 
 class SaxoBroker:
     name = "saxo"
+
+    CAPABILITIES = frozenset((
+        _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER))
     #: Never set this True from a reading of the code. It means somebody ran it
     #: against the API and reported what happened.
     verified = False
@@ -159,6 +165,20 @@ class SaxoBroker:
         return self._account_key
 
     # -- account ----------------------------------------------------------
+    def accounts(self) -> list:
+        payload = self._request("GET", "/port/v1/accounts/me")
+        out = []
+        for a in payload.get("Data") or []:
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "id": str(a.get("AccountKey") or ""),
+                "currency": str(a.get("Currency") or "").upper(),
+                "label": str(a.get("AccountId") or a.get("AccountType") or ""),
+                "raw": a,
+            })
+        return out
+
     def buying_power(self, currency: str = "USD") -> float:
         """
         Saxo reports one balance block per account, in that account's own
@@ -331,6 +351,33 @@ class SaxoBroker:
             "client_order_id": str(order.get("ExternalReference", "")),
             "raw": payload,
         }
+
+    def open_orders(self) -> list:
+        """
+        Saxo's working orders. `ExternalReference` is the id we generated, and
+        whether it comes back is question 2 in HELP-WANTED -- if it does,
+        cancel_order stops having to refuse.
+        """
+        payload = self._request("GET", "/port/v1/orders",
+                                params={"AccountKey": self.primary_account_id(),
+                                        "ClientKey": self._client_key,
+                                        "Status": "Working"})
+        out = []
+        for o in payload.get("Data") or []:
+            if not isinstance(o, dict):
+                continue
+            out.append({
+                "order_id": str(o.get("OrderId") or ""),
+                "client_order_id": str(o.get("ExternalReference") or ""),
+                "symbol": str(o.get("Symbol") or o.get("Uic") or ""),
+                "action": str(o.get("BuySell") or "").upper(),
+                "quantity": _num(o.get("Amount")) or 0.0,
+                "filled": _num(o.get("FilledAmount")) or 0.0,
+                "limit_price": _num(o.get("Price")),
+                "status": str(o.get("Status") or o.get("OpenOrderType") or ""),
+                "raw": o,
+            })
+        return out
 
     def confirm_order(self, reply_id: str, confirmed: bool = True) -> dict:
         """

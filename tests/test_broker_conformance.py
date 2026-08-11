@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dashboard import broker_protocol as bp
 from dashboard import brokers
+from dashboard import capabilities
 
 
 # =====================================================================
@@ -97,6 +98,15 @@ def make_webull():
 
         def cancel_order(self, client_order_id):
             return {"order_id": "WB1", "client_order_id": client_order_id, "raw": {}}
+
+        def accounts(self):
+            return [{"id": "ACC1", "currency": "USD", "label": "CASH", "raw": {}}]
+
+        def open_orders(self):
+            return [{"order_id": "WB1", "client_order_id": "DRFT_live",
+                     "symbol": "AAPL", "action": "BUY", "quantity": 1.0,
+                     "filled": 0.0, "limit_price": 1.0, "status": "Working",
+                     "raw": {}}]
 
     return Stub()
 
@@ -303,6 +313,43 @@ def test_positions_are_normalised(broker):
 def test_position_quantity_is_zero_when_flat(broker):
     assert broker.position_quantity("NOTHELD") == 0.0
     assert broker.position_quantity("AAPL") == pytest.approx(10.0)
+
+
+def test_accounts_are_normalised(broker):
+    """
+    Distinct from primary_account_id, which refuses when there is more than
+    one. This is how a caller finds out what to pin.
+    """
+    rows = broker.accounts()
+    assert isinstance(rows, list) and rows
+    for a in rows:
+        assert set(a) >= {"id", "currency", "label"}
+        assert isinstance(a["id"], str) and a["id"]
+
+
+def test_open_orders_are_normalised(broker):
+    """
+    Every broker has working orders and none of them agreed on the shape, which
+    is why this is in the protocol rather than left to each tool.
+    """
+    for o in broker.open_orders():
+        assert set(o) >= {"order_id", "client_order_id", "symbol", "action",
+                          "quantity", "filled", "limit_price", "status"}
+        assert isinstance(o["quantity"], float)
+        assert isinstance(o["filled"], float)
+
+
+def test_open_orders_carry_the_id_cancel_takes(broker):
+    """
+    The whole point of the row. `cancel_order` keys on the client id; showing a
+    working order without it leaves a person holding an order they cannot pull
+    through this tool -- which is the Webull cancel failure in a new costume.
+    """
+    if capabilities.CANCEL_ORDER not in capabilities.declared(broker):
+        return
+    for o in broker.open_orders():
+        assert o["client_order_id"], (
+            f"{broker.name} returned a working order with no client id: {o!r}")
 
 
 def test_rule_violations_returns_sentences_not_codes(broker):
@@ -857,39 +904,52 @@ def test_a_broken_adapter_is_reported_not_swallowed(monkeypatch):
     assert "failed to load" in out and "no credentials" in out
 
 
-def test_every_webull_only_tool_says_so_instead_of_blaming_missing_credentials(monkeypatch):
+def test_a_tool_is_not_registered_when_the_broker_cannot_serve_it(monkeypatch):
     """
-    Adding an adapter to the registry is not the same as routing the execution
-    tools through it. Before this guard, configuring FINANCE_BROKER=ibkr and
-    calling get_open_positions failed with "Webull App Key and App Secret are
-    not configured in .env" -- a true sentence about the wrong problem, which
-    sends a model looking for credentials the user deliberately does not have.
+    The point of the gate. Saxo cannot cancel by our id -- there is no
+    documented mapping from ExternalReference to OrderId -- so a cancel tool
+    offered to a Saxo user is a tool that can only refuse. An unusable tool
+    costs a model context on every request and is one more wrong choice
+    available to it.
     """
-    import inspect
-
     import finance_mcp as srv
+    from dashboard.brokers.saxo import SaxoBroker
+
+    assert capabilities.CANCEL_ORDER not in SaxoBroker.CAPABILITIES, (
+        "saxo cancel_order raises SaxoNotVerified, so it must not be declared")
+    for other in ("webull", "ibkr"):
+        assert capabilities.CANCEL_ORDER in ADAPTERS[other]().CAPABILITIES
+
+    monkeypatch.setattr(srv.brokers, "get", lambda name=None: make_saxo())
+    monkeypatch.setenv("FINANCE_BROKER", "saxo")
+    assert capabilities.CANCEL_ORDER not in srv._active_capabilities()
+
+
+def test_a_gated_tool_reached_anyway_names_the_broker_that_cannot_do_it(monkeypatch):
+    """
+    Registration is resolved once at import; the broker can change under a
+    long-lived process. The runtime check is the backstop, and it must not fail
+    with a missing credential for a broker the user never configured -- which
+    is what "Webull App Key and App Secret are not configured in .env" did to
+    someone who had configured IBKR.
+    """
+    import finance_mcp as srv
+    monkeypatch.setattr(srv, "_active_capabilities", lambda: frozenset())
     monkeypatch.setenv("FINANCE_BROKER", "ibkr")
 
-    for name in srv.WEBULL_ONLY_TOOLS:
-        fn = getattr(srv, name)
-        required = [p for p in inspect.signature(fn).parameters.values()
-                    if p.default is inspect.Parameter.empty]
-        args = [1.0 if p.annotation is float else "AAPL" for p in required]
-        with pytest.raises(Exception) as raised:
-            fn(*args)
-        message = str(raised.value)
-        assert "ibkr" in message, f"{name} did not name the configured broker"
-        assert "Webull App Key" not in message, (
-            f"{name} still blames missing Webull credentials")
-        assert "broker-agnostic" in message, (
-            f"{name} does not say which tools still work")
+    with pytest.raises(Exception) as raised:
+        srv.get_open_positions()
+    message = str(raised.value)
+    assert "ibkr" in message
+    assert "Webull App Key" not in message
+    assert "broker-agnostic" in message
 
 
-def test_no_webull_backed_tool_escapes_the_list():
+def test_every_broker_tool_declares_the_capability_it_needs():
     """
-    The guard is only as good as the list. A ninth tool reaching for
-    TradeClient without being declared would fail the old confusing way again,
-    so the list is checked against the source rather than trusted.
+    The gate is only as good as the declarations. A ninth tool reaching for the
+    broker without one would be registered unconditionally and fail the old
+    confusing way, so the list is checked against the source.
     """
     import inspect
     import re
@@ -897,8 +957,9 @@ def test_no_webull_backed_tool_escapes_the_list():
     import finance_mcp as srv
 
     source = open(srv.__file__, encoding="utf-8").read()
-    declared = set(re.findall(r"@mcp\.tool\(\)\s*\n(?:@webull_backed\s*\n)?def (\w+)",
-                              source))
+    declared = set(re.findall(
+        r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n(?:@[\w.]+(?:\([^)]*\))?\n)*def (\w+)",
+        source))
     touches_broker = set()
     for name in declared:
         fn = getattr(srv, name, None)
@@ -906,42 +967,123 @@ def test_no_webull_backed_tool_escapes_the_list():
             continue
         body = inspect.getsource(inspect.unwrap(fn))
         if any(marker in body for marker in
-               ("TradeClient", "account_v2", "order_v3", "broker.get_")):
+               ("brokers.get()", "TradeClient", "account_v2", "order_v3")):
             touches_broker.add(name)
 
-    assert touches_broker == set(srv.WEBULL_ONLY_TOOLS), (
-        "WEBULL_ONLY_TOOLS is out of step with the code. Undeclared: "
-        f"{sorted(touches_broker - set(srv.WEBULL_ONLY_TOOLS))}; "
-        f"declared but broker-free: {sorted(set(srv.WEBULL_ONLY_TOOLS) - touches_broker)}")
+    assert touches_broker == set(srv.BROKER_TOOLS), (
+        "BROKER_TOOLS is out of step with the code. Undeclared: "
+        f"{sorted(touches_broker - set(srv.BROKER_TOOLS))}; "
+        f"declared but broker-free: {sorted(set(srv.BROKER_TOOLS) - touches_broker)}")
+
+    for name in srv.BROKER_TOOLS:
+        fn = getattr(srv, name)
+        assert getattr(fn, "__finance_capability__", None) in capabilities.ALL, (
+            f"{name} is a broker tool but declares no capability")
 
 
-def test_the_guard_stays_out_of_the_way_for_webull(monkeypatch):
-    """It is a routing check, not a second set of credentials to satisfy."""
-    import finance_mcp as srv
-    monkeypatch.setenv("FINANCE_BROKER", "webull")
-
-    called = {}
-
-    @srv.webull_backed
-    def sample():
-        called["yes"] = True
-        return "ok"
-
-    assert sample() == "ok" and called
-
-
-def test_the_broker_agnostic_tools_outnumber_the_webull_only_ones():
+def test_capability_resolution_never_touches_the_network(monkeypatch):
     """
-    The claim the README makes. If a change inverts it the README is wrong,
-    and a reader deciding whether this is usable with their broker is misled.
+    Tool registration runs at import. A server that needs the internet to list
+    its own tools is a server that fails to start on a train.
+    """
+    import socket
+
+    import finance_mcp as srv
+
+    def forbidden(*a, **k):
+        raise AssertionError("capability resolution opened a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert isinstance(srv._active_capabilities(), frozenset)
+
+
+def test_capability_resolution_fails_open(monkeypatch):
+    """
+    A broker that cannot even be constructed must not silently produce a server
+    offering nothing. Better to register every tool and have each say what is
+    wrong when called.
+    """
+    import finance_mcp as srv
+
+    def boom(name=None):
+        raise ValueError("no credentials configured")
+
+    monkeypatch.setattr(srv.brokers, "get", boom)
+    assert srv._active_capabilities() == frozenset(capabilities.GATING)
+
+
+def test_a_probe_can_withdraw_a_capability_but_never_add_one(tmp_path, monkeypatch):
+    """
+    "Webull" is twelve regional entities. Probed live, api.webull.co.th refuses
+    options that api.webull.com serves, so a table keyed on broker name is
+    wrong -- and a probe that has never run is not evidence of anything, which
+    is why it can only ever take capability away.
+    """
+    monkeypatch.setattr(capabilities, "_cache_path",
+                        lambda: str(tmp_path / "caps.json"))
+    broker = make_ibkr()
+
+    assert capabilities.CANCEL_ORDER in capabilities.effective(broker)
+    assert capabilities.unprobed(broker) == capabilities.declared(broker)
+
+    capabilities.record(broker, {
+        capabilities.CANCEL_ORDER: {"status": "refused", "detail": "UNSUPPORTED"},
+        capabilities.POSITIONS: {"status": "ok"},
+        capabilities.MARKET_SCANNER: {"status": "ok"},
+    })
+    after = capabilities.effective(broker)
+    assert capabilities.CANCEL_ORDER not in after, "a refusal must withdraw it"
+    assert capabilities.POSITIONS in after
+    assert capabilities.MARKET_SCANNER not in after, (
+        "the adapter does not implement it; the API supporting it changes nothing")
+
+
+def test_capability_records_are_keyed_per_entity_not_per_broker_name(tmp_path, monkeypatch):
+    """
+    The TH and US Webull entities are different brokers wearing one name. A
+    record from one must not answer for the other.
+    """
+    monkeypatch.setattr(capabilities, "_cache_path",
+                        lambda: str(tmp_path / "caps.json"))
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    gateway = IbkrBroker(base_url="https://localhost:5000/v1/api", account_id="U1")
+    hosted = IbkrBroker(base_url="https://api.ibkr.com/v1/api", account_id="U1")
+    assert capabilities.fingerprint(gateway) != capabilities.fingerprint(hosted)
+
+    other_account = IbkrBroker(base_url="https://localhost:5000/v1/api", account_id="DU9")
+    assert capabilities.fingerprint(gateway) != capabilities.fingerprint(other_account)
+
+    capabilities.record(gateway, {capabilities.POSITIONS: {"status": "refused"}})
+    assert capabilities.POSITIONS not in capabilities.effective(gateway)
+    assert capabilities.POSITIONS in capabilities.effective(hosted)
+
+
+def test_the_account_id_is_not_written_into_the_capability_file(tmp_path, monkeypatch):
+    """It ends up in a config file people paste into issues."""
+    monkeypatch.setattr(capabilities, "_cache_path",
+                        lambda: str(tmp_path / "caps.json"))
+    broker = make_ibkr()
+    capabilities.record(broker, {capabilities.POSITIONS: {"status": "ok"}})
+    written = (tmp_path / "caps.json").read_text(encoding="utf-8")
+    assert IBKR_ACCOUNT not in written
+
+
+def test_the_broker_agnostic_tools_outnumber_the_gated_ones():
+    """
+    The claim the README makes. If a change inverts it the README is wrong, and
+    a reader deciding whether this is usable with their broker is misled.
     """
     import re
 
     import finance_mcp as srv
     source = open(srv.__file__, encoding="utf-8").read()
-    total = len(re.findall(r"@mcp\.tool\(\)\s*\n(?:@webull_backed\s*\n)?def \w+", source))
+    total = len(re.findall(
+        r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n(?:@[\w.]+(?:\([^)]*\))?\n)*def \w+",
+        source))
     assert total == 39, f"tool count changed to {total}; the README says 39"
-    assert len(srv.WEBULL_ONLY_TOOLS) == 8
+    assert len(srv.BROKER_TOOLS) == 8
     readme = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "README.md"), encoding="utf-8").read()
     assert "31 of the 39" in readme, (

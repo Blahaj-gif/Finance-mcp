@@ -17,12 +17,21 @@ The logic itself stays in dashboard/broker.py; this is the protocol face over it
 so nothing that already worked had to be rewritten to gain an interface.
 """
 from dashboard import broker as _wb
+from dashboard import capabilities as _cap
 from dashboard import webull_client as _wc
 
 
 class WebullBroker:
     name = "webull"
     verified = True          # exercised end to end against a live account
+
+    #: What this adapter implements. What the *entity* serves is a separate
+    #: question -- api.webull.co.th refuses options and the instrument
+    #: catalogue that api.webull.com serves -- which is what the probe in
+    #: dashboard/capabilities.py is for.
+    CAPABILITIES = frozenset((
+        _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER))
 
     def __init__(self):
         self._trade_client = None
@@ -47,6 +56,19 @@ class WebullBroker:
     def _balance(self):
         return _wc.unwrap(_wc.call_webull(
             self._client().account_v2.get_account_balance, self.primary_account_id()))
+
+    def accounts(self) -> list:
+        out = []
+        for a in _wb.list_accounts(self._client()):
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "id": str(a.get("account_id") or a.get("accountId") or ""),
+                "currency": str(a.get("currency") or "").upper(),
+                "label": str(a.get("account_type") or a.get("accountType") or ""),
+                "raw": a,
+            })
+        return out
 
     def buying_power(self, currency: str = "USD") -> float:
         return _wb.get_buying_power(self._balance(), currency)
@@ -99,6 +121,30 @@ class WebullBroker:
             "client_order_id": str(res.get("client_order_id", order.get("client_order_id", ""))),
             "raw": res,
         }
+
+    def open_orders(self) -> list:
+        raw = _wc.unwrap(_wc.call_webull(
+            self._client().order_v3.get_order_open, self.primary_account_id()))
+        out = []
+        for o in raw or []:
+            if not isinstance(o, dict):
+                continue
+            # Webull nests the instrument leg; a stock order has exactly one.
+            leg = (o.get("items") or [{}])[0] if isinstance(o.get("items"), list) else {}
+            out.append({
+                "order_id": str(o.get("order_id") or o.get("orderId") or ""),
+                "client_order_id": str(o.get("client_order_id")
+                                       or o.get("clientOrderId") or ""),
+                "symbol": str(o.get("symbol") or leg.get("symbol") or ""),
+                "action": str(o.get("side") or leg.get("side") or "").upper(),
+                "quantity": _as_float(o.get("quantity", leg.get("quantity"))) or 0.0,
+                "filled": _as_float(o.get("filled_quantity",
+                                          o.get("filledQuantity"))) or 0.0,
+                "limit_price": _as_float(o.get("limit_price", o.get("limitPrice"))),
+                "status": str(o.get("order_status") or o.get("status") or ""),
+                "raw": o,
+            })
+        return out
 
     def confirm_order(self, reply_id: str, confirmed: bool = True) -> dict:
         """

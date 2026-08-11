@@ -70,29 +70,39 @@ rather than guess on the paths the docs did not pin down.
 runs the same suite against every adapter. `FINANCE_BROKER=ibkr` selects which
 adapter the protocol and the MCP tools report through.
 
-### What works with a non-Webull broker today
+### What works with which broker
 
 **31 of the 39 tools are broker-agnostic** — prices, indicators, options, SEC
 filings, insider and institutional data, earnings, macro. They read public
-sources and work the same whoever you clear through. With no Webull credentials
-the price feed falls back to Yahoo and says so on every response.
+sources and work the same whoever you clear through.
 
-**8 are not**, and they are the account and order tools:
+The other **8 are the account and order tools**, and they go through
+`broker_protocol.py`, so they work with any adapter that declares the capability
+they need:
 
-| Tool | |
+| Tool | Needs |
 |---|---|
-| `get_account_info` `get_open_positions` `get_open_orders` | read your account |
-| `draft_order` `preview_order` `cancel_order` | reach the order book |
-| `calculate_position_size` `get_portfolio_risk` | size against your real balance |
+| `get_account_info` `get_open_positions` `get_open_orders` | `accounts` `positions` `open_orders` |
+| `draft_order` `preview_order` `cancel_order` | `buying_power` `preview_order` `cancel_order` |
+| `calculate_position_size` `get_portfolio_risk` | `buying_power` `positions` |
 
-These still call Webull's SDK directly rather than going through
-`broker_protocol.py`. Called with `FINANCE_BROKER=ibkr` they refuse and say why,
-rather than failing with a missing-Webull-key error about a broker you did not
-configure. **The dashboard's submit button is Webull-only for the same reason.**
+**A tool is only registered when the configured broker can serve it.** Start with
+`FINANCE_BROKER=saxo` and `tools/list` returns 38, not 39 — Saxo cancels by its
+own order id and documents no mapping from ours, so a cancel tool would be a
+tool that can only refuse. An unusable tool costs a model context on every
+request and is one more wrong choice available to it.
 
-Routing them through the registry is the obvious next step and deliberately not
-taken yet: it would put two adapters that nobody has run on the one code path
-that has been exercised for real. Verification comes first — which is what
+Capability is resolved per **account**, not per broker name, because a broker
+name is not one API. Probed live, Webull's Thai entity refuses the options
+endpoints its US entity serves, caps order-book depth at one level, and does not
+answer the instrument-catalogue call at all — same SDK, same credentials.
+`dashboard/capabilities.py` keeps a cache keyed on broker × entity × account,
+and a probe can only ever *withdraw* a capability, never invent one.
+
+**The dashboard's submit button is still Webull-only.** The MCP tools route
+through the protocol; the Streamlit approve-and-submit path does not yet, and
+moving it means putting two adapters nobody has run on the one code path that
+has been exercised for real. Verification comes first — which is what
 [HELP-WANTED.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md) is asking for.
 
 IBKR is the Client Portal **Web** API — plain request/response JSON — not the TWS

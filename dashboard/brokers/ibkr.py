@@ -75,9 +75,11 @@ import urllib.parse
 import urllib.request
 
 try:
+    from dashboard import capabilities as _cap
     from dashboard.broker_protocol import ConfirmationRequired
     from dashboard.envfile import load_env
 except ImportError:  # imported as a top-level module from dashboard/
+    import capabilities as _cap
     from broker_protocol import ConfirmationRequired
     from envfile import load_env
 
@@ -116,6 +118,10 @@ _CURRENCY = re.compile(r"\b([A-Z]{3})\b")
 
 class IbkrBroker:
     name = "ibkr"
+
+    CAPABILITIES = frozenset((
+        _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER))
     #: Never set this True from a reading of the code. It means somebody ran it
     #: against the API and reported what happened.
     verified = False
@@ -278,6 +284,25 @@ class IbkrBroker:
         return self._account_id
 
     # -- account ----------------------------------------------------------
+    def accounts(self) -> list:
+        payload = self._request("GET", "/portfolio/accounts")
+        rows = payload if isinstance(payload, list) else (payload or {}).get("accounts") or []
+        out = []
+        for a in rows:
+            if not isinstance(a, dict):
+                continue
+            account_id = str(a.get("accountId") or a.get("id") or "")
+            out.append({
+                "id": account_id,
+                "currency": str(a.get("currency") or "").upper(),
+                # DU… is a paper account. Saying so beside the id is cheaper
+                # than a person inferring it from a prefix.
+                "label": str(a.get("accountTitle") or a.get("desc") or "")
+                         + (" (paper)" if account_id.upper().startswith("DU") else ""),
+                "raw": a,
+            })
+        return out
+
     def ledger(self) -> dict:
         """Cash per currency, keyed by currency code plus a "BASE" entry."""
         payload = self._request(
@@ -599,11 +624,31 @@ class IbkrBroker:
         }
 
     def live_orders(self) -> list:
+        """IBKR's rows, unnormalised. open_orders() is the protocol shape."""
         payload = self._request("GET", "/iserver/account/orders")
         if isinstance(payload, list):
             return [r for r in payload if isinstance(r, dict)]
         rows = (payload or {}).get("orders") or []
         return [r for r in rows if isinstance(r, dict)]
+
+    def open_orders(self) -> list:
+        out = []
+        for o in self.live_orders():
+            out.append({
+                "order_id": str(o.get("orderId") or o.get("order_id") or ""),
+                "client_order_id": str(o.get("order_ref") or ""),
+                "symbol": str(o.get("ticker") or o.get("symbol") or ""),
+                "action": str(o.get("side") or "").upper(),
+                # IBKR reports what is left, not what was asked for, so the
+                # original size is remaining + filled.
+                "quantity": ((_num(o.get("remainingQuantity")) or 0.0)
+                             + (_num(o.get("filledQuantity")) or 0.0)),
+                "filled": _num(o.get("filledQuantity")) or 0.0,
+                "limit_price": _num(o.get("price")),
+                "status": str(o.get("status") or ""),
+                "raw": o,
+            })
+        return out
 
     def order_id_for(self, client_order_id: str) -> str:
         """

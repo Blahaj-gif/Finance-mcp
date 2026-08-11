@@ -440,11 +440,16 @@ def _tool_bodies():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "finance_mcp.py"), encoding="utf-8").read()
     out = []
-    for chunk in re.split(r"\n@mcp\.tool\(\)\n", src)[1:]:
-        m = re.match(r"(?:@\w+\n)*def (\w+)", chunk)
+    for chunk in re.split(_TOOL_DECORATOR, src)[1:]:
+        m = re.match(r"(?:@[\w.]+(?:\([^)]*\))?\n)*def (\w+)", chunk)
         if m:
-            out.append((m.group(1), chunk.split("\n@mcp.tool()")[0]))
+            out.append((m.group(1), re.split(_TOOL_DECORATOR, chunk)[0]))
     return out
+
+
+#: A tool is registered either directly or through the capability gate, and a
+#: scanner that knows only one of the two quietly stops covering the other.
+_TOOL_DECORATOR = r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n"
 
 
 def test_the_tool_body_scanner_sees_every_tool():
@@ -456,7 +461,7 @@ def test_the_tool_body_scanner_sees_every_tool():
     import re
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "finance_mcp.py"), encoding="utf-8").read()
-    declared = re.findall(r"\n@mcp\.tool\(\)\n(?:@\w+\n)*def (\w+)", src)
+    declared = re.findall(_TOOL_DECORATOR + r"(?:@[\w.]+(?:\([^)]*\))?\n)*def (\w+)", src)
     assert sorted(name for name, _ in _tool_bodies()) == sorted(declared)
     assert len(declared) == 39
 
@@ -871,7 +876,7 @@ def test_the_offline_rules_run_before_anything_that_needs_the_network():
     the test above pass locally while CI failed.
     """
     body = dict(_tool_bodies())["draft_order"]
-    rules_at = body.index("order_rule_violations")
+    rules_at = body.index("rule_violations(")
     network_at = body.index("PRE-TRADE RISK CHECKS")
     assert rules_at < network_at, (
         "the offline construction and rule checks must precede the account checks")

@@ -24,6 +24,7 @@ import dashboard.market_calendar as market_calendar
 import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
+import dashboard.capabilities as capabilities
 import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 
@@ -42,44 +43,65 @@ HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over fiv
 mcp = FastMCP("Finance MCP")
 
 
-#: Tools that talk to Webull's SDK directly rather than through
-#: dashboard/broker_protocol.py. Everything else here is broker-agnostic: it
-#: reads prices, filings and macro data, and works the same whoever you clear
-#: through. See webull_backed() below for why the distinction is announced
-#: rather than left to fail as a missing-credentials error.
-WEBULL_ONLY_TOOLS = ("get_account_info", "get_open_positions", "get_open_orders",
-                     "draft_order", "preview_order", "cancel_order",
-                     "calculate_position_size", "get_portfolio_risk")
+#: Tools that need a broker at all. Everything else here is broker-agnostic:
+#: prices, filings, options and macro data, the same whoever you clear through.
+BROKER_TOOLS = ("get_account_info", "get_open_positions", "get_open_orders",
+                "draft_order", "preview_order", "cancel_order",
+                "calculate_position_size", "get_portfolio_risk")
 
 
-def webull_backed(fn):
+def _active_capabilities():
     """
-    Mark a tool as still wired to Webull's SDK rather than the broker protocol.
+    What the configured broker can do, for this account.
 
-    Configuring FINANCE_BROKER=ibkr and calling one of these used to fail with
-    "Webull App Key and App Secret are not configured in .env", which is a true
-    sentence about the wrong problem: the user configured a broker, and the
-    tool does not know how to use it. A model reading that error will go and
-    look for Webull credentials the user deliberately does not have.
+    Deliberately makes no network call: a server that needs the internet to
+    list its own tools is a server that fails to start on a train. It reads the
+    adapter's declaration and the cached result of any probe already run.
 
-    So it says what is actually the case. Adding an adapter to the registry is
-    not the same as routing the execution tools through it, and pretending
-    otherwise is how an unverified adapter ends up trusted.
+    Fails *open*. If the broker cannot even be constructed, every tool is
+    registered and each says what is wrong when called -- better than a server
+    that silently offers nothing because a key is missing.
     """
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        active = brokers.active_name()
-        if active != "webull":
-            raise ToolError(
-                f"`{fn.__name__}` is not available with FINANCE_BROKER={active!r}. "
-                f"It talks to Webull's SDK directly and has not been routed "
-                f"through the broker protocol yet, so it cannot use a "
-                f"{active} account. The other tools here — prices, indicators, "
-                f"filings, options, macro — are broker-agnostic and work "
-                f"normally. To use this one, set FINANCE_BROKER=webull with "
-                f"Webull credentials configured.")
-        return fn(*args, **kwargs)
-    return wrapper
+    try:
+        return capabilities.effective(brokers.get())
+    except Exception:
+        return frozenset(capabilities.GATING)
+
+
+ACTIVE_CAPABILITIES = _active_capabilities()
+
+
+def needs(capability):
+    """
+    Declare which broker capability a tool depends on.
+
+    Two things follow. The tool is only **registered** when the configured
+    broker has the capability, so `tools/list` never advertises something that
+    will refuse -- an unusable tool costs a model context on every request and
+    is one more wrong choice available to it. If it is reached anyway it names
+    the broker that cannot do it, rather than failing deeper down with a
+    missing credential for a broker the user never configured.
+
+    Capability is resolved per *account*, not per broker name, because "Webull"
+    is twelve regional entities that do not serve the same endpoints: probed
+    live, api.webull.co.th refuses options that api.webull.com serves. See
+    dashboard/capabilities.py.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if capability not in _active_capabilities():
+                raise ToolError(
+                    f"`{fn.__name__}` needs the {capability!r} capability, which "
+                    f"the configured broker ({brokers.active_name()}) does not "
+                    "offer for this account. The broker-agnostic tools — prices, "
+                    "indicators, filings, options, macro — are unaffected.")
+            return fn(*args, **kwargs)
+        wrapper.__finance_capability__ = capability
+        if capability in ACTIVE_CAPABILITIES:
+            return mcp.tool()(wrapper)
+        return wrapper
+    return decorate
 
 
 @mcp.tool()
@@ -97,27 +119,22 @@ def check_connection() -> str:
     except Exception as e:
         return f"Connection test FAILED: {e}"
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.ACCOUNTS)
 def get_account_info() -> str:
-    """Fetches account list / information from Webull TH (requires authenticated token)."""
-    from webull.core.client import ApiClient
-    from webull.trade.trade_client import TradeClient
-    
+    """Lists every account the configured broker credentials can see."""
     try:
-        if not webull_client.WEBULL_APP_KEY or not webull_client.WEBULL_APP_SECRET:
-            raise ToolError("Webull App Key and App Secret are not configured in .env")
-            
-        # Shared, built-once client. Re-registering the SDK loggers per request
-        # re-added handlers each time (10.7 MB log, lines duplicated ~20x) and
-        # the SDK default level of DEBUG wrote the app key, request signatures
-        # and full response bodies to disk.
-        api_client = webull_client.get_api_client()
-
-        trade_client = TradeClient(api_client)
-        # Using the official v2 account list endpoint
-        res = webull_client.unwrap(webull_client.call_webull(trade_client.account_v2.get_account_list))
-        return f"### Webull Accounts\n\n```json\n{json.dumps(res, indent=2, default=str)}\n```"
+        adapter = brokers.get()
+        rows = adapter.accounts()
+        if not rows:
+            return f"### Accounts\n\nNo accounts visible to these {adapter.name} credentials."
+        out = f"### Accounts — {broker_protocol.describe(adapter)}\n\n"
+        for a in rows:
+            label = " ".join(p for p in (a.get("label"), a.get("currency")) if p)
+            out += f"* `{a['id']}`" + (f" — {label}" if label else "") + "\n"
+        if len(rows) > 1:
+            out += ("\nSeveral accounts are visible and none is pinned, so the "
+                    "account-scoped tools will refuse rather than choose one.\n")
+        return out
     except Exception as e:
         raise ToolError(f"Error fetching account info: {e}") from e
 
@@ -858,37 +875,30 @@ def get_journal_summary() -> str:
     except Exception as e:
         raise ToolError(f"Error reading journal summary: {e}") from e
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.POSITIONS)
 def get_open_positions() -> str:
     """
-    Pulls open Webull account positions and holdings summary.
+    Open positions on the configured broker account, with per-currency marks.
     """
-    from webull.core.client import ApiClient
-    from webull.trade.trade_client import TradeClient
-    
     try:
-        if not webull_client.WEBULL_APP_KEY or not webull_client.WEBULL_APP_SECRET:
-            raise ToolError("Webull App Key and App Secret are not configured in .env")
-            
-        # Shared, built-once client. Re-registering the SDK loggers per request
-        # re-added handlers each time (10.7 MB log, lines duplicated ~20x) and
-        # the SDK default level of DEBUG wrote the app key, request signatures
-        # and full response bodies to disk.
-        api_client = webull_client.get_api_client()
-
-        trade_client = TradeClient(api_client)
-
-        # This previously called get_account_list(), which returns accounts, not
-        # holdings -- the tool never returned a position despite its name. The
-        # SDK method is singular and account-scoped: get_account_position(account_id).
-        account_id = broker.get_primary_account_id(trade_client)
-        positions = webull_client.unwrap(webull_client.call_webull(trade_client.account_v2.get_account_position, account_id))
+        adapter = brokers.get()
+        account_id = adapter.primary_account_id()
+        positions = adapter.positions()
 
         if not positions:
             return f"### Open Positions\n\nNo open positions in account {account_id}."
 
-        return f"### Open Positions (account {account_id})\n\n```json\n{positions}\n```"
+        out = (f"### Open Positions (account {account_id}) — "
+               f"{broker_protocol.describe(adapter)}\n\n")
+        out += "| Symbol | Qty | Cost | Last | Currency |\n|---|---|---|---|---|\n"
+        for p in positions:
+            cost, last = p.get("cost"), p.get("last")
+            # Marks stay in their own currency. A USD holding inside a THB
+            # account is never summed with the account base.
+            out += (f"| {p['symbol']} | {p['quantity']:,.4g} | "
+                    f"{('%.4f' % cost) if cost else '-'} | "
+                    f"{('%.4f' % last) if last else '-'} | {p.get('currency') or '?'} |\n")
+        return out
     except Exception as e:
         raise ToolError(f"Error fetching open positions: {e}") from e
 
@@ -1293,8 +1303,7 @@ def get_short_interest(symbol: str) -> str:
 # HUMAN-IN-THE-LOOP (HITL) ORDER EXECUTION DESK
 # =====================================================================
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.BUYING_POWER)
 def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LMT", limit_price: float = None) -> str:
     """
     Drafts an order for human review and approval in the Streamlit Dashboard.
@@ -1329,8 +1338,9 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         # trip to reject -- and on a machine with no credentials configured, it
         # should still be refused for the right reason rather than for a
         # missing key.
+        adapter = brokers.get()
         try:
-            candidate = broker.build_order(
+            candidate = adapter.build_order(
                 symbol=symbol, action=action, quantity=quantity,
                 order_type=order_type, limit_price=limit_price,
                 client_order_id=draft_id,
@@ -1341,37 +1351,23 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         # Rules the broker enforces at placement but not at preview. Without
         # this, a draft can pass every local check, price cleanly, be approved
         # by a human, and only then come back as an opaque 417.
-        violations = broker.order_rule_violations(candidate)
+        violations = adapter.rule_violations(candidate)
         if violations:
-            return ("SAFETY BLOCK: Webull would refuse this order at submission — "
-                    + " ".join(violations))
+            return (f"SAFETY BLOCK: {adapter.name} would refuse this order at "
+                    "submission — " + " ".join(violations))
 
         # --- PRE-TRADE RISK CHECKS ---
         try:
-            from webull.core.client import ApiClient
-            from webull.trade.trade_client import TradeClient
-            import sys
-            
-            api_client = webull_client.get_api_client()
-            trade_client = TradeClient(api_client)
-            
-            # Every trade endpoint is account-scoped; calling these with no
-            # argument raised TypeError, which the outer handler turned into a
-            # blanket "failed to verify" block. The guardrails never actually ran.
-            account_id = broker.get_primary_account_id(trade_client)
+            account_id = adapter.primary_account_id()
 
             if action.upper() == "SELL":
-                positions = webull_client.unwrap(
-                    webull_client.call_webull(trade_client.account_v2.get_account_position, account_id))
-                inventory = broker.get_position_quantity(positions, symbol)
+                inventory = adapter.position_quantity(symbol)
 
                 if quantity > inventory:
                     return f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, but account inventory only shows {inventory} shares. Naked short-selling is blocked."
 
             elif action.upper() == "BUY":
-                balances = webull_client.unwrap(
-                    webull_client.call_webull(trade_client.account_v2.get_account_balance, account_id))
-                bp = broker.get_buying_power(balances, "USD")
+                bp = adapter.buying_power("USD")
 
                 est_price = limit_price
                 if est_price is None:
@@ -1428,12 +1424,11 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         raise ToolError(f"Error drafting order: {e}") from e
 
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.PREVIEW_ORDER)
 def preview_order(symbol: str, action: str, quantity: float, order_type: str = "LMT",
                   limit_price: float = None) -> str:
     """
-    Asks Webull to price and validate an order WITHOUT placing it. Non-binding and safe.
+    Asks the broker to price and validate an order WITHOUT placing it. Non-binding and safe.
     Returns the broker's estimated cost and transaction fee, plus a buying-power comparison.
     Use this before draft_order to check affordability and fees.
 
@@ -1444,34 +1439,44 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
         order_type: LMT (Limit) or MKT (Market).
         limit_price: Required when order_type is LMT.
     """
-    from webull.trade.trade_client import TradeClient
     try:
-        order = broker.build_order(
+        adapter = brokers.get()
+        order = adapter.build_order(
             symbol=symbol, action=action, quantity=quantity,
             order_type=order_type, limit_price=limit_price,
         )
-        trade_client = TradeClient(webull_client.get_api_client())
-        account_id = broker.get_primary_account_id(trade_client)
-        quote = broker.preview_order(trade_client, account_id, order)
+        quote = adapter.preview_order(order)
 
-        cost = float(quote.get("estimated_cost", 0) or 0)
-        fee = float(quote.get("estimated_transaction_fee", 0) or 0)
+        cost = float(quote.get("cost") or 0)
+        fee = float(quote.get("fee") or 0)
+        currency = quote.get("currency") or "USD"
 
         out = (
-            f"### Order Preview — {order['side']} {quantity} {order['symbol']} "
-            f"({order['order_type']})\n"
-            f"* **Estimated cost**: `${cost:,.2f}`\n"
-            f"* **Estimated fee**: `${fee:,.2f}`\n"
-            f"* **Total**: `${cost + fee:,.2f}`\n"
+            f"### Order Preview — {action.upper()} {quantity} {symbol.upper()} "
+            f"({order_type.upper()})\n"
+            f"* **Broker**: {broker_protocol.describe(adapter)}\n"
+            f"* **Estimated cost**: `{cost:,.2f} {currency}`\n"
+            f"* **Estimated fee**: `{fee:,.2f} {currency}`\n"
+            f"* **Total**: `{cost + fee:,.2f} {currency}`\n"
         )
+        if quote.get("warning"):
+            out += f"* **Broker warning**: {quote['warning']}\n"
+
+        # Rules the broker enforces at placement but not at preview. Webull
+        # priced a 1-share $0.01 order cleanly and then refused it for a
+        # quantity-step rule, which is why this is shown next to the quote.
+        violations = adapter.rule_violations(order)
+        if violations:
+            out += "* **Would be refused at submission**: " + " ".join(violations) + "\n"
 
         # The broker's preview does not enforce buying power, so state it here.
+        # Asked for in the quote's own currency: summing currencies is a
+        # category error, and taking the first line once printed "0.00 HKD" on
+        # an account with 333.83 USD in it.
         try:
-            balances = webull_client.unwrap(webull_client.call_webull(
-                trade_client.account_v2.get_account_balance, account_id))
-            bp = broker.get_buying_power(balances, "USD")
-            affordable = order["side"] == "SELL" or (cost + fee) <= bp
-            out += (f"* **USD buying power**: `${bp:,.2f}`\n"
+            bp = adapter.buying_power(currency)
+            affordable = action.upper() == "SELL" or (cost + fee) <= bp
+            out += (f"* **{currency} buying power**: `{bp:,.2f}`\n"
                     f"* **Affordable**: {'yes' if affordable else 'NO - exceeds buying power'}\n")
         except Exception as be:
             out += f"* **Buying power**: could not verify ({be})\n"
@@ -1481,54 +1486,56 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
     except ValueError as ve:
         raise ToolError(f"Invalid order: {ve}") from ve
     except Exception as e:
-        raise ToolError(f"Webull refused to preview this order: {e}") from e
+        raise ToolError(f"{brokers.active_name()} refused to preview this order: {e}") from e
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.OPEN_ORDERS)
 def get_open_orders() -> str:
     """
-    Fetches all active/pending/working orders on the Webull account.
+    Working orders on the configured broker account.
     """
-    from webull.core.client import ApiClient
-    from webull.trade.trade_client import TradeClient
-    import logging
-    import sys
-    import os
-    
     try:
-        api_client = webull_client.get_api_client()
+        adapter = brokers.get()
+        account_id = adapter.primary_account_id()
+        orders = adapter.open_orders()
 
-        trade_client = TradeClient(api_client)
-        # get_order_open is account-scoped: calling it bare raised TypeError.
-        account_id = broker.get_primary_account_id(trade_client)
-        res = webull_client.unwrap(webull_client.call_webull(trade_client.order_v3.get_order_open, account_id))
-
-        if not res:
+        if not orders:
             return f"### Open Orders\n\nNo working orders in account {account_id}."
-        return f"### Open Orders (account {account_id})\n\n```json\n{res}\n```"
+
+        out = (f"### Open Orders (account {account_id}) — "
+               f"{broker_protocol.describe(adapter)}\n\n")
+        out += ("| Symbol | Side | Qty | Filled | Limit | Status | Cancel with |\n"
+                "|---|---|---|---|---|---|---|\n")
+        for o in orders:
+            price = o.get("limit_price")
+            # The last column is the id cancel_order takes. Passing the broker's
+            # own id instead is a 404, and that is how the Webull cancel path sat
+            # dead for months without anyone noticing.
+            out += (f"| {o['symbol']} | {o['action']} | {o['quantity']:,.4g} | "
+                    f"{o['filled']:,.4g} | {('%.4f' % price) if price else 'MKT'} | "
+                    f"{o['status']} | `{o['client_order_id'] or '(none returned)'}` |\n")
+        return out
     except Exception as e:
         raise ToolError(f"Error fetching open orders: {e}") from e
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.CANCEL_ORDER)
 def cancel_order(order_id: str) -> str:
     """
-    Cancels a pending or active order on the Webull account immediately.
+    Cancels a pending or active order on the broker account immediately.
 
     Args:
         order_id: The order's **client_order_id** — the id this server generated
             when the order was drafted (it looks like `DRFT_9a32c8d5`), NOT the
-            broker's own `order_id`. `get_open_orders` shows both; the cancel
-            endpoint only accepts the client one.
+            broker's own `order_id`. `get_open_orders` shows both in its last
+            column; the cancel path only accepts the client one.
     """
-    from webull.trade.trade_client import TradeClient
-
     try:
-        trade_client = TradeClient(webull_client.get_api_client())
-        account_id = broker.get_primary_account_id(trade_client)
-        res = broker.cancel_order(trade_client, account_id, order_id)
+        adapter = brokers.get()
+        account_id = adapter.primary_account_id()
+        res = adapter.cancel_order(order_id)
         return (f"Cancellation request sent for client_order_id {order_id} "
-                f"(account {account_id}). Response:\n```json\n{res}\n```")
+                f"(account {account_id}, {adapter.name}). "
+                f"Broker order id {res.get('order_id') or '(not returned)'}.\n"
+                f"```json\n{res.get('raw')}\n```")
     except Exception as e:
         raise ToolError(f"Error cancelling order {order_id}: {e}") from e
 
@@ -1824,8 +1831,7 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
 # RISK & POSITION SIZING
 # =====================================================================
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.BUYING_POWER)
 def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: float = 1.0,
                             entry_price: float = None, account_currency: str = "USD") -> str:
     """
@@ -1859,20 +1865,26 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
 
         direction = "LONG" if stop < entry else "SHORT"
 
-        trade_client = TradeClient(webull_client.get_api_client())
-        account_id = broker.get_primary_account_id(trade_client)
-        balances = webull_client.unwrap(webull_client.call_webull(
-            trade_client.account_v2.get_account_balance, account_id))
-        buying_power = broker.get_buying_power(balances, account_currency)
+        adapter = brokers.get()
+        account_id = adapter.primary_account_id()
+        buying_power = adapter.buying_power(account_currency)
 
         # Equity, not buying power, is the correct base for a risk budget.
-        equity = 0.0
-        for asset in balances.get("account_currency_assets", []) or []:
-            if str(asset.get("currency", "")).upper() == account_currency.upper():
-                equity = float(asset.get("market_value", 0) or 0) + float(asset.get("cash_balance", 0) or 0)
-                break
+        # Only Webull reports it per currency; the protocol has no equity()
+        # because two of three brokers would have to guess at one. Where it is
+        # unavailable the base falls back to buying power, and the output says
+        # so rather than presenting a different number under the same name.
+        equity, equity_basis = 0.0, "equity"
+        if adapter.name == "webull":
+            balances = webull_client.unwrap(webull_client.call_webull(
+                adapter._client().account_v2.get_account_balance, account_id))
+            for asset in balances.get("account_currency_assets", []) or []:
+                if str(asset.get("currency", "")).upper() == account_currency.upper():
+                    equity = (float(asset.get("market_value", 0) or 0)
+                              + float(asset.get("cash_balance", 0) or 0))
+                    break
         if equity <= 0:
-            equity = buying_power
+            equity, equity_basis = buying_power, "buying power (equity unavailable)"
 
         risk_budget = equity * (risk_percent / 100.0)
         raw_shares = risk_budget / risk_per_share
@@ -2002,8 +2014,7 @@ def get_volume_profile(symbol: str, interval: str = "D", lookback: int = 100,
         raise ToolError(f"Error building volume profile for {symbol}: {e}") from e
 
 
-@mcp.tool()
-@webull_backed
+@needs(capabilities.POSITIONS)
 def get_portfolio_risk() -> str:
     """
     Analyses the live account: position-level P&L, concentration, and portfolio
@@ -2012,10 +2023,9 @@ def get_portfolio_risk() -> str:
     from webull.trade.trade_client import TradeClient
     import numpy as np
     try:
-        trade_client = TradeClient(webull_client.get_api_client())
-        account_id = broker.get_primary_account_id(trade_client)
-        positions = webull_client.unwrap(webull_client.call_webull(
-            trade_client.account_v2.get_account_position, account_id))
+        adapter = brokers.get()
+        account_id = adapter.primary_account_id()
+        positions = adapter.positions()
 
         if not positions:
             return f"### Portfolio Risk\n\nNo open positions in account {account_id}."
@@ -2023,10 +2033,12 @@ def get_portfolio_risk() -> str:
         rows, returns, warnings, ages = [], {}, [], []
         gross = 0.0
         for p in positions:
+            # Protocol shape, not Webull's: cost/last rather than
+            # cost_price/last_price, so every adapter reads the same here.
             sym = str(p.get("symbol", "")).upper()
             qty = float(p.get("quantity", 0) or 0)
-            cost = float(p.get("cost_price", 0) or 0)
-            last = float(p.get("last_price", 0) or 0)
+            cost = float(p.get("cost") or 0)
+            last = float(p.get("last") or 0)
             value = qty * last
             gross += value
             pnl_pct = ((last - cost) / cost * 100) if cost else 0.0

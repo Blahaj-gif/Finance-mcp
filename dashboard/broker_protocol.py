@@ -40,6 +40,10 @@ branch on which broker is configured:
     Quote     {"cost": float|None, "fee": float|None, "currency": str}
     Placement {"order_id": str, "client_order_id": str, "raw": dict}
     Position  {"symbol": str, "quantity": float, "currency": str, ...}
+    Account   {"id": str, "currency": str, "label": str, "raw": dict}
+    Order     {"order_id": str, "client_order_id": str, "symbol": str,
+               "action": str, "quantity": float, "filled": float,
+               "limit_price": float|None, "status": str, "raw": dict}
 """
 from typing import Protocol, runtime_checkable
 
@@ -99,6 +103,15 @@ class Broker(Protocol):
         """
         ...
 
+    def accounts(self) -> list:
+        """
+        Every account these credentials can see, normalised.
+
+        Distinct from `primary_account_id`, which refuses when there is more
+        than one. This is how a caller finds out what to pin.
+        """
+        ...
+
     def buying_power(self, currency: str = "USD") -> float:
         """Available buying power in one currency. Raises if that line is absent."""
         ...
@@ -150,6 +163,17 @@ class Broker(Protocol):
         Brokers that never ask raise NotImplementedError rather than returning
         a success that did not happen. Callers still route through here, so the
         broker that does ask is not a special case at the call site.
+        """
+        ...
+
+    def open_orders(self) -> list:
+        """
+        Working orders, normalised. Empty list when there are none.
+
+        Every broker here has this and none of them agreed on the shape, which
+        is why it is in the protocol rather than left to each tool. It is also
+        what makes cancellation usable: the id a caller must pass to
+        `cancel_order` is the `client_order_id` on these rows.
         """
         ...
 
