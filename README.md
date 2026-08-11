@@ -98,12 +98,22 @@ Two more exist only for the broker that has them: **`saxo_corporate_actions`**
 of the three with them) and **`ibkr_market_scanner`** (the exchange-side scan,
 rather than inferring rotation from eleven ETF price pulls).
 
-Capability is resolved per **account**, not per broker name, because a broker
-name is not one API. Probed live, Webull's Thai entity refuses the options
-endpoints its US entity serves, caps order-book depth at one level, and does not
-answer the instrument-catalogue call at all — same SDK, same credentials.
-`dashboard/capabilities.py` keeps a cache keyed on broker × entity × account,
-and a probe can only ever *withdraw* a capability, never invent one.
+Capability is resolved per **account**, not per broker name, because three
+different things have to line up:
+
+```
+capability = what the SDK implements
+           ∩ what the regional entity serves
+           ∩ what this account is entitled to
+```
+
+Webull alone runs twelve independent regional entities on separate hosts, and
+market-data entitlements are bought per account on top of that — an order book
+that returns one level means an L1 subscription, not a missing endpoint.
+`dashboard/capabilities.py` keeps a cache keyed on broker × entity × account, a
+probe can only ever *withdraw* a capability and never invent one, and it records
+**what** a call did rather than why. Inferring a cause from an error message is
+how this file previously came to blame a region for a parameter mistake.
 
 ### Prices come from your broker
 

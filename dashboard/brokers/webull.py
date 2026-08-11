@@ -25,10 +25,9 @@ class WebullBroker:
     name = "webull"
     verified = True          # exercised end to end against a live account
 
-    #: What this adapter implements. What the *entity* serves is a separate
-    #: question -- api.webull.co.th refuses options and the instrument
-    #: catalogue that api.webull.com serves -- which is what the probe in
-    #: dashboard/capabilities.py is for.
+    #: What this adapter implements. What the regional entity serves, and what
+    #: this account is entitled to buy, are two further questions the code
+    #: cannot answer -- see dashboard/capabilities.py.
     CAPABILITIES = frozenset((
         _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
         _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER,
@@ -110,18 +109,20 @@ class WebullBroker:
         """
         Not fetched, and not faked either.
 
-        The SDK offers get_trade_instrument_detail, but probed live the TH
-        entity answers get_tradeable_instruments with SDK.UnknownServerError --
-        the same signature cancel_order gave on order_v2 -- so there is no
-        reliable way from a ticker to an instrument_id here. The one rule this
-        adapter does know is published, hardcoded, and applied by
-        rule_violations without pretending to have come from the API.
+        The SDK offers get_trade_instrument_detail, which takes an
+        instrument_id rather than a ticker; the catalogue call that would map
+        one to the other returned SDK.UnknownServerError when probed. Why is
+        not established -- entity, entitlement and a bad call all produce
+        refusals that read alike -- and the honest response to an unmapped
+        instrument is not to invent its tick size. The one rule this adapter
+        does know is published, hardcoded, and applied by rule_violations
+        without pretending to have come from the API.
         """
         raise NotImplementedError(
-            "Webull's instrument-detail endpoint does not answer in every "
-            "region (probed: SDK.UnknownServerError on api.webull.co.th), so "
-            "tick and lot sizes are not fetched. rule_violations still applies "
-            "the published quantity-step rule.")
+            "Webull's instrument catalogue did not answer when probed "
+            "(SDK.UnknownServerError), so there is no reliable ticker -> "
+            "instrument_id path and tick and lot sizes are not fetched. "
+            "rule_violations still applies the published quantity-step rule.")
 
     def history_bars(self, symbol: str, interval: str = "D", count: int = 200):
         """

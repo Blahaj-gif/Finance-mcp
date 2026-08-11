@@ -83,10 +83,11 @@ def needs(capability):
     the broker that cannot do it, rather than failing deeper down with a
     missing credential for a broker the user never configured.
 
-    Capability is resolved per *account*, not per broker name, because "Webull"
-    is twelve regional entities that do not serve the same endpoints: probed
-    live, api.webull.co.th refuses options that api.webull.com serves. See
-    dashboard/capabilities.py.
+    Capability is resolved per *account*, not per broker name, because three
+    things have to line up: what the SDK implements, what the regional entity
+    serves, and what the account is entitled to. Webull alone runs twelve
+    entities on separate hosts, and market-data entitlements are bought on top
+    of that. See dashboard/capabilities.py.
     """
     def decorate(fn):
         @functools.wraps(fn)
@@ -1408,7 +1409,16 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             "quantity": float(quantity),
             "order_type": order_type.upper(),
             "limit_price": float(limit_price) if limit_price else None,
-            "status": "PENDING_APPROVAL"
+            "status": "PENDING_APPROVAL",
+            # Which broker this was drafted against, and where it would land.
+            # The draft carries symbol/quantity, not a broker-native order, so
+            # nothing in the file itself distinguishes an IBKR draft from a
+            # Webull one -- and the dashboard rebuilds the order at approval
+            # time. Without this a draft could be raised against one broker and
+            # submitted to another, which is not a failure anyone would catch
+            # by reading the confirmation.
+            "broker": adapter.name,
+            "environment": adapter.environment_label(),
         }
 
         drafts.append(new_draft)

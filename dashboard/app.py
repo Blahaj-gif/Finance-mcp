@@ -1054,6 +1054,22 @@ with tab_execution:
                 """)
                 
                 preview_key = f"preview_{draft['draft_id']}"
+
+                # A draft carries symbol/quantity, not a broker-native order,
+                # and this page rebuilds the order against Webull at approval
+                # time. A draft raised while FINANCE_BROKER pointed elsewhere
+                # would therefore be submitted to the wrong broker, and nothing
+                # in the confirmation would say so. Drafts predating this field
+                # are Webull's, because Webull was the only option then.
+                drafted_for = str(draft.get("broker", "webull")).lower()
+                if drafted_for != "webull":
+                    st.error(
+                        f"This draft was raised against **{drafted_for}**, and this "
+                        "page can only submit to Webull. Cancel it and re-draft "
+                        "with FINANCE_BROKER=webull, or submit it on "
+                        f"{drafted_for}'s own platform. Nothing has been sent.")
+                    continue
+
                 col_prev, col_exec = st.columns([1, 1])
 
                 # --- Step 1: price the order with the broker (non-binding) ---

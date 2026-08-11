@@ -44,8 +44,20 @@ except Exception:
     _FORMAT = "csv"
 
 
+def _namespace() -> str:
+    """
+    The cache is shared by the MCP server and the dashboard, which is the point
+    -- two processes asking for the same bars used to pay twice. It must not be
+    shared across *brokers*: the price feed now follows FINANCE_BROKER, so a
+    frame fetched from Webull would otherwise be handed to a Saxo-configured
+    process as though Saxo had served it. Different adjustment, different
+    session coverage, different exchange.
+    """
+    return os.getenv("FINANCE_BROKER", "webull").strip().lower() or "webull"
+
+
 def _key(symbol: str, interval: str, count: int) -> str:
-    raw = f"{symbol.upper()}|{interval.upper()}|{int(count)}"
+    raw = f"{_namespace()}|{symbol.upper()}|{interval.upper()}|{int(count)}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 

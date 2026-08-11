@@ -70,6 +70,7 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -98,6 +99,10 @@ class IbkrNotVerified(NotImplementedError):
 class IbkrError(RuntimeError):
     """IBKR returned an error, or the response was not the documented shape."""
 
+
+#: IBKR expires an idle brokerage session in roughly six minutes. Half of
+#: that leaves room for a slow call without tickling on every request.
+TICKLE_AFTER_SECONDS = 180
 
 GATEWAY_BASE = "https://localhost:5000/v1/api"
 HOSTED_BASE = "https://api.ibkr.com/v1/api"
@@ -154,6 +159,9 @@ class IbkrBroker:
         self._insecure = os.getenv("IBKR_TLS_INSECURE", "").strip().lower() in (
             "1", "true", "yes")
         self._brokerage_session_ready = False
+        # Monotonic, not wall clock: a session that survives a clock
+        # change should not suddenly look six minutes idle.
+        self._last_call = time.monotonic()
         # Injectable so the conformance tests can drive the adapter without a
         # network, and so a verifier can log every exchange.
         self._session = session or self._http
@@ -210,7 +218,12 @@ class IbkrBroker:
             headers["Authorization"] = f"Bearer {self._token}"
         if body is not None:
             headers["Content-Type"] = "application/json"
-        return self._session(method, url, body, headers)
+        try:
+            return self._session(method, url, body, headers)
+        finally:
+            # Any call keeps the session warm, so idleness is measured
+            # from the last one rather than from the last tickle.
+            self._last_call = time.monotonic()
 
     # -- session ----------------------------------------------------------
     def auth_status(self) -> dict:
@@ -243,12 +256,32 @@ class IbkrBroker:
         IBKR documents GET /iserver/accounts as a prerequisite for order
         endpoints in a new session. Skipping it fails at placement, which is
         the worst place to find out.
+
+        Also keeps the session warm. IBKR expires an idle brokerage session in
+        roughly six minutes, and an MCP server is idle almost all the time --
+        it wakes when someone asks a question. Client libraries run a
+        background "tickler" thread for this; a thread that outlives the call
+        that made it is a thing to avoid in a stdio server, so this tickles on
+        the way in instead. Costs one request on a call that was about to make
+        several.
         """
+        if self._idle_seconds() > TICKLE_AFTER_SECONDS:
+            try:
+                self.tickle()
+            except IbkrError:
+                # A failed keep-alive is not itself a reason to refuse. Whatever
+                # is wrong will be reported by auth_status a line below, in the
+                # words IBKR used.
+                pass
+
         if self._brokerage_session_ready:
             return
         self.auth_status()
         self._request("GET", "/iserver/accounts")
         self._brokerage_session_ready = True
+
+    def _idle_seconds(self) -> float:
+        return time.monotonic() - self._last_call
 
     def tickle(self) -> dict:
         """Keep the session alive. IBKR expires an idle one in about 6 minutes."""

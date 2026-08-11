@@ -855,6 +855,57 @@ def test_ibkr_stops_when_the_gateway_is_not_logged_in():
         b.place_order(order)
 
 
+def test_ibkr_keeps_an_idle_session_warm_without_a_background_thread():
+    """
+    IBKR expires an idle brokerage session in roughly six minutes, and an MCP
+    server is idle almost all the time -- it wakes when someone asks a
+    question. Client libraries run a tickler thread; a thread outliving the
+    call that made it is a thing to avoid in a stdio server, so this tickles on
+    the way in instead.
+    """
+    import time as _time
+
+    seen = []
+
+    def recording(method, url, body, headers):
+        seen.append(url.split("/v1/api", 1)[-1].split("?")[0])
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(recording)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_k")
+
+    seen.clear()
+    b.place_order(order)
+    assert "/tickle" not in seen, "a busy session does not need tickling"
+
+    from dashboard.brokers import ibkr as mod
+    b._last_call = _time.monotonic() - (mod.TICKLE_AFTER_SECONDS + 5)
+    seen.clear()
+    b.place_order(order)
+    assert "/tickle" in seen, "an idle session must be woken before it is used"
+
+
+def test_a_failed_keep_alive_does_not_block_the_call():
+    """
+    Whatever is wrong will be reported by auth_status a line later, in IBKR's
+    own words. A keep-alive that refuses is not itself a reason to refuse.
+    """
+    import time as _time
+
+    from dashboard.brokers import ibkr as mod
+    from dashboard.brokers.ibkr import IbkrError
+
+    def tickle_fails(method, url, body, headers):
+        if url.endswith("/tickle"):
+            raise IbkrError("tickle returned HTTP 500")
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(tickle_fails)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_t")
+    b._last_call = _time.monotonic() - (mod.TICKLE_AFTER_SECONDS + 5)
+    assert b.place_order(order)["order_id"] == "IB1"
+
+
 def test_ibkr_opens_the_brokerage_session_before_it_sends_an_order():
     """IBKR documents GET /iserver/accounts as a prerequisite. Skipping it fails
     at placement, which is the worst place to find out."""
@@ -1211,6 +1262,57 @@ def test_the_broker_agnostic_tools_outnumber_the_gated_ones():
         os.path.abspath(__file__))), "README.md"), encoding="utf-8").read()
     assert "31 of the 41" in readme, (
         "README no longer states how many tools work with any broker")
+
+
+def test_a_draft_records_the_broker_it_was_raised_against(monkeypatch, tmp_path):
+    """
+    A draft carries symbol and quantity, not a broker-native order, and the
+    dashboard rebuilds the order against Webull at approval time. Without the
+    broker on the draft, one raised while FINANCE_BROKER pointed at IBKR could
+    be approved and sent to Webull, and nothing in the confirmation would say
+    so.
+    """
+    import json
+
+    import finance_mcp as srv
+
+    drafts = tmp_path / "order_drafts.json"
+    monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.setattr(srv.brokers, "get", lambda name=None: make_webull())
+    monkeypatch.setattr(srv.webull_client, "is_paper_environment", lambda: False)
+
+    out = srv.draft_order("AAPL", "BUY", 1, "LMT", 1.0)
+    assert "DRAFTED" in out, out
+    written = json.loads((tmp_path / "dashboard" / "order_drafts.json").read_text())
+    assert written[-1]["broker"] == "webull"
+    assert written[-1]["environment"] in ("LIVE", "PAPER")
+
+
+def test_the_dashboard_refuses_a_draft_raised_against_another_broker():
+    """The guard above is only useful if the approval page reads it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    assert 'draft.get("broker", "webull")' in app, (
+        "the execution page must check which broker a draft was raised against")
+    assert "can only submit to Webull" in app
+    assert "Nothing has been sent" in app
+
+
+def test_the_disk_cache_is_not_shared_across_brokers(monkeypatch):
+    """
+    Two processes asking for the same bars should pay once; two *brokers*
+    should not share a frame. The feed follows FINANCE_BROKER now, so a Webull
+    frame handed to a Saxo-configured process would be another broker's prices
+    under Saxo's name.
+    """
+    from dashboard import barcache
+
+    monkeypatch.setenv("FINANCE_BROKER", "webull")
+    webull_key = barcache._key("AAPL", "D", 200)
+    monkeypatch.setenv("FINANCE_BROKER", "saxo")
+    saxo_key = barcache._key("AAPL", "D", 200)
+    assert webull_key != saxo_key
 
 
 def test_a_broker_specific_tool_is_only_offered_to_the_broker_that_has_it():

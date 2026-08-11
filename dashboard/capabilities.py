@@ -8,16 +8,31 @@ Two facts forced this to exist rather than be a table keyed on broker name:
     about a broker the user had not configured. Advertising a tool that cannot
     run is the thing to stop.
 
-  * **"Webull" is twelve brokers.** Webull runs independent regional entities on
-    separate hosts, and they do not serve the same endpoints. Probed live
-    against `api.webull.co.th`: equity snapshots return fine, options return
-    `UNSUPPORTED_CATEGORY` for every category, order-book depth is capped at one
-    level, and the instrument catalogue answers `SDK.UnknownServerError` — the
-    same signature `cancel_order` gave on `order_v2` before it was moved to
-    `order_v3`. Same credentials, same client, same request shape.
+  * **"Webull" is twelve brokers, and an account is not its broker.** Webull
+    runs independent regional entities on separate hosts (`api.webull.com`,
+    `api.webull.co.th`, `api.webull.hk`, …) which is a fact about the endpoint
+    table. What any one account may *call* is a third thing again, below the
+    SDK and below the entity: market-data entitlements are bought, so an order
+    book capped at one level means an L1 subscription, not a missing endpoint.
 
-So capability is keyed on **broker × entity × account**, and the honest way to
-fill it in is to call the API rather than assert from a name.
+    That distinction was learned by getting it wrong here. A probe refused
+    options with `UNSUPPORTED_CATEGORY` and this module claimed the region did
+    not serve them; the categories had in fact been passed as strings the SDK
+    could not parse into its `Category` enum, and a later attempt to redo it
+    properly failed on token state instead. **The question is open.** What
+    survives is the rule, not the anecdote:
+
+        capability = what the SDK implements
+                   ∩ what the entity serves
+                   ∩ what this account is entitled to
+
+    A probe reports **what** a call did, never **why**. Reading a cause out of
+    an error message is how the wrong conclusion got written down in the first
+    place, so nothing here records one.
+
+So capability is keyed on **broker × entity × account** — the account being
+where entitlement lives — and the honest way to fill it in is to call the API
+rather than assert from a name.
 
 Two sources, in order of authority:
 
