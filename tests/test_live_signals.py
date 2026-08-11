@@ -198,3 +198,61 @@ def test_the_new_readings_are_not_scored_into_the_heuristic_verdict():
     window = server[start:server.index("# Determine Verdict Text", start)]
     assert not re.search(r"verdict_score\s*[-+]=", window), (
         "the new readings must not feed the BUY/SELL score")
+
+
+def test_a_stale_indicators_module_fails_at_import_not_mid_render():
+    """
+    A Streamlit app left open across an upgrade keeps `dashboard.indicators` in
+    sys.modules from before these constants existed. Reading them off the module
+    at call time then failed with
+
+        AttributeError: module 'dashboard.indicators' has no attribute 'ADX_TRENDING'
+
+    three hundred lines into a page render, pointing at a line that was not
+    wrong. Binding at import turns that into one legible error before anything
+    is drawn.
+    """
+    import importlib
+    import sys
+    import types
+
+    stale = types.ModuleType("dashboard.indicators")
+    stale.calculate_adx = lambda *a, **k: None
+    stale.classify_market_regime = lambda *a, **k: None
+    # No ADX_TRENDING, ADX_RANGING or describe_regime -- the version that shipped
+    # before the regime split.
+
+    import dashboard as dashboard_pkg
+
+    real_indicators = sys.modules.get("dashboard.indicators")
+    real_signals = sys.modules.pop("dashboard.live_signals", None)
+    sys.modules["dashboard.indicators"] = stale
+    # `from dashboard import indicators` resolves the attribute on the package
+    # object before it consults sys.modules, so patching only sys.modules leaves
+    # the real module reachable and the test proves nothing.
+    dashboard_pkg.indicators = stale
+    try:
+        with pytest.raises(ImportError) as raised:
+            importlib.import_module("dashboard.live_signals")
+        message = str(raised.value)
+        assert "ADX_TRENDING" in message
+        assert "Restart" in message, "the error must say what to do about it"
+    finally:
+        if real_indicators is not None:
+            sys.modules["dashboard.indicators"] = real_indicators
+            dashboard_pkg.indicators = real_indicators
+        else:
+            sys.modules.pop("dashboard.indicators", None)
+        sys.modules.pop("dashboard.live_signals", None)
+        if real_signals is not None:
+            sys.modules["dashboard.live_signals"] = real_signals
+        importlib.import_module("dashboard.live_signals")
+
+
+def test_the_thresholds_are_not_duplicated_from_the_classifier():
+    """
+    Bound by name from indicators rather than restated. Two copies of the number
+    that decides "trending" is two numbers to disagree.
+    """
+    assert live_signals.ADX_TRENDING is indicators.ADX_TRENDING
+    assert live_signals.ADX_RANGING is indicators.ADX_RANGING

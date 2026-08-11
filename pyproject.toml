@@ -1,6 +1,6 @@
 [project]
 name = "hitl-finance-mcp"
-version = "0.2.2"
+version = "0.3.0"
 description = "MCP server for market data, macro calendar, SEC filings and risk tooling, with human-approved order execution"
 readme = "README.md"
 license = { file = "LICENSE" }

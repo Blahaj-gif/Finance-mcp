@@ -19,6 +19,28 @@ except ImportError:  # imported as a top-level module from dashboard/
     import indicators
     import volume_profile
 
+# Bound at import, by name, deliberately.
+#
+# Reading these off the module at call time meant a Streamlit process that had
+# `dashboard.indicators` already in sys.modules from before these constants
+# existed -- an app left open across an upgrade -- failed with
+#
+#     AttributeError: module 'dashboard.indicators' has no attribute 'ADX_TRENDING'
+#
+# three hundred lines into a page render, pointing at a line that was not
+# wrong. Binding here turns that into one legible error at import, before
+# anything has been drawn, and says what to do about it.
+try:
+    ADX_TRENDING = indicators.ADX_TRENDING
+    ADX_RANGING = indicators.ADX_RANGING
+    describe_regime = indicators.describe_regime
+except AttributeError as _stale:
+    raise ImportError(
+        f"dashboard.indicators is missing {_stale}. The most likely cause is a "
+        "process that imported it before these were added and is still running "
+        "-- Streamlit does not always reload a transitively imported module. "
+        "Restart the dashboard or the MCP server.") from _stale
+
 #: How far above or below its own average a bar's volume must sit before the
 #: word changes. Conventional, and unvalidated here: nothing in this project
 #: has shown 1.5x separates confirmed moves from unconfirmed ones.
@@ -96,9 +118,9 @@ def trend_strength(df, precomputed: dict = None) -> dict:
         return {"adx": None, "regime": regime, "verdict": "unknown",
                 "basis": "ADX is not computable on this many bars"}
 
-    if adx > indicators.ADX_TRENDING:
+    if adx > ADX_TRENDING:
         verdict = "trending"
-    elif adx < indicators.ADX_RANGING:
+    elif adx < ADX_RANGING:
         verdict = "ranging"
     else:
         verdict = "transitional"
@@ -107,7 +129,7 @@ def trend_strength(df, precomputed: dict = None) -> dict:
         "adx": float(adx),
         "regime": regime,
         "verdict": verdict,
-        "basis": (f"ADX {adx:.1f} — {indicators.describe_regime(regime)}"
+        "basis": (f"ADX {adx:.1f} — {describe_regime(regime)}"
                   if regime else f"ADX {adx:.1f}"),
     }
 
