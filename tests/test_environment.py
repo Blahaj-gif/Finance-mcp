@@ -304,6 +304,47 @@ def test_paper_mode_injects_the_sandbox_endpoints_for_a_real_region(monkeypatch,
 # refuse with "not set" on a machine where the user had filled in a .env
 # perfectly well, just not in a directory they could guess.
 
+def test_an_ini_block_pasted_into_a_dotenv_is_not_exported(tmp_path, monkeypatch):
+    """
+    A .pypirc block was pasted onto the end of a real .env. Every line under
+    the [pypi] header is `key = value`, so the loader exported the PyPI token
+    as os.environ["PASSWORD"] in the server process -- inherited by every child
+    it spawns, under a name nothing would think to redact.
+
+    The header must be checked *before* the "=" test: it contains no "=", so
+    testing after it skips the header and then exports everything beneath it.
+    """
+    from dashboard import envfile
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "REAL_KEY=ok\n"
+        "\n"
+        "[pypi]\n"
+        "  username = __token__\n"
+        "  password = pypi-SECRETVALUE\n",
+        encoding="utf-8")
+    for name in ("REAL_KEY", "PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert envfile.load_env(str(env)) == 1
+    assert os.environ["REAL_KEY"] == "ok"
+    assert "PASSWORD" not in os.environ
+    assert "pypi-SECRETVALUE" not in "".join(os.environ.values())
+
+
+def test_the_ini_warning_goes_to_stderr_not_stdout(tmp_path, capsys):
+    """Anything on stdout corrupts the JSON-RPC stream this server speaks."""
+    from dashboard import envfile
+
+    env = tmp_path / ".env"
+    env.write_text("[pypi]\n  password = x\n", encoding="utf-8")
+    envfile.load_env(str(env))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[pypi]" in captured.err
+
+
 def test_an_explicit_env_var_beats_every_guess(tmp_path, monkeypatch):
     from dashboard import envfile
     target = tmp_path / "custom.env"

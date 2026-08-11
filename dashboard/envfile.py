@@ -113,6 +113,21 @@ def load_env(env_path=None, override=False) -> int:
     with open(env_path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
+            # Checked before the "=" test, not after: a section header has no
+            # "=" in it, so testing later skips the header and then happily
+            # exports every INI line beneath it.
+            if line.startswith("["):
+                # A dotenv file has no sections. One appearing means INI got
+                # pasted in below -- a .pypirc block, most likely -- and each
+                # line under it is `key = value` that this loop would export.
+                # That is how a PyPI token became os.environ["PASSWORD"] in the
+                # server process, inherited by every child it spawns. Stop, and
+                # say where the rest of the file went.
+                print(f"{env_path}: ignoring everything from {line!r} onward - "
+                      "a .env file has no [sections], and the lines below one "
+                      "would be exported as environment variables. Move that "
+                      "block to its own config file.", file=sys.stderr)
+                break
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, value = line.partition("=")
