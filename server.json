@@ -3,7 +3,7 @@
   "name": "io.github.Blahaj-gif/hitl-finance-mcp",
   "version": "0.2.1",
   "title": "Finance MCP",
-  "description": "Market data, macro calendar, SEC filings and risk tooling across Webull, Saxo and IBKR, with order execution behind a human approval step the assistant cannot reach.",
+  "description": "Market data, SEC filings and risk tools for Webull, Saxo and IBKR. Only you can send an order.",
   "websiteUrl": "https://github.com/Blahaj-gif/Finance-mcp",
   "repository": {
     "url": "https://github.com/Blahaj-gif/Finance-mcp",

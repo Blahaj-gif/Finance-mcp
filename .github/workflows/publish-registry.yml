@@ -1,0 +1,62 @@
+name: publish to MCP registry
+
+# The registry verifies that whoever publishes io.github.Blahaj-gif/* controls
+# this repository. Doing that from Actions with OIDC means no long-lived token
+# exists anywhere -- GitHub mints one for the length of the job and the registry
+# checks it against the repository the job is running in.
+#
+# The alternative is `mcp-publisher login github` on a laptop, which works and
+# leaves a token in ~/.mcp_publisher_token. This does not.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write        # required for OIDC; without it login fails at the gate
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Refuse to publish a version PyPI does not have
+        # The registry entry points at a PyPI release. Publishing a listing for
+        # a version nobody can install is worse than not listing at all: it
+        # fails at `uvx`, in someone else's terminal, with no clue why.
+        run: |
+          version=$(python -c "import json;print(json.load(open('server.json'))['version'])")
+          package=$(python -c "import json;print(json.load(open('server.json'))['packages'][0]['identifier'])")
+          echo "server.json declares $package $version"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$package/$version/json")
+          if [ "$code" != "200" ]; then
+            echo "::error::$package $version is not on PyPI (HTTP $code). Publish the package first."
+            exit 1
+          fi
+          echo "confirmed on PyPI"
+
+      - name: Check server.json and pyproject agree
+        run: |
+          json_version=$(python -c "import json;print(json.load(open('server.json'))['version'])")
+          toml_version=$(python -c "import re;print(re.search(r'^version = \"([^\"]+)\"', open('pyproject.toml').read(), re.M).group(1))")
+          if [ "$json_version" != "$toml_version" ]; then
+            echo "::error::server.json says $json_version, pyproject says $toml_version"
+            exit 1
+          fi
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Validate the listing
+        run: ./mcp-publisher validate
+
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

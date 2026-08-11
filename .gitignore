@@ -43,3 +43,6 @@ conf/barcache/
 
 # One-time live-trading acknowledgement, per account. Local state.
 dashboard/live_consent.json
+
+# The mcp-publisher binary, fetched on demand. 20 MB of Go, not source.
+tools/
