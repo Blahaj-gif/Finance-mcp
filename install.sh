@@ -50,6 +50,12 @@ if [ -f "$ENV_FILE" ]; then
     skip ".env already exists at $ENV_FILE — left alone."
 else
     cat > "$ENV_FILE" <<'ENVTEMPLATE'
+# Which broker the account and order tools use, and where prices come from:
+# webull, saxo or ibkr. Only the tools your broker can serve are registered.
+# Webull is the only adapter run against a live account; saxo and ibkr are
+# written from published docs and say so in every result. See HELP-WANTED.md.
+FINANCE_BROKER=webull
+
 # Webull OpenAPI credentials. Without these, prices fall back to Yahoo and the
 # account and order tools do not work; everything else still does.
 WEBULL_APP_KEY=
@@ -73,6 +79,21 @@ SEC_USER_AGENT=Your Name (you@example.com)
 # Optional. 25 macro queries/day without a key; a free key at
 # https://data.bls.gov/registrationEngine/ raises it to 500.
 BLS_API_KEY=
+
+# --- Saxo (only if FINANCE_BROKER=saxo). UNVERIFIED ADAPTER. --------------
+# A 24-hour simulation token comes from the Developer Portal, no approval
+# needed and no live money.
+# SAXO_ENVIRONMENT=sim
+# SAXO_ACCESS_TOKEN=
+
+# --- IBKR (only if FINANCE_BROKER=ibkr). UNVERIFIED ADAPTER. --------------
+# The Client Portal *Web* API, not the TWS socket API. Run IBKR's Client Portal
+# Gateway, then log in at https://localhost:5000 in a browser. A paper account
+# works and is the better choice; paper ids start DU. The gateway's certificate
+# is self-signed, and accepting it unverified is your decision to make.
+# IBKR_BASE_URL=https://localhost:5000/v1/api
+# IBKR_ACCOUNT_ID=
+# IBKR_TLS_INSECURE=
 ENVTEMPLATE
     ok "Wrote $ENV_FILE"
 fi

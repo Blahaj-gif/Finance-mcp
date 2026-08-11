@@ -11,9 +11,9 @@ none, which a headless server will not.
 ## The short version
 
 ```bash
-uvx --from 'finance-mcp[dashboard]' finance-mcp-dashboard   # one-off run
+uvx --from 'hitl-finance-mcp[dashboard]' finance-mcp-dashboard   # one-off run
 # or
-uv tool install --with streamlit --with plotly finance-mcp  # keep it around
+uv tool install --with streamlit --with plotly hitl-finance-mcp  # keep it around
 ```
 
 Then put this in your MCP client's config and restart it:
@@ -154,6 +154,6 @@ including which broker environment is live.
 
 ## Uninstalling
 
-`uv tool uninstall finance-mcp`, or delete the folder for a checkout. Then
+`uv tool uninstall hitl-finance-mcp`, or delete the folder for a checkout. Then
 remove the `"finance"` entry from your MCP client's config, and the per-user
 config directory if you used one (`finance-mcp-config` prints the path).

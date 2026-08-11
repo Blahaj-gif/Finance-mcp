@@ -124,6 +124,12 @@ $envFile = Join-Path $PSScriptRoot ".env"
 if (-not (Test-Path $envFile)) {
     Write-Host "[3/5] Creating default .env configuration file..." -ForegroundColor Yellow
     @"
+# Which broker the account and order tools use, and where prices come from:
+# webull, saxo or ibkr. Only the tools your broker can serve are registered.
+# Webull is the only adapter run against a live account; saxo and ibkr are
+# written from published docs and say so in every result. See HELP-WANTED.md.
+FINANCE_BROKER=webull
+
 # Webull OpenAPI Credentials
 WEBULL_APP_KEY=YOUR_WEBULL_APP_KEY_HERE
 WEBULL_APP_SECRET=YOUR_WEBULL_APP_SECRET_HERE
@@ -157,6 +163,21 @@ SEC_USER_AGENT=Your Name (you@example.com)
 # Optional. BLS allows 25 queries/day with no key; a free key at
 # https://data.bls.gov/registrationEngine/ raises it to 500/day.
 BLS_API_KEY=
+
+# --- Saxo (only if FINANCE_BROKER=saxo). UNVERIFIED ADAPTER. --------------
+# A 24-hour simulation token comes from the Developer Portal, no approval
+# needed and no live money.
+# SAXO_ENVIRONMENT=sim
+# SAXO_ACCESS_TOKEN=
+
+# --- IBKR (only if FINANCE_BROKER=ibkr). UNVERIFIED ADAPTER. --------------
+# The Client Portal *Web* API, not the TWS socket API. Run IBKR's Client Portal
+# Gateway, then log in at https://localhost:5000 in a browser. A paper account
+# works and is the better choice; paper ids start DU. The gateway's certificate
+# is self-signed, and accepting it unverified is your decision to make.
+# IBKR_BASE_URL=https://localhost:5000/v1/api
+# IBKR_ACCOUNT_ID=
+# IBKR_TLS_INSECURE=
 "@ | Set-Content $envFile -Encoding UTF8
     Write-Host "  -> Created $envFile template. Add your Webull keys and SEC_USER_AGENT contact address here." -ForegroundColor Green
 } else {

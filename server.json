@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Blahaj-gif/hitl-finance-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "title": "Finance MCP",
-  "description": "Market data, macro calendar, SEC filings and risk tooling, with order execution behind a human approval step the assistant cannot reach.",
+  "description": "Market data, macro calendar, SEC filings and risk tooling across Webull, Saxo and IBKR, with order execution behind a human approval step the assistant cannot reach.",
   "websiteUrl": "https://github.com/Blahaj-gif/Finance-mcp",
   "repository": {
     "url": "https://github.com/Blahaj-gif/Finance-mcp",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "hitl-finance-mcp",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -41,6 +41,32 @@
           "name": "WEBULL_ENVIRONMENT",
           "description": "prod trades the real account. paper repoints the ENTIRE client at Webull's sandbox, quotes included, and needs separate sandbox credentials — production keys return 401 there.",
           "default": "prod"
+        },
+        {
+          "name": "FINANCE_BROKER",
+          "description": "Which broker adapter the account and order tools use, and where prices come from: webull, saxo or ibkr. Only the tools the configured broker can serve are registered, so the tool list never advertises one that would refuse. Webull is the only adapter that has been run against a live account; saxo and ibkr are written from published documentation and say so in every result they produce.",
+          "default": "webull"
+        },
+        {
+          "name": "SAXO_ACCESS_TOKEN",
+          "description": "Only for FINANCE_BROKER=saxo. A 24-hour simulation token comes from Saxo's Developer Portal with no approval process and no live money; live access needs the OAuth2 code flow. UNVERIFIED ADAPTER.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "SAXO_ENVIRONMENT",
+          "description": "sim or live. Selects Saxo's simulation gateway or the live one.",
+          "default": "sim"
+        },
+        {
+          "name": "IBKR_BASE_URL",
+          "description": "Only for FINANCE_BROKER=ibkr. This is the Client Portal Web API, not the TWS socket API: run IBKR's Client Portal Gateway and log in at https://localhost:5000 in a browser first. A paper account works and is the better choice. UNVERIFIED ADAPTER.",
+          "default": "https://localhost:5000/v1/api"
+        },
+        {
+          "name": "IBKR_TLS_INSECURE",
+          "description": "Set to 1 to accept the Client Portal Gateway's self-signed certificate unverified, or point IBKR_CACERT at it instead. This is a decision about the connection carrying your orders, so it is never made for you.",
+          "isRequired": false
         },
         {
           "name": "SEC_USER_AGENT",

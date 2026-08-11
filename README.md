@@ -1,15 +1,17 @@
 # Finance MCP
 
 [![tests](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml)
-[![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](pyproject.toml)
-[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](https://github.com/Blahaj-gif/Finance-mcp/blob/master/pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](https://github.com/Blahaj-gif/Finance-mcp/blob/master/LICENSE)
 
 An MCP server that gives an AI assistant read access to your real brokerage
 account and the market around it — and gives you, not the assistant, the only
 button that sends an order.
 
-39 tools over Webull OpenAPI, Yahoo Finance, SEC EDGAR, BLS, the Federal Reserve
-and the BEA, plus a Streamlit dashboard that is the sole path to execution.
+41 tools over Webull, Saxo, IBKR, Yahoo Finance, SEC EDGAR, BLS, the Federal
+Reserve and the BEA, plus a Streamlit dashboard that is the sole path to
+execution. The list is filtered to what your broker can actually serve, so a
+given account sees 39 or 40 of them.
 
 **The assistant can draft an order. It cannot place one.** Drafts go to a local
 queue; sending requires a broker preview and your click in the dashboard. That
@@ -41,9 +43,9 @@ holidays are collapsed, so there are no blank stretches.*
 | | |
 |---|---|
 | **OS** | Windows, macOS, Linux. Desktop alerts use each platform's own notifier (PowerShell, `osascript`, `notify-send`) and report plainly when a machine has none, which a headless server will not. |
-| **Install** | `uv tool install --with streamlit --with plotly finance-mcp`, then point your client at the `finance-mcp` command. Scripted installers (`install.sh`, `install.bat`) add a config template, client registration and a shortcut. |
+| **Install** | `uv tool install --with streamlit --with plotly hitl-finance-mcp`, then point your client at the `finance-mcp` command. Scripted installers (`install.sh`, `install.bat`) add a config template, client registration and a shortcut. |
 | **Python** | 3.10 or 3.12, both covered by CI. `uv` is installed for you. |
-| **Broker** | A Webull account with OpenAPI credentials. Without them prices fall back to Yahoo and the account and order tools do not work; everything else still does. |
+| **Broker** | Webull, Saxo or IBKR — set `FINANCE_BROKER`. Only Webull has been run against a live account. Without any broker, prices fall back to Yahoo and the account and order tools are not registered; the other 31 still work. |
 | **Keys** | `SEC_USER_AGENT` (a contact address, required by the SEC for filings) and optionally a free BLS key. |
 
 **[Installation guide →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/INSTALL.md)** — fifteen minutes, most of it waiting for
@@ -88,9 +90,9 @@ they need:
 | `calculate_position_size` `get_portfolio_risk` | `buying_power` `positions` |
 
 **A tool is only registered when the configured broker can serve it.** Start with
-`FINANCE_BROKER=saxo` and `tools/list` returns 38, not 39 — Saxo cancels by its
-own order id and documents no mapping from ours, so a cancel tool would be a
-tool that can only refuse. An unusable tool costs a model context on every
+`FINANCE_BROKER=saxo` and `cancel_order` is not in `tools/list` at all — Saxo
+cancels by its own order id and documents no mapping from ours, so a cancel tool
+would be a tool that can only refuse. An unusable tool costs a model context on every
 request and is one more wrong choice available to it.
 
 Two more exist only for the broker that has them: **`saxo_corporate_actions`**

@@ -304,6 +304,129 @@ def test_paper_mode_injects_the_sandbox_endpoints_for_a_real_region(monkeypatch,
 # refuse with "not set" on a machine where the user had filled in a .env
 # perfectly well, just not in a directory they could guess.
 
+def test_every_broker_variable_the_code_reads_is_documented_somewhere():
+    """
+    A variable the server reads and no template mentions is a setting nobody
+    can discover. Saxo and IBKR shipped with nine such variables between them:
+    the adapters read them, and .env.example, both installers and the registry
+    listing all described a Webull-only server.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sources = []
+    for folder in ("dashboard", "dashboard/brokers"):
+        folder_path = os.path.join(root, *folder.split("/"))
+        for name in os.listdir(folder_path):
+            if name.endswith(".py"):
+                sources.append(open(os.path.join(folder_path, name),
+                                    encoding="utf-8").read())
+
+    read = set()
+    for src in sources:
+        read.update(re.findall(r'os\.getenv\(\s*"([A-Z][A-Z0-9_]*)"', src))
+
+    # Variables a user might reasonably need to set. Tuning knobs and internal
+    # test hooks are deliberately not required to appear in a template.
+    interesting = {v for v in read
+                   if v.startswith(("FINANCE_", "SAXO_", "IBKR_", "WEBULL_APP",
+                                    "WEBULL_REGION", "WEBULL_ENVIRONMENT"))}
+    assert interesting, "the scan found nothing; the regex has drifted"
+
+    documented = open(os.path.join(root, ".env.example"), encoding="utf-8").read()
+    missing = sorted(v for v in interesting if v not in documented)
+    assert not missing, f".env.example never mentions: {missing}"
+
+
+def test_the_registry_listing_documents_the_broker_selector():
+    """
+    server.json is how someone browsing the MCP registry learns this can be
+    pointed at a broker at all. It described a Webull-only server for a while
+    after two more adapters existed.
+    """
+    import json
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    listing = json.load(open(os.path.join(root, "server.json"), encoding="utf-8"))
+    names = {v["name"] for v in listing["packages"][0]["environmentVariables"]}
+    for required in ("FINANCE_BROKER", "SAXO_ACCESS_TOKEN", "IBKR_BASE_URL"):
+        assert required in names, f"server.json does not document {required}"
+
+    # Read by regex rather than tomllib: this project supports 3.10, where
+    # tomllib does not exist.
+    pyproject = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+    name = re.search(r'^name\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+    assert listing["version"] == version, (
+        "server.json and pyproject disagree about the version, so the registry "
+        "would point at a release that does not exist")
+    assert listing["packages"][0]["version"] == version
+    assert listing["packages"][0]["identifier"] == name
+
+
+def test_both_installers_write_the_broker_selector():
+    """
+    The installer's .env is the only one most people will ever see. If it does
+    not mention FINANCE_BROKER, the other two adapters are undiscoverable from
+    a fresh install.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for script in ("install.sh", "installer.ps1"):
+        text = open(os.path.join(root, script), encoding="utf-8").read()
+        assert "FINANCE_BROKER=webull" in text, f"{script} writes no broker selector"
+        assert "UNVERIFIED ADAPTER" in text, (
+            f"{script} offers saxo/ibkr without saying neither has been run")
+
+
+def test_no_install_instruction_names_a_package_someone_else_owns():
+    """
+    `finance-mcp` on PyPI is an unrelated active project. This one is published
+    as `hitl-finance-mcp`; the *command* stays `finance-mcp`, which is exactly
+    why the docs drifted into telling people to install the wrong thing.
+
+    So: a package name only ever appears after an install verb, and it must be
+    the distribution name from pyproject.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pyproject = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    distribution = re.search(r'^name\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+
+    pattern = re.compile(
+        r"(?:uv tool install|uv tool uninstall|pip install|uvx --from)"
+        r"[^\n`'\"]*?['\"]?(?<![\w-])(finance-mcp)(?![\w-])")
+    offenders = []
+    for name in ("README.md", "INSTALL.md", "install.sh", "install.bat",
+                 "installer.ps1"):
+        path = os.path.join(root, name)
+        if not os.path.exists(path):
+            continue
+        for line_no, line in enumerate(
+                open(path, encoding="utf-8").read().splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{name}:{line_no}: {line.strip()[:80]}")
+    assert not offenders, (
+        f"these install someone else's package instead of {distribution}:\n"
+        + "\n".join(offenders))
+
+
+def test_the_tool_count_in_the_readme_matches_the_server():
+    """
+    The number in the first paragraph is the one people quote. It said 39 while
+    41 were defined.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read()
+    defined = len(re.findall(
+        r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n(?:@[\w.]+(?:\([^)]*\))?\n)*def \w+", src))
+    readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    assert f"{defined} tools over" in readme, (
+        f"{defined} tools are defined; the README opening does not say so")
+
+
 def test_an_ini_block_pasted_into_a_dotenv_is_not_exported(tmp_path, monkeypatch):
     """
     A .pypirc block was pasted onto the end of a real .env. Every line under
