@@ -132,7 +132,7 @@ class Broker(Protocol):
         """
         ...
 
-    def rule_violations(self, order: dict) -> list:
+    def rule_violations(self, order: dict, rules: dict = None) -> list:
         """
         Rules this broker enforces at placement but not at preview, as plain
         sentences. Empty when clean.
@@ -140,6 +140,45 @@ class Broker(Protocol):
         Advisory, never authoritative: the broker remains the decider. This
         exists so a common refusal arrives before someone approves an order
         rather than as an opaque error code afterwards.
+
+        Called with no `rules` it must stay **offline** -- it runs before the
+        networked checks precisely so that a malformed order on a machine with
+        no credentials is refused for what is wrong with it. Pass the output of
+        `contract_rules` to have it check the real tick and lot sizes instead of
+        the handful published in the adapter.
+        """
+        ...
+
+    def contract_rules(self, symbol: str) -> dict:
+        """
+        What this broker will actually accept for one instrument:
+
+            {"tick_size": float|None, "quantity_step": float|None,
+             "min_quantity": float|None, "currency": str, "raw": dict}
+
+        The expensive lesson behind this method: Webull priced a 1-share $0.01
+        order cleanly through preview and then refused it at placement for a
+        quantity-step rule. Preview does not run every placement rule, and the
+        rules are published -- they were simply never fetched.
+
+        Optional. An adapter that cannot fetch them must raise rather than
+        return empty, and must not declare the `contract_rules` capability.
+        """
+        ...
+
+    def history_bars(self, symbol: str, interval: str = "D", count: int = 200):
+        """
+        Historical bars from the account this adapter is already authenticated
+        against, as a DataFrame with time/open/high/low/close/volume, **oldest
+        first**.
+
+        Optional, and worth more than it looks: without it a Saxo or IBKR user
+        gets the Yahoo fallback for every price in every tool, having supplied
+        credentials to a broker that serves bars.
+
+        Row order is the guarantee that matters. Webull returns newest-first
+        and nothing sorted it, so every indicator ran on a reversed series and
+        the sector heatmap ranked the worst performers as leaders.
         """
         ...
 

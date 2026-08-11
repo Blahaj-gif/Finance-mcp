@@ -58,6 +58,9 @@ Each maps to a `SaxoNotVerified` or a guess in the code:
 | 4 | Are `NetPositionBase.Symbol` and `NetPositionView.AverageOpenPrice` the right fields, or does a real account use different ones? | `positions()` |
 | 5 | Does `ManualOrder: true` behave as expected for a human-approved order, or does Saxo want something else? | `build_order()` |
 | 6 | Does `ref/v1/instruments` return several rows for a common ticker? The adapter **refuses** on ambiguity rather than picking an exchange — is that the right call in practice, or unusably strict? | `resolve_uic()` |
+| 7 | Does `/chart/v1/charts` return `Open/High/Low/Close` for a **Stock**, or only the bid/ask pairs the FX example shows? This is now the price feed for every tool when Saxo is configured. | `history_bars()` |
+| 8 | Does `/ref/v1/instruments/details/{Uic}/{AssetType}` return `TickSize`, `LotSize` and `MinimumOrderSize` under those names? | `contract_rules()` |
+| 9 | Does `/ca/v2/events` return `ElectionDeadline` on a voluntary event? A deadline is the whole point of one. | `corporate_actions()` |
 
 ---
 
@@ -97,6 +100,9 @@ pricing call — on an order that is never submitted.
 | 6 | Does `GET /iserver/account/orders` return `order_ref` carrying the `cOID` we sent? **This is the load-bearing one.** It is the only reason cancel-by-our-id works on IBKR and not on Saxo. | `order_id_for()` |
 | 7 | Is `secType: "{conid}:STK"` accepted in the order body alongside `conid`, or does including it cause a rejection? | `build_order()` |
 | 8 | Which confirmation messages does a plain limit order actually raise, and what are their `messageIds`? | `place_order()` |
+| 9 | Does `/iserver/marketdata/history` ever return `priceFactor` other than 1 for a US stock? The adapter **refuses** rather than applying it blind, because dividing by a wrong factor is a silent hundredfold error in a price a person acts on. This is now the price feed for every tool when IBKR is configured. | `history_bars()` |
+| 10 | Does `POST /iserver/contract/rules` return `sizeIncrement`, `minSize` and an `incrementRules` ladder under those names? | `contract_rules()` |
+| 11 | Which `scan_code` and `location` values does a real account accept, and does the response key on `contracts`? | `market_scanner()` |
 
 ## The design question, which is not about field names
 

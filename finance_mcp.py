@@ -47,7 +47,8 @@ mcp = FastMCP("Finance MCP")
 #: prices, filings, options and macro data, the same whoever you clear through.
 BROKER_TOOLS = ("get_account_info", "get_open_positions", "get_open_orders",
                 "draft_order", "preview_order", "cancel_order",
-                "calculate_position_size", "get_portfolio_risk")
+                "calculate_position_size", "get_portfolio_risk",
+                "saxo_corporate_actions", "ibkr_market_scanner")
 
 
 def _active_capabilities():
@@ -1516,6 +1517,82 @@ def get_open_orders() -> str:
         return out
     except Exception as e:
         raise ToolError(f"Error fetching open orders: {e}") from e
+
+@needs(capabilities.CORPORATE_ACTIONS)
+def saxo_corporate_actions(event_states: str = "Pending", limit: int = 25) -> str:
+    """
+    Corporate actions on instruments this Saxo account holds — dividends,
+    splits, tenders, rights issues — with their election deadlines.
+
+    Saxo is the only broker here that exposes these, so this tool exists only
+    when Saxo is the configured broker.
+
+    Args:
+        event_states: Saxo event state filter, e.g. Pending or Completed.
+        limit: Maximum events to show.
+    """
+    try:
+        adapter = brokers.get()
+        events = adapter.corporate_actions(event_states=event_states, limit=limit)
+        header = f"### Corporate Actions — {broker_protocol.describe(adapter)}\n\n"
+        if not events:
+            return header + f"No {event_states.lower()} events on this account's holdings.\n"
+
+        out = header + ("| Symbol | Event | State | Election by | Ex-date | Pay date |\n"
+                        "|---|---|---|---|---|---|\n")
+        for e in events:
+            out += (f"| {e['symbol']} | {e['type'] or e['description']} | "
+                    f"{e['state']} | {e['deadline'] or '—'} | "
+                    f"{e['ex_date'] or '—'} | {e['pay_date'] or '—'} |\n")
+        # A voluntary event with a deadline is the one thing here that expires,
+        # so it is called out rather than left as a column to notice.
+        elective = [e for e in events if e["deadline"]]
+        if elective:
+            out += (f"\n**{len(elective)} of these need a response by a deadline.** "
+                    "Elections are made on Saxo's platform; this tool only reads.\n")
+        return out
+    except Exception as e:
+        raise ToolError(f"Error fetching corporate actions: {e}") from e
+
+
+@needs(capabilities.MARKET_SCANNER)
+def ibkr_market_scanner(scan_code: str = "TOP_PERC_GAIN", instrument: str = "STK",
+                        location: str = "STK.US.MAJOR", limit: int = 25) -> str:
+    """
+    Runs IBKR's market scanner and returns the matches.
+
+    IBKR is the only broker here with a real scanner, so this tool exists only
+    when IBKR is the configured broker. Unlike get_sector_heatmap, which infers
+    rotation from eleven ETF price pulls, this is the exchange-side scan.
+
+    Args:
+        scan_code: e.g. TOP_PERC_GAIN, TOP_PERC_LOSE, MOST_ACTIVE, HOT_BY_VOLUME.
+        instrument: Instrument class, e.g. STK.
+        location: Market, e.g. STK.US.MAJOR.
+        limit: Maximum rows to show.
+    """
+    try:
+        adapter = brokers.get()
+        rows = adapter.market_scanner(scan_code=scan_code, instrument=instrument,
+                                      location=location, limit=limit)
+        header = (f"### IBKR Scanner — {scan_code} on {location} — "
+                  f"{broker_protocol.describe(adapter)}\n\n")
+        if not rows:
+            return header + ("No matches. Scan codes and locations are account "
+                             "specific; the valid set comes from "
+                             "/iserver/scanner/params.\n")
+
+        out = header + "| # | Symbol | Company | Detail |\n|---|---|---|---|\n"
+        for i, r in enumerate(rows, 1):
+            out += f"| {i} | {r['symbol']} | {r['company']} | {r['detail']} |\n"
+        # The scan is the broker's ranking, not a signal this project computed,
+        # and the difference matters to anything acting on it.
+        out += ("\n*IBKR's own ranking, returned as sent. No indicator here "
+                "was applied to it.*\n")
+        return out
+    except Exception as e:
+        raise ToolError(f"Error running the IBKR scanner: {e}") from e
+
 
 @needs(capabilities.CANCEL_ORDER)
 def cancel_order(order_id: str) -> str:

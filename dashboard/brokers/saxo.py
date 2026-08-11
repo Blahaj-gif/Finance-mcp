@@ -83,13 +83,21 @@ _ORDER_TYPE = {"LMT": "Limit", "LIMIT": "Limit",
                "STP": "Stop", "STOP": "Stop"}
 _DEFAULT_ASSET_TYPE = "Stock"
 
+# Saxo asks for a chart horizon in minutes, not a timeframe name. Our vocabulary
+# is the one every other source here uses, so the mapping lives at the boundary
+# -- the same place the Webull H1 bug was fixed, where "H1" was silently not a
+# Webull timespan and every hourly request fell through to Yahoo unannounced.
+SAXO_HORIZON = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                "H1": 60, "H4": 240, "D": 1440, "W": 10080, "M": 43200}
+
 
 class SaxoBroker:
     name = "saxo"
 
     CAPABILITIES = frozenset((
         _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
-        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER))
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.HISTORY_BARS,
+        _cap.CONTRACT_RULES, _cap.CORPORATE_ACTIONS))
     #: Never set this True from a reading of the code. It means somebody ran it
     #: against the API and reported what happened.
     verified = False
@@ -263,6 +271,123 @@ class SaxoBroker:
                 "Uic explicitly rather than have this choose a market for you.")
         return int(matches[0]["Identifier"])
 
+    def contract_rules(self, symbol: str, asset_type=_DEFAULT_ASSET_TYPE,
+                       uic=None) -> dict:
+        """
+        Saxo's own tick and lot sizes for one instrument.
+
+        TickSizeScheme is a *table* -- the tick widens with price -- so the
+        single number here is the scheme's default. An order priced into a
+        different band is checked by precheck, which is Saxo's job and not a
+        thing to reimplement from a schedule.
+        """
+        resolved = int(uic) if uic is not None else self.resolve_uic(symbol, asset_type)
+        payload = self._request(
+            "GET", f"/ref/v1/instruments/details/{resolved}/{asset_type}")
+        if not isinstance(payload, dict) or not payload:
+            raise SaxoError(f"No instrument detail returned for {symbol!r}: {payload!r}")
+
+        scheme = payload.get("TickSizeScheme") or {}
+        return {
+            "symbol": payload.get("Symbol") or symbol.upper(),
+            "uic": resolved,
+            "tick_size": _num(payload.get("TickSize")
+                              if payload.get("TickSize") is not None
+                              else scheme.get("DefaultTickSize")),
+            "quantity_step": _num(payload.get("LotSize")
+                                  or payload.get("MinimumLotSize")),
+            "min_quantity": _num(payload.get("MinimumOrderSize")),
+            "currency": str(payload.get("CurrencyCode") or "").upper(),
+            "raw": payload,
+        }
+
+    # -- market data ------------------------------------------------------
+    def history_bars(self, symbol: str, interval: str = "D", count: int = 200,
+                     asset_type=_DEFAULT_ASSET_TYPE, uic=None):
+        """
+        Bars from Saxo, so a Saxo user is not on the Yahoo fallback for every
+        price in the server having supplied Saxo credentials.
+
+        Returned oldest-first. Saxo documents Time ascending, but this sorts
+        anyway: Webull returned newest-first and nothing sorted it, and every
+        indicator ran on a reversed series until somebody noticed.
+        """
+        import pandas as pd
+
+        horizon = SAXO_HORIZON.get(str(interval).upper())
+        if horizon is None:
+            raise ValueError(
+                f"Unsupported interval {interval!r} for Saxo; use one of "
+                f"{sorted(SAXO_HORIZON)}")
+        resolved = int(uic) if uic is not None else self.resolve_uic(symbol, asset_type)
+        payload = self._request("GET", "/chart/v1/charts", params={
+            "Uic": resolved, "AssetType": asset_type,
+            "Horizon": horizon, "Count": min(int(count), 1200), "Mode": "UpTo"})
+
+        rows = (payload or {}).get("Data") or []
+        if not rows:
+            raise SaxoError(f"Saxo returned no chart data for {symbol!r} ({interval}).")
+
+        frame = pd.DataFrame([{
+            "time": r.get("Time"),
+            # Stock candles carry Open/High/Low/Close; FX carries bid/ask pairs
+            # and no mid. Taking the bid for FX is a choice, so it is named
+            # rather than silently averaged into a price that never traded.
+            "open": _num(r.get("Open", r.get("OpenBid"))),
+            "high": _num(r.get("High", r.get("HighBid"))),
+            "low": _num(r.get("Low", r.get("LowBid"))),
+            "close": _num(r.get("Close", r.get("CloseBid"))),
+            "volume": _num(r.get("Volume")) or 0.0,
+        } for r in rows if isinstance(r, dict)])
+
+        if frame.empty or frame["close"].isna().all():
+            raise SaxoNotVerified(
+                "Saxo returned chart rows this adapter could not read as OHLC "
+                f"(keys: {sorted(rows[0])[:10]}). VERIFIER: report the field "
+                "names a real Stock chart response uses.")
+        frame["time"] = pd.to_datetime(frame["time"], errors="coerce", utc=True)
+        if frame["time"].isna().any():
+            raise SaxoError("Saxo returned a chart row with an unparseable Time; "
+                            "unorderable bars must not proceed.")
+        frame = frame.sort_values("time").reset_index(drop=True)
+        frame["time"] = frame["time"].dt.tz_localize(None)
+        frame.attrs["resolved_symbol"] = symbol.upper()
+        return frame
+
+    # -- corporate actions ------------------------------------------------
+    def corporate_actions(self, event_states="Pending", limit: int = 25) -> list:
+        """
+        Mandatory and voluntary events on instruments this account holds.
+
+        Saxo is the only one of the three brokers with this, which is why it is
+        a saxo-prefixed tool rather than something forced into the protocol.
+        """
+        payload = self._request("GET", "/ca/v2/events", params={
+            "AccountKey": self.primary_account_id(),
+            "ClientKey": self._client_key,
+            "EventStates": event_states})
+        rows = (payload or {}).get("Data") or []
+        out = []
+        for e in rows[:limit]:
+            if not isinstance(e, dict):
+                continue
+            instrument = e.get("Instrument") or {}
+            out.append({
+                "event_id": str(e.get("EventId") or ""),
+                "type": str(e.get("EventType") or ""),
+                "symbol": str(instrument.get("Symbol") or instrument.get("Uic") or ""),
+                "description": str(e.get("Description") or e.get("EventName") or ""),
+                "state": str(e.get("EventState") or ""),
+                "election_status": str(e.get("ElectionStatus") or ""),
+                # A deadline is the whole point of a voluntary event.
+                "deadline": str(e.get("ElectionDeadline")
+                                or e.get("ResponseDeadline") or ""),
+                "ex_date": str(e.get("ExDate") or ""),
+                "pay_date": str(e.get("PayDate") or ""),
+                "raw": e,
+            })
+        return out
+
     # -- orders -----------------------------------------------------------
     def build_order(self, symbol, action, quantity, order_type="LMT",
                     limit_price=None, client_order_id=None,
@@ -302,14 +427,18 @@ class SaxoBroker:
             order["OrderPrice"] = float(limit_price)
         return order
 
-    def rule_violations(self, order: dict) -> list:
+    def rule_violations(self, order: dict, rules: dict = None) -> list:
         """
-        Only what is checkable without the API. Saxo publishes per-instrument
-        lot sizes and tick sizes through ref/v1/instruments/details, which this
-        adapter does not fetch -- so this deliberately does NOT claim to know
-        what Saxo will refuse. The precheck endpoint is the real gate.
+        Structural checks always; real tick and lot sizes when `rules` is
+        supplied by contract_rules(). Without them this deliberately does NOT
+        claim to know what Saxo will refuse -- precheck is the real gate.
         """
-        problems = []
+        try:
+            from dashboard.broker import contract_rule_violations
+        except ImportError:
+            from broker import contract_rule_violations
+        problems = contract_rule_violations(order, rules, quantity_key="Amount",
+                                            price_key="OrderPrice")
         try:
             amount = float(order.get("Amount", 0))
         except (TypeError, ValueError):

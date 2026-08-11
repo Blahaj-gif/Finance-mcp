@@ -72,11 +72,12 @@ adapter the protocol and the MCP tools report through.
 
 ### What works with which broker
 
-**31 of the 39 tools are broker-agnostic** — prices, indicators, options, SEC
-filings, insider and institutional data, earnings, macro. They read public
-sources and work the same whoever you clear through.
+**31 of the 41 tools are broker-agnostic** — indicators, options, SEC filings,
+insider and institutional data, earnings, macro. They work the same whoever you
+clear through, though the *prices* underneath them now come from your broker
+where it serves bars (see below).
 
-The other **8 are the account and order tools**, and they go through
+Eight are **account and order tools**, and they go through
 `broker_protocol.py`, so they work with any adapter that declares the capability
 they need:
 
@@ -92,12 +93,35 @@ own order id and documents no mapping from ours, so a cancel tool would be a
 tool that can only refuse. An unusable tool costs a model context on every
 request and is one more wrong choice available to it.
 
+Two more exist only for the broker that has them: **`saxo_corporate_actions`**
+(dividends, splits, tenders and their election deadlines — Saxo is the only one
+of the three with them) and **`ibkr_market_scanner`** (the exchange-side scan,
+rather than inferring rotation from eleven ETF price pulls).
+
 Capability is resolved per **account**, not per broker name, because a broker
 name is not one API. Probed live, Webull's Thai entity refuses the options
 endpoints its US entity serves, caps order-book depth at one level, and does not
 answer the instrument-catalogue call at all — same SDK, same credentials.
 `dashboard/capabilities.py` keeps a cache keyed on broker × entity × account,
 and a probe can only ever *withdraw* a capability, never invent one.
+
+### Prices come from your broker
+
+`fetch_data` tries the configured broker first and Yahoo second, so a Saxo user
+gets Saxo's `/chart/v1/charts` and an IBKR user gets
+`/iserver/marketdata/history` — for **every** price in the server, not just the
+account tools. Before this, supplying Saxo or IBKR credentials still left the
+whole price feed on the public fallback, which was invisible because the tools
+still worked. The fallback always announces itself when it is used.
+
+Both broker feeds sort ascending before returning. Webull returned newest-first
+and nothing sorted it, so every indicator ran on a reversed series and the
+sector heatmap ranked the worst performers as leaders; that is not a mistake
+worth making twice.
+
+`contract_rules()` fetches real tick and lot sizes, and `rule_violations()` uses
+them when supplied — the check that catches an order preview prices cleanly and
+placement then refuses.
 
 **The dashboard's submit button is still Webull-only.** The MCP tools route
 through the protocol; the Streamlit approve-and-submit path does not yet, and

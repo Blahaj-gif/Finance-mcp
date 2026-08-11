@@ -31,6 +31,11 @@ def saxo_session(method, url, body, headers):
     """Documented Saxo shapes. Not a recording -- Saxo has never been called."""
     if "/accounts/me" in url:
         return {"Data": [{"AccountKey": "AK1", "AccountId": "1", "Currency": "USD"}]}
+    # Checked before the search path: /instruments/details is a prefix match on
+    # /instruments, and the wrong one first returns a search payload.
+    if "/ref/v1/instruments/details" in url:
+        return {"Symbol": "AAPL:xnas", "Uic": 211, "TickSize": 0.01,
+                "LotSize": 1, "MinimumOrderSize": 1, "CurrencyCode": "USD"}
     if "/ref/v1/instruments" in url:
         return {"Data": [{"Symbol": "AAPL:xnas", "Identifier": 211, "ExchangeId": "NASDAQ"}]}
     if "/port/v1/balances" in url:
@@ -46,6 +51,20 @@ def saxo_session(method, url, body, headers):
                 "EstimatedCosts": {"TotalCost": 1.0}, "PreCheckResult": "Ok"}
     if "/trade/v2/orders" in url and method == "POST":
         return {"OrderId": "987654"}
+    if "/ref/v1/instruments/details" in url:
+        return {"Symbol": "AAPL:xnas", "Uic": 211, "TickSize": 0.01,
+                "LotSize": 1, "MinimumOrderSize": 1, "CurrencyCode": "USD"}
+    if "/chart/v1/charts" in url:
+        # Deliberately newest-first: the adapter must sort, not trust.
+        return {"Data": [
+            {"Time": "2026-08-07T00:00:00Z", "Open": 3, "High": 4, "Low": 2, "Close": 3.5, "Volume": 30},
+            {"Time": "2026-08-05T00:00:00Z", "Open": 1, "High": 2, "Low": 0.5, "Close": 1.5, "Volume": 10},
+            {"Time": "2026-08-06T00:00:00Z", "Open": 2, "High": 3, "Low": 1.5, "Close": 2.5, "Volume": 20}]}
+    if "/ca/v2/events" in url:
+        return {"Data": [{"EventId": "E1", "EventType": "CashDividend",
+                          "Instrument": {"Symbol": "AAPL", "Uic": 211},
+                          "EventState": "Pending", "ElectionDeadline": "2026-09-01",
+                          "ExDate": "2026-08-20", "PayDate": "2026-09-05"}]}
     return {}
 
 
@@ -170,6 +189,20 @@ def ibkr_session(method, url, body, headers):
                 "snapshot": True}
     if path.startswith(f"/iserver/account/{IBKR_ACCOUNT}/order/") and method == "DELETE":
         return {"order_id": path.rsplit("/", 1)[-1], "msg": "Request was submitted"}
+    if path == "/iserver/contract/rules":
+        return {"orderTypes": ["limit", "market"], "sizeIncrement": 1.0,
+                "minSize": 1.0, "currency": "USD",
+                "incrementRules": [{"lowerEdge": 0.0, "increment": 0.01},
+                                   {"lowerEdge": 1.0, "increment": 0.05}]}
+    if path == "/iserver/marketdata/history":
+        # Deliberately newest-first: the adapter must sort, not trust.
+        return {"symbol": "AAPL", "priceFactor": 1, "data": [
+            {"t": 1786060800000, "o": 3, "h": 4, "l": 2, "c": 3.5, "v": 30},
+            {"t": 1785888000000, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10},
+            {"t": 1785974400000, "o": 2, "h": 3, "l": 1.5, "c": 2.5, "v": 20}]}
+    if path == "/iserver/scanner/run":
+        return {"contracts": [{"symbol": "NVDA", "con_id": 4815747,
+                               "company_name": "NVIDIA CORP", "scan_data": "+12.4%"}]}
     return {}
 
 
@@ -350,6 +383,95 @@ def test_open_orders_carry_the_id_cancel_takes(broker):
     for o in broker.open_orders():
         assert o["client_order_id"], (
             f"{broker.name} returned a working order with no client id: {o!r}")
+
+
+@pytest.mark.parametrize("name", ["saxo", "ibkr"])
+def test_broker_bars_come_back_oldest_first(name):
+    """
+    The single most expensive bug this project has had. Webull returned bars
+    newest-first, nothing sorted them, and every consumer treats iloc[-1] as
+    "most recent" -- so the tool reported the oldest bar in the window as the
+    current price and every indicator ran on a time-reversed series. Both fakes
+    return newest-first on purpose; the adapter must not trust the order.
+    """
+    frame = ADAPTERS[name]().history_bars("AAPL", "D", 3)
+    assert list(frame["close"]) == [1.5, 2.5, 3.5], (
+        f"{name} did not sort its bars ascending")
+    assert frame["time"].is_monotonic_increasing
+    assert set(frame.columns) >= {"time", "open", "high", "low", "close", "volume"}
+
+
+@pytest.mark.parametrize("name", ["saxo", "ibkr"])
+def test_an_unknown_interval_raises_rather_than_quietly_returning_daily(name):
+    """
+    The Yahoo path once defaulted an unrecognised interval to "1d", so a typo
+    returned daily bars under the wrong name. A mapping at the boundary must
+    refuse what it does not know.
+    """
+    with pytest.raises(ValueError, match="Unsupported interval"):
+        ADAPTERS[name]().history_bars("AAPL", "H3", 10)
+
+
+@pytest.mark.parametrize("name", ["saxo", "ibkr"])
+def test_contract_rules_are_normalised(name):
+    rules = ADAPTERS[name]().contract_rules("AAPL")
+    assert set(rules) >= {"tick_size", "quantity_step", "min_quantity", "currency"}
+    assert rules["tick_size"] == pytest.approx(0.01)
+    assert rules["quantity_step"] == pytest.approx(1.0)
+
+
+def test_webull_refuses_to_invent_contract_rules_it_cannot_fetch():
+    """
+    Probed live, the TH entity answers get_tradeable_instruments with
+    SDK.UnknownServerError, so there is no reliable ticker -> instrument_id
+    path. Returning an empty rule set would read as "no restrictions".
+    """
+    with pytest.raises(NotImplementedError, match="not fetched"):
+        make_webull().contract_rules("AAPL")
+    from dashboard.brokers.webull import WebullBroker
+    assert capabilities.CONTRACT_RULES not in WebullBroker.CAPABILITIES
+
+
+def test_fetched_rules_catch_what_the_published_ones_cannot(broker):
+    """
+    The incident this closes: Webull priced a 1-share $0.01 order cleanly
+    through preview and refused it at placement for a quantity-step rule.
+    Preview does not run every placement rule -- but the rules are published.
+    """
+    order = broker.build_order("AAPL", "BUY", 7, "LMT", 313.06,
+                               client_order_id="DRFT_rules")
+    assert broker.rule_violations(order) == [], "offline checks should pass"
+
+    problems = broker.rule_violations(order, {"quantity_step": 100,
+                                              "tick_size": 0.05,
+                                              "min_quantity": 100})
+    assert any("multiple of 100" in p for p in problems), problems
+    assert any("minimum order size" in p for p in problems), problems
+    assert any("tick size" in p for p in problems), problems
+
+
+def test_rule_checking_without_fetched_rules_stays_offline(broker):
+    """
+    rule_violations runs before the networked checks precisely so a malformed
+    order on a machine with no credentials is refused for what is wrong with
+    it, rather than for a missing key.
+    """
+    order = broker.build_order("AAPL", "BUY", 1, "LMT", 1.0,
+                               client_order_id="DRFT_off")
+    assert broker.rule_violations(order, None) == broker.rule_violations(order)
+
+
+def test_a_float_artefact_is_not_reported_as_a_tick_violation():
+    """
+    0.1 + 0.2 arithmetic produces prices like 10.010000000000002. Refusing
+    those would train people to ignore this check, which is worse than not
+    having it.
+    """
+    from dashboard.broker import contract_rule_violations
+    order = {"quantity": 3.0000000000000004, "limit_price": 10.010000000000002}
+    assert contract_rule_violations(order, {"tick_size": 0.01,
+                                            "quantity_step": 1}) == []
+    assert contract_rule_violations(order, None) == [], "no rules is not a pass"
 
 
 def test_rule_violations_returns_sentences_not_codes(broker):
@@ -1030,12 +1152,13 @@ def test_a_probe_can_withdraw_a_capability_but_never_add_one(tmp_path, monkeypat
     capabilities.record(broker, {
         capabilities.CANCEL_ORDER: {"status": "refused", "detail": "UNSUPPORTED"},
         capabilities.POSITIONS: {"status": "ok"},
-        capabilities.MARKET_SCANNER: {"status": "ok"},
+        capabilities.OPTIONS_CHAIN: {"status": "ok"},
     })
     after = capabilities.effective(broker)
     assert capabilities.CANCEL_ORDER not in after, "a refusal must withdraw it"
     assert capabilities.POSITIONS in after
-    assert capabilities.MARKET_SCANNER not in after, (
+    assert capabilities.OPTIONS_CHAIN not in capabilities.declared(broker)
+    assert capabilities.OPTIONS_CHAIN not in after, (
         "the adapter does not implement it; the API supporting it changes nothing")
 
 
@@ -1082,12 +1205,36 @@ def test_the_broker_agnostic_tools_outnumber_the_gated_ones():
     total = len(re.findall(
         r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n(?:@[\w.]+(?:\([^)]*\))?\n)*def \w+",
         source))
-    assert total == 39, f"tool count changed to {total}; the README says 39"
-    assert len(srv.BROKER_TOOLS) == 8
+    assert total == 41, f"tool count changed to {total}; the README says 41"
+    assert len(srv.BROKER_TOOLS) == 10
     readme = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "README.md"), encoding="utf-8").read()
-    assert "31 of the 39" in readme, (
+    assert "31 of the 41" in readme, (
         "README no longer states how many tools work with any broker")
+
+
+def test_a_broker_specific_tool_is_only_offered_to_the_broker_that_has_it():
+    """
+    Option A, and only where there is genuinely no common shape. Saxo has
+    corporate actions and neither other broker does; IBKR has a real scanner
+    and neither other broker does. Offering either universally would be a tool
+    that can only refuse for two users out of three.
+    """
+    from dashboard.brokers.ibkr import IbkrBroker
+    from dashboard.brokers.saxo import SaxoBroker
+    from dashboard.brokers.webull import WebullBroker
+
+    assert capabilities.CORPORATE_ACTIONS in SaxoBroker.CAPABILITIES
+    assert capabilities.MARKET_SCANNER in IbkrBroker.CAPABILITIES
+    for other in (WebullBroker, IbkrBroker):
+        assert capabilities.CORPORATE_ACTIONS not in other.CAPABILITIES
+    for other in (WebullBroker, SaxoBroker):
+        assert capabilities.MARKET_SCANNER not in other.CAPABILITIES
+
+    # And neither is in the fail-open set: failing open into a scanner on a
+    # Webull account advertises a tool that cannot exist, not one that might.
+    assert capabilities.CORPORATE_ACTIONS not in capabilities.GATING
+    assert capabilities.MARKET_SCANNER not in capabilities.GATING
 
 
 def test_the_help_wanted_document_matches_the_code():

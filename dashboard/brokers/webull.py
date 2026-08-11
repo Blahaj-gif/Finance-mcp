@@ -31,7 +31,8 @@ class WebullBroker:
     #: dashboard/capabilities.py is for.
     CAPABILITIES = frozenset((
         _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
-        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER))
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER,
+        _cap.HISTORY_BARS))
 
     def __init__(self):
         self._trade_client = None
@@ -102,8 +103,33 @@ class WebullBroker:
                                order_type=order_type, limit_price=limit_price,
                                client_order_id=client_order_id)
 
-    def rule_violations(self, order: dict) -> list:
-        return _wb.order_rule_violations(order)
+    def rule_violations(self, order: dict, rules: dict = None) -> list:
+        return _wb.order_rule_violations(order, rules)
+
+    def contract_rules(self, symbol: str) -> dict:
+        """
+        Not fetched, and not faked either.
+
+        The SDK offers get_trade_instrument_detail, but probed live the TH
+        entity answers get_tradeable_instruments with SDK.UnknownServerError --
+        the same signature cancel_order gave on order_v2 -- so there is no
+        reliable way from a ticker to an instrument_id here. The one rule this
+        adapter does know is published, hardcoded, and applied by
+        rule_violations without pretending to have come from the API.
+        """
+        raise NotImplementedError(
+            "Webull's instrument-detail endpoint does not answer in every "
+            "region (probed: SDK.UnknownServerError on api.webull.co.th), so "
+            "tick and lot sizes are not fetched. rule_violations still applies "
+            "the published quantity-step rule.")
+
+    def history_bars(self, symbol: str, interval: str = "D", count: int = 200):
+        """
+        Webull's own bars. This is the feed fetch_data has always used; naming
+        it here means the price path is the protocol's rather than an exception
+        beside it.
+        """
+        return _wc.get_webull_data(symbol, interval, count)
 
     def preview_order(self, order: dict) -> dict:
         quote = _wb.preview_order(self._client(), self.primary_account_id(), order)

@@ -463,7 +463,7 @@ def test_the_tool_body_scanner_sees_every_tool():
                             "finance_mcp.py"), encoding="utf-8").read()
     declared = re.findall(_TOOL_DECORATOR + r"(?:@[\w.]+(?:\([^)]*\))?\n)*def (\w+)", src)
     assert sorted(name for name, _ in _tool_bodies()) == sorted(declared)
-    assert len(declared) == 39
+    assert len(declared) == 41
 
 
 def test_every_tool_that_reads_prices_stamps_when_they_are_as_of():

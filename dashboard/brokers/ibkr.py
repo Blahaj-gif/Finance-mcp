@@ -111,6 +111,18 @@ _ORDER_TYPE = {"LMT": "LMT", "LIMIT": "LMT",
                "STP": "STP", "STOP": "STP"}
 _DEFAULT_SEC_TYPE = "STK"
 
+# IBKR names bar sizes its own way. The mapping lives at the boundary, which is
+# where the Webull "H1" bug was fixed -- "H1" was silently not a Webull timespan
+# and every hourly request fell through to Yahoo without saying so.
+IBKR_BAR = {"M1": "1min", "M5": "5min", "M15": "15min", "M30": "30min",
+            "H1": "1h", "H4": "4h", "D": "1d", "W": "1w", "M": "1m"}
+
+#: Roughly how much wall-clock `count` bars of each interval spans. IBKR asks
+#: for a period, not a bar count, and asking for too little silently returns a
+#: short frame -- so these round up and the caller trims.
+_BARS_PER_DAY = {"M1": 390, "M5": 78, "M15": 26, "M30": 13, "H1": 7, "H4": 2,
+                 "D": 1, "W": 0.2, "M": 0.05}
+
 # "1,234.56 USD", "USD 1,234.56", "1.00 - 2.50 USD".
 _MONEY = re.compile(r"-?[\d,]+(?:\.\d+)?")
 _CURRENCY = re.compile(r"\b([A-Z]{3})\b")
@@ -121,7 +133,8 @@ class IbkrBroker:
 
     CAPABILITIES = frozenset((
         _cap.ACCOUNTS, _cap.POSITIONS, _cap.BUYING_POWER, _cap.OPEN_ORDERS,
-        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER))
+        _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER,
+        _cap.HISTORY_BARS, _cap.CONTRACT_RULES, _cap.MARKET_SCANNER))
     #: Never set this True from a reading of the code. It means somebody ran it
     #: against the API and reported what happened.
     verified = False
@@ -450,6 +463,133 @@ class IbkrBroker:
                 "conid explicitly rather than have this choose a market for you.")
         return int(next(iter(conids)))
 
+    def contract_rules(self, symbol: str, sec_type=_DEFAULT_SEC_TYPE,
+                       conid=None, is_buy: bool = True) -> dict:
+        """
+        IBKR's own tick and lot rules for one contract.
+
+        `incrementRules` is a *ladder* — the tick widens above a price edge —
+        so the number reported here is the increment at the bottom of the
+        ladder, which is the one a limit near the money is checked against.
+        whatif remains the authority for anything above it.
+        """
+        resolved = int(conid) if conid is not None else self.resolve_conid(symbol, sec_type)
+        payload = self._request("POST", "/iserver/contract/rules",
+                                body={"conid": str(resolved), "isBuy": bool(is_buy)})
+        if not isinstance(payload, dict) or not payload:
+            raise IbkrError(f"No contract rules returned for {symbol!r}: {payload!r}")
+
+        ladder = payload.get("incrementRules") or []
+        increment = None
+        if isinstance(ladder, list) and ladder and isinstance(ladder[0], dict):
+            increment = _num(ladder[0].get("increment"))
+        if increment is None:
+            increment = _num(payload.get("increment"))
+
+        return {
+            "symbol": symbol.upper(),
+            "conid": resolved,
+            "tick_size": increment,
+            "quantity_step": _num(payload.get("sizeIncrement")),
+            "min_quantity": _num(payload.get("minSize")
+                                 or payload.get("sizeIncrement")),
+            "currency": str(payload.get("currency") or "").upper(),
+            "order_types": payload.get("orderTypes") or [],
+            "raw": payload,
+        }
+
+    # -- market data ------------------------------------------------------
+    def history_bars(self, symbol: str, interval: str = "D", count: int = 200,
+                     sec_type=_DEFAULT_SEC_TYPE, conid=None, outside_rth=False):
+        """
+        Bars from IBKR, so an IBKR user is not on the Yahoo fallback for every
+        price in the server having supplied IBKR credentials.
+
+        Returned oldest-first. IBKR documents ascending, but this sorts anyway:
+        Webull returned newest-first and nothing sorted it, so every indicator
+        ran on a reversed series and the sector heatmap ranked the worst
+        performers as leaders.
+        """
+        import pandas as pd
+
+        bar = IBKR_BAR.get(str(interval).upper())
+        if bar is None:
+            raise ValueError(
+                f"Unsupported interval {interval!r} for IBKR; use one of "
+                f"{sorted(IBKR_BAR)}")
+        resolved = int(conid) if conid is not None else self.resolve_conid(symbol, sec_type)
+        payload = self._request("GET", "/iserver/marketdata/history", params={
+            "conid": str(resolved), "bar": bar,
+            "period": _ibkr_period(interval, count),
+            "outsideRth": "true" if outside_rth else "false"})
+        if not isinstance(payload, dict):
+            raise IbkrError(f"Unexpected history payload: {payload!r}")
+
+        rows = payload.get("data") or []
+        if not rows:
+            raise IbkrError(f"IBKR returned no bars for {symbol!r} ({interval}).")
+
+        # IBKR scales some instruments' prices by priceFactor. It is 1 for US
+        # equities, and dividing by a wrong factor is a silent hundredfold
+        # error in a price a person acts on, so anything but 1 stops here.
+        factor = _num(payload.get("priceFactor")) or 1.0
+        if factor != 1.0:
+            raise IbkrNotVerified(
+                f"IBKR returned priceFactor={factor} for {symbol!r}. Applying it "
+                "blind would risk a silently mis-scaled price. VERIFIER: report "
+                "whether prices in `data` are already scaled or need dividing by "
+                "priceFactor.")
+
+        frame = pd.DataFrame([{
+            "time": r.get("t"),
+            "open": _num(r.get("o")), "high": _num(r.get("h")),
+            "low": _num(r.get("l")), "close": _num(r.get("c")),
+            "volume": _num(r.get("v")) or 0.0,
+        } for r in rows if isinstance(r, dict)])
+
+        if frame.empty or frame["close"].isna().all():
+            raise IbkrNotVerified(
+                "IBKR returned history rows this adapter could not read as OHLC "
+                f"(keys: {sorted(rows[0])[:10]}). VERIFIER: report the field "
+                "names a real history response uses.")
+        # `t` is epoch milliseconds.
+        frame["time"] = pd.to_datetime(frame["time"], unit="ms", errors="coerce")
+        if frame["time"].isna().any():
+            raise IbkrError("IBKR returned a bar with an unparseable timestamp; "
+                            "unorderable bars must not proceed.")
+        frame = frame.sort_values("time").reset_index(drop=True)
+        frame.attrs["resolved_symbol"] = symbol.upper()
+        return frame
+
+    # -- scanner ----------------------------------------------------------
+    def market_scanner(self, scan_code: str = "TOP_PERC_GAIN",
+                       instrument: str = "STK", location: str = "STK.US.MAJOR",
+                       limit: int = 25) -> list:
+        """
+        IBKR's own scanner. Neither other broker has anything comparable, which
+        is why this is an ibkr-prefixed tool and not part of the protocol.
+        """
+        payload = self._request("POST", "/iserver/scanner/run", body={
+            "instrument": instrument, "type": scan_code,
+            "location": location, "filter": []})
+        rows = (payload or {}).get("contracts") or (payload or {}).get("Contracts") or []
+        out = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            out.append({
+                "symbol": str(row.get("symbol") or row.get("contract_description_1") or ""),
+                "conid": row.get("con_id") or row.get("conid"),
+                "company": str(row.get("company_name") or ""),
+                "detail": str(row.get("scan_data") or row.get("contract_description_2") or ""),
+                "raw": row,
+            })
+        return out
+
+    def scanner_parameters(self) -> dict:
+        """The scan codes and locations this account may use. Large payload."""
+        return self._request("GET", "/iserver/scanner/params")
+
     # -- orders -----------------------------------------------------------
     def build_order(self, symbol, action, quantity, order_type="LMT",
                     limit_price=None, client_order_id=None,
@@ -492,17 +632,19 @@ class IbkrBroker:
             order["price"] = float(limit_price)
         return order
 
-    def rule_violations(self, order: dict) -> list:
+    def rule_violations(self, order: dict, rules: dict = None) -> list:
         """
-        Only what is checkable without the API.
-
-        IBKR publishes per-contract tick and lot rules through
-        /iserver/contract/rules, which this adapter does not fetch — so this
-        deliberately does NOT claim to know what IBKR will refuse. whatif and
-        the confirmation questions are the real gates, and both are the
-        broker's, not ours.
+        Structural checks always; real tick and lot rules when `rules` comes
+        from contract_rules(). Without them this does NOT claim to know what
+        IBKR will refuse — whatif and the confirmation questions are the real
+        gates, and both are the broker's, not ours.
         """
-        problems = []
+        try:
+            from dashboard.broker import contract_rule_violations
+        except ImportError:
+            from broker import contract_rule_violations
+        problems = contract_rule_violations(order, rules, quantity_key="quantity",
+                                            price_key="price")
         try:
             quantity = float(order.get("quantity", 0))
         except (TypeError, ValueError):
@@ -717,6 +859,22 @@ def _num(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _ibkr_period(interval: str, count: int) -> str:
+    """
+    Bar count -> the period string IBKR wants, rounded up.
+
+    Trading days, not calendar days, and a margin on top: asking for exactly
+    the span needed returns a frame one weekend short, and a short frame is how
+    an indicator quietly computes over the wrong window.
+    """
+    per_day = _BARS_PER_DAY.get(str(interval).upper(), 1)
+    days = max(1, int(count / per_day * 1.6) + 2)
+    if days <= 30:
+        return f"{days}d"
+    months = max(1, int(days / 30) + 1)
+    return f"{months}m" if months <= 11 else f"{max(1, int(months / 12) + 1)}y"
 
 
 def _summary_amount(value):

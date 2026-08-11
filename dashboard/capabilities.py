@@ -55,15 +55,20 @@ PLACE_ORDER = "place_order"
 CANCEL_ORDER = "cancel_order"
 OPTIONS_CHAIN = "options_chain"
 HISTORY_BARS = "history_bars"
+CONTRACT_RULES = "contract_rules"
 MARKET_SCANNER = "market_scanner"
 CORPORATE_ACTIONS = "corporate_actions"
 
 ALL = (ACCOUNTS, POSITIONS, BUYING_POWER, OPEN_ORDERS, PREVIEW_ORDER,
        PLACE_ORDER, CANCEL_ORDER, OPTIONS_CHAIN, HISTORY_BARS,
-       MARKET_SCANNER, CORPORATE_ACTIONS)
+       CONTRACT_RULES, MARKET_SCANNER, CORPORATE_ACTIONS)
 
 #: Capabilities whose absence should hide a tool rather than let it fail. The
 #: rest are informational until something is built on them.
+#: Deliberately excludes the broker-specific ones (MARKET_SCANNER,
+#: CORPORATE_ACTIONS). This set is the fail-open default, and failing open into
+#: `ibkr_market_scanner` on a Webull account would advertise a tool that cannot
+#: exist rather than one that might.
 GATING = frozenset((ACCOUNTS, POSITIONS, BUYING_POWER, OPEN_ORDERS,
                     PREVIEW_ORDER, PLACE_ORDER, CANCEL_ORDER))
 

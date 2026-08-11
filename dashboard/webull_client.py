@@ -875,6 +875,38 @@ DATA_CACHE = {}
 CACHE_EXPIRATION_SECONDS = 60  # Cache lasts for 60 seconds
 
 
+def _price_sources(symbol: str, interval: str, count: int) -> list:
+    """
+    (loader, label) pairs to try in order: the configured broker, then Yahoo.
+
+    Webull keeps its dedicated path because it is the one exercised for real and
+    carries the .BK regional retry. Any other broker declaring `history_bars`
+    goes through the protocol. Yahoo is always last and always announces itself
+    -- a fallback that does not say it is one is how a divergence between two
+    feeds went unnoticed for months.
+    """
+    sources = []
+    broker_name = os.getenv("FINANCE_BROKER", "webull").strip().lower()
+
+    if broker_name == "webull":
+        sources.append((lambda: get_webull_data(symbol, interval, count),
+                        "Webull OpenAPI"))
+    else:
+        def broker_bars():
+            from dashboard import brokers, capabilities
+            adapter = brokers.get()
+            if capabilities.HISTORY_BARS not in capabilities.effective(adapter):
+                raise RuntimeError(
+                    f"{adapter.name} does not serve historical bars here")
+            return adapter.history_bars(symbol, interval, count)
+
+        sources.append((broker_bars, f"{broker_name.upper()} broker feed"))
+
+    sources.append((lambda: get_yfinance_data(symbol, interval, count),
+                    "Yahoo Finance (Fallback)"))
+    return sources
+
+
 def fetch_data(symbol: str, interval: str = "D", count: int = 200) -> tuple[pd.DataFrame, str]:
     """
     Main function to retrieve K-Line data.
@@ -928,24 +960,27 @@ def fetch_data(symbol: str, interval: str = "D", count: int = 200) -> tuple[pd.D
             label += f" [resolved as {resolved}]"
         return _validate_frame(frame, symbol.upper(), interval, label), label
 
-    try:
-        df, source = _try(lambda: get_webull_data(symbol, interval, count), "Webull OpenAPI")
-    except Exception as e:
-        errors.append(("Webull OpenAPI", e))
-        print(f"Webull API failed for {symbol} (falling back to Yahoo Finance): {e}", file=sys.stderr)
+    # Sources in order: the configured broker, then Yahoo. A Saxo or IBKR user
+    # supplied credentials to a broker that serves bars; leaving them on the
+    # public fallback for every price in the server was the largest thing the
+    # broker sweep found, and it was invisible because the tools still worked.
+    df = source = None
+    for loader, label in _price_sources(symbol, interval, count):
         try:
-            df, source = _try(lambda: get_yfinance_data(symbol, interval, count),
-                              "Yahoo Finance (Fallback)")
-        except Exception as ex:
-            errors.append(("Yahoo Finance", ex))
-            detail = "; ".join(f"{name}: {err}" for name, err in errors)
-            if any(isinstance(err, StaleDataError) for _, err in errors):
-                raise StaleDataError(
-                    f"No source returned fresh {interval} data for {symbol.upper()}. {detail}"
-                ) from ex
-            raise RuntimeError(
-                f"Both Webull API and Yahoo Finance fallback failed for {symbol}. {detail}"
-            ) from ex
+            df, source = _try(loader, label)
+            break
+        except Exception as e:
+            errors.append((label, e))
+            print(f"{label} failed for {symbol}: {e}", file=sys.stderr)
+
+    if df is None:
+        detail = "; ".join(f"{name}: {err}" for name, err in errors)
+        tried = ", ".join(name for name, _ in errors)
+        if any(isinstance(err, StaleDataError) for _, err in errors):
+            raise StaleDataError(
+                f"No source returned fresh {interval} data for {symbol.upper()}. {detail}")
+        raise RuntimeError(
+            f"Every price source failed for {symbol} ({tried}). {detail}")
 
     # Only frames that passed validation are cached, in memory and on disk.
     DATA_CACHE[cache_key] = (current_time, df, source)

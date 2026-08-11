@@ -238,15 +238,71 @@ PENNY_QUANTITY_STEPS = (
 )
 
 
-def order_rule_violations(order: dict) -> list:
+def contract_rule_violations(order, rules, quantity_key="quantity",
+                             price_key="limit_price") -> list:
+    """
+    An order checked against the broker's *fetched* tick and lot sizes.
+
+    Shared by every adapter, because the arithmetic does not vary by broker and
+    a rounding rule implemented three times is a rounding rule wrong in two
+    places. Empty when `rules` is None -- an unfetched rule is not a passed one,
+    and the caller decides whether that is acceptable.
+
+    Tolerance is deliberate: a price of 10.010000000000002 is a float artefact,
+    not a tick violation, and refusing it would train people to ignore this.
+    """
+    if not rules:
+        return []
+    problems = []
+
+    def _f(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    quantity = _f(order.get(quantity_key))
+    price = _f(order.get(price_key))
+    step = _f(rules.get("quantity_step"))
+    tick = _f(rules.get("tick_size"))
+    minimum = _f(rules.get("min_quantity"))
+
+    if quantity is not None and minimum and quantity < minimum:
+        problems.append(
+            f"The broker's minimum order size for this instrument is "
+            f"{minimum:,g}; this order is {quantity:,g}.")
+    if quantity is not None and step and not _is_multiple(quantity, step):
+        problems.append(
+            f"Quantity must be a multiple of {step:,g} for this instrument; "
+            f"{quantity:,g} is not.")
+    if price is not None and tick and not _is_multiple(price, tick):
+        problems.append(
+            f"Price must be a multiple of the {tick:,g} tick size; "
+            f"{price:,g} is not.")
+    return problems
+
+
+def _is_multiple(value, step, tolerance=1e-9) -> bool:
+    if step <= 0:
+        return True
+    remainder = abs(value / step - round(value / step))
+    return remainder * step <= max(tolerance, abs(value) * 1e-9)
+
+
+def order_rule_violations(order: dict, rules: dict = None) -> list:
     """
     Broker rules this order would break, as plain sentences. Empty when clean.
 
     Advisory, never authoritative: the broker remains the decider, and a rule it
     applies that is not listed here will still refuse the order. This exists so
     the common refusals arrive before a human approves rather than after.
+
+    With no `rules` this stays offline and applies only what the adapter
+    publishes. `rules` is a contract_rules() payload -- the broker's own tick
+    and lot sizes -- and turns the published guesses into the real numbers.
     """
     problems = []
+    problems.extend(contract_rule_violations(order, rules))
 
     try:
         qty = float(order.get("quantity", 0))
