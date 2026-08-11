@@ -1,0 +1,87 @@
+name: Broker verification report
+description: You ran tests/verify_saxo.py or tests/verify_ibkr.py against a real account
+title: "<broker>: verification report"
+labels: ["verification", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you — this is the most useful thing anyone can send this project.**
+
+        Two of the three broker adapters are written from published documentation
+        and have never been run. Everything they claim about field names and
+        response shapes is what the docs say, not what the API does.
+
+        **Partial answers are worth filing.** A single question answered is a
+        real issue. You do not need to write code, and neither script sends an
+        order.
+
+  - type: dropdown
+    id: broker
+    attributes:
+      label: Which broker
+      options:
+        - Saxo Bank
+        - Interactive Brokers
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Which account
+      description: >
+        Simulation and paper accounts answer every question here. If you used a
+        live one, say so — it changes how much weight a field name carries.
+      options:
+        - Simulation / paper
+        - Live
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: The report the script printed
+      description: >
+        Paste it as-is. Numbers and long strings are redacted by default —
+        re-run with `--show-amounts` only if you are comfortable, because
+        **field names are what matters here, not your balances**. Please check
+        for account ids before posting.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: surprises
+    attributes:
+      label: Anything the script got wrong, or that surprised you
+      description: >
+        More valuable than the JSON. If a call failed in a way the script
+        reported as "unexpected", or a refusal seemed unreasonable in practice,
+        that is the finding.
+    validations:
+      required: false
+
+  - type: textarea
+    id: strictness
+    attributes:
+      label: Was anything unusably strict?
+      description: >
+        Both adapters refuse rather than guess — on an ambiguous ticker, on a
+        currency they cannot answer for, on a cancel they cannot key. Those are
+        deliberate, but a refusal that fires on every ordinary order is a design
+        mistake and worth saying so.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Before you post
+      options:
+        - label: I have checked the pasted output for account ids and balances I did not mean to share
+          required: true
+        - label: I understand the adapter will stay marked unverified until there is enough evidence, and that my report may only close part of the gap
+          required: false

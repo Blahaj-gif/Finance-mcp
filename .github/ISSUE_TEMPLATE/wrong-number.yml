@@ -1,0 +1,56 @@
+name: A number looks wrong
+description: A price, balance, indicator or figure that does not match what you see elsewhere
+title: "wrong number: <what>"
+labels: ["data integrity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This is the report this project most wants to receive.**
+
+        Every serious bug it has had was a number that looked plausible and was
+        not: bars returned newest-first so every indicator ran on a reversed
+        series and the sector heatmap ranked the worst performers as leaders; a
+        surprise percentage multiplied by 100; buying power read from the wrong
+        currency line and printed as "0.00 HKD" on an account holding $333.
+
+        None of those looked broken. They looked like answers.
+
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool or dashboard tab
+      placeholder: get_market_analysis / the Portfolio tab / the metric strip
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it showed, and what you believe it should show
+      description: >
+        Include the symbol, the interval, and where your reference number came
+        from — a broker's own screen, a charting platform, the exchange. The
+        source matters: platforms disagree on adjustment and session coverage,
+        and sometimes the difference is the answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: The provenance line, if there was one
+      description: >
+        Most price output carries a line saying which feed it came from and how
+        old the newest bar is. Paste it — it usually identifies the problem on
+        its own.
+    validations:
+      required: false
+
+  - type: input
+    id: broker
+    attributes:
+      label: FINANCE_BROKER
+      placeholder: webull / saxo / ibkr — and the region if Webull
+    validations:
+      required: false

@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOT FINANCIAL ADVICE. This software can place real orders against a real
-brokerage account. Its consensus score is a hand-tuned heuristic that
-underperformed buy-and-hold in backtest, and is labelled as such throughout.
-Run with WEBULL_ENVIRONMENT=paper until you have rehearsed the approval flow.
-You are responsible for every order you approve.
-
-THIRD-PARTY DATA. Series sourced from FRED are redistributed by the Federal
-Reserve Bank of St. Louis under the terms of their original publishers. Two
-carry third-party copyright and are not licensed for redistribution:
-`hy_spread` (ICE BofA index data) and `vix` (CBOE). They are fetched live for
-personal use and no values are bundled here.

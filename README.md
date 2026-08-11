@@ -53,7 +53,9 @@ free API keys.
 
 > **This places real orders against a real account.** The consensus score is a
 > fixed-weight heuristic that underperformed buy-and-hold in backtest and is
-> labelled as such throughout. Not financial advice; see [LICENSE](https://github.com/Blahaj-gif/Finance-mcp/blob/master/LICENSE).
+> labelled as such throughout. Not financial advice — see
+> [NOTICE.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/NOTICE.md)
+> for the full disclaimers and the third-party data terms.
 
 ---
 
