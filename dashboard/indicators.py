@@ -383,55 +383,122 @@ def calculate_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     
     return pd.DataFrame({"pivot_pp": pp, "pivot_r1": r1, "pivot_s1": s1, "pivot_r2": r2, "pivot_s2": s2, "pivot_r3": r3, "pivot_s3": s3}, index=df.index)
 
+#: The ADX thresholds the regime tree turns on. Wilder's original reading is
+#: that below 20 there is no trend worth trading and above 25 there is one;
+#: 23 is this project's compromise, and the 20-23 gap is deliberately named
+#: rather than silently folded into "mixed".
+ADX_TRENDING = 23
+ADX_RANGING = 20
+
+#: How far Bollinger width must sit above its own 20-period mean, in standard
+#: deviations of that mean, to count as an expansion.
+BB_EXPANSION_SIGMA = 1.5
+
+REGIME_BULLISH = "Bullish Trending"
+REGIME_BEARISH = "Bearish Trending"
+REGIME_EXPANSION = "Volatility Expansion"
+REGIME_RANGING = "Mean-Reverting / Range-Bound"
+REGIME_CONFLICTED = "Conflicted Trend"
+REGIME_TRANSITIONAL = "Transitional"
+REGIME_UNKNOWN = "Insufficient History"
+
+#: What each label means, in the terms the classifier actually used. Shown
+#: wherever a regime is displayed, because a label a reader cannot check is a
+#: label they have to trust.
+REGIME_BASIS = {
+    REGIME_BULLISH: f"ADX > {ADX_TRENDING} and close > EMA20 > EMA50",
+    REGIME_BEARISH: f"ADX > {ADX_TRENDING} and close < EMA20 < EMA50",
+    REGIME_EXPANSION: (f"Bollinger width more than {BB_EXPANSION_SIGMA} standard "
+                       "deviations above its own 20-period mean"),
+    REGIME_RANGING: f"ADX < {ADX_RANGING}",
+    REGIME_CONFLICTED: (f"ADX > {ADX_TRENDING}, so there is a trend, but price and "
+                        "the EMA stack disagree on its direction"),
+    REGIME_TRANSITIONAL: (f"ADX between {ADX_RANGING} and {ADX_TRENDING} — neither "
+                          "trending nor ranging by these thresholds"),
+    REGIME_UNKNOWN: "not enough bars yet for ADX and Bollinger width to exist",
+}
+
+
 def classify_market_regime(df: pd.DataFrame, precomputed: dict = None) -> pd.DataFrame:
     """
-    Classifies market regime into one of 4 states:
-    1: Bullish Trending
-    2: Bearish Trending
-    3: High Volatility Expansion
-    4: Mean-Reverting Range-Bound
+    Label each bar with the regime the indicators put it in.
 
-    `precomputed` optionally supplies adx/bb/ema_fast/ema_slow frames to avoid
-    recalculating them.
+    This is a decision tree over three inputs, not a gradient or a model:
+
+        Bollinger width more than 1.5 sigma above its own 20-bar mean
+            -> Volatility Expansion          (checked first: an expansion
+                                              overrides the trend reading)
+        else ADX > 23
+            close > EMA20 > EMA50            -> Bullish Trending
+            close < EMA20 < EMA50            -> Bearish Trending
+            otherwise                        -> Conflicted Trend
+        else ADX < 20                        -> Mean-Reverting / Range-Bound
+        else                                 -> Transitional
+        ADX or width not yet computable      -> Insufficient History
+
+    **Three of these used to be one label.** "Mixed Trend" was returned for the
+    warm-up period, for a real trend whose direction the EMAs disputed, and for
+    the 20-23 ADX gap. They are different situations and one of them is not a
+    reading at all: on the first ~30 bars of any series the old classifier
+    reported "Mixed Trend", which reads as a finding rather than as an absence
+    of data. Absence must never look like a measurement.
+
+    The thresholds are conventional and unvalidated here. Nothing in this
+    project has shown that ADX 23 separates tradable trends from untradeable
+    ones on any particular instrument; it is a widely used number, and that is
+    the whole claim.
     """
     p = precomputed or {}
     adx_df = p.get("adx") if p.get("adx") is not None else calculate_adx(df)
     bb_df = p.get("bb") if p.get("bb") is not None else calculate_bollinger_bands(df)
     ema_fast = p.get("ema_fast") if p.get("ema_fast") is not None else calculate_ema(df, 20)
     ema_slow = p.get("ema_slow") if p.get("ema_slow") is not None else calculate_ema(df, 50)
-    
-    # BB Width 20-period SMA & Std
+
     bb_width = bb_df["bb_width"]
     bb_width_sma = bb_width.rolling(window=20).mean()
     bb_width_std = bb_width.rolling(window=20).std()
-    
+
     regimes = []
     adx = adx_df["adx"]
     close = df["close"]
-    
+
     for i in range(len(df)):
-        if pd.isna(adx.iloc[i]) or pd.isna(bb_width.iloc[i]):
-            regimes.append("Mixed Trend")
+        if (pd.isna(adx.iloc[i]) or pd.isna(bb_width.iloc[i])
+                or pd.isna(ema_fast.iloc[i]) or pd.isna(ema_slow.iloc[i])):
+            regimes.append(REGIME_UNKNOWN)
             continue
-            
-        # Volatility expansion check: width is > 1.5 standard deviations above its 20 SMA
-        is_expansion = bb_width.iloc[i] > (bb_width_sma.iloc[i] + 1.5 * bb_width_std.iloc[i])
-        
+
+        # The expansion test needs its own warm-up: rolling(20) over a series
+        # that is itself a rolling window. Without this the first bars with an
+        # ADX but no width statistics compared against NaN, which is False, and
+        # quietly fell through to the trend branch.
+        if pd.isna(bb_width_sma.iloc[i]) or pd.isna(bb_width_std.iloc[i]):
+            regimes.append(REGIME_UNKNOWN)
+            continue
+
+        is_expansion = bb_width.iloc[i] > (
+            bb_width_sma.iloc[i] + BB_EXPANSION_SIGMA * bb_width_std.iloc[i])
+
         if is_expansion:
-            regimes.append("Volatility Expansion")
-        elif adx.iloc[i] > 23:
+            regimes.append(REGIME_EXPANSION)
+        elif adx.iloc[i] > ADX_TRENDING:
             if close.iloc[i] > ema_fast.iloc[i] and ema_fast.iloc[i] > ema_slow.iloc[i]:
-                regimes.append("Bullish Trending")
+                regimes.append(REGIME_BULLISH)
             elif close.iloc[i] < ema_fast.iloc[i] and ema_fast.iloc[i] < ema_slow.iloc[i]:
-                regimes.append("Bearish Trending")
+                regimes.append(REGIME_BEARISH)
             else:
-                regimes.append("Mixed Trend")
-        elif adx.iloc[i] < 20:
-            regimes.append("Mean-Reverting / Range-Bound")
+                regimes.append(REGIME_CONFLICTED)
+        elif adx.iloc[i] < ADX_RANGING:
+            regimes.append(REGIME_RANGING)
         else:
-            regimes.append("Mixed Trend")
-            
+            regimes.append(REGIME_TRANSITIONAL)
+
     return pd.DataFrame({"regime": regimes}, index=df.index)
+
+
+def describe_regime(label: str) -> str:
+    """The test the classifier applied, for showing beside the label."""
+    return REGIME_BASIS.get(label, "unrecognised regime label")
 
 # Bars needed before the consensus is built on anything real. EMA(50) and
 # MACD(26,9) are *defined* from bar 0 (ewm with adjust=False seeds at close[0])
@@ -446,7 +513,8 @@ def calculate_adaptive_consensus(df: pd.DataFrame, precomputed: dict = None) -> 
     Calculates a consensus score (-5 to +5) adaptively weighted by the market regime:
       - Trending: Trend indicators (MACD, MA, SuperTrend) have 80% weight.
       - Mean-Reverting: Oscillators (RSI, Stochastic, BB touch) have 80% weight.
-      - Mixed/Expansion: Split equally.
+      - Volatility Expansion, Conflicted Trend, Transitional: split equally.
+      - Insufficient History: NaN, because there is nothing to weight.
 
     The first CONSENSUS_WARMUP_BARS bars are NaN rather than a number nobody
     should act on.
@@ -506,16 +574,25 @@ def calculate_adaptive_consensus(df: pd.DataFrame, precomputed: dict = None) -> 
         trend_score = (macd_sig_val + st_sig + ema_sig) / 3.0
         
         # 3. Apply Regime weighting
-        if r in ["Bullish Trending", "Bearish Trending"]:
+        if r == REGIME_UNKNOWN:
+            # No regime means the indicators it is built from do not exist yet.
+            # A 50/50 blend of two undefined scores is still a number, and a
+            # number here would be read as a signal.
+            consensus.append(np.nan)
+            continue
+
+        if r in (REGIME_BULLISH, REGIME_BEARISH):
             # Focus on Trend
             score = 0.8 * trend_score + 0.2 * osc_score
-        elif r == "Mean-Reverting / Range-Bound":
+        elif r == REGIME_RANGING:
             # Focus on Oscillators
             score = 0.8 * osc_score + 0.2 * trend_score
         else:
-            # Equal weight
+            # Volatility Expansion, Conflicted Trend and Transitional. Each is
+            # a different reason to trust neither family more than the other,
+            # which is why they weight alike without being one label.
             score = 0.5 * trend_score + 0.5 * osc_score
-            
+
         # Scale to -5.0 to +5.0 range
         consensus.append(score * 5.0)
 

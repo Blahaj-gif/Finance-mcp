@@ -108,7 +108,7 @@ def needs(capability):
 
 @mcp.tool()
 def check_connection() -> str:
-    """Tests connection to Webull API and Yahoo Finance fallback."""
+    """Tests the configured price feed and its Yahoo Finance fallback."""
     try:
         df, source = webull_client.fetch_data("AAPL", "D", 10)
         age = webull_client.bar_age(df, "D")
@@ -1309,7 +1309,7 @@ def get_short_interest(symbol: str) -> str:
 def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LMT", limit_price: float = None) -> str:
     """
     Drafts an order for human review and approval in the Streamlit Dashboard.
-    For safety, Claude NEVER places orders directly. All orders must be drafted and manually approved.
+    For safety, the assistant NEVER places orders directly. All orders must be drafted and manually approved.
     
     Args:
         symbol: Ticker symbol (e.g. AAPL, TSLA).

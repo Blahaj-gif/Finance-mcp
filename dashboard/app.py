@@ -1241,11 +1241,33 @@ with tab_portfolio:
         net_liq = float(balances.get("total_market_value", 0) or 0) + \
             float(balances.get("total_cash_balance", 0) or 0)
         day_pnl = float(balances.get("total_unrealized_profit_loss", 0) or 0)
-        try:
-            buying_power = broker.get_buying_power(balances, "USD")
-        except Exception:
-            buying_power = 0.0
         currency = balances.get("total_asset_currency", "")
+
+        # Every currency line the account actually holds something in. The
+        # totals above are Webull's conversion of these into the base currency,
+        # so showing only the base figures beside a single USD line reads as
+        # two separate piles of money when it is one pile counted twice.
+        ccy_lines = []
+        for asset in balances.get("account_currency_assets", []) or []:
+            values = {k: float(asset.get(k, 0) or 0)
+                      for k in ("buying_power", "cash_balance", "market_value")}
+            if any(values.values()):
+                ccy_lines.append({"currency": str(asset.get("currency", "")).upper(),
+                                  **values})
+
+        # The tradable line. Reporting 0.00 when the lookup fails is the bug
+        # that once printed "buying power 0.00 HKD" on an account holding
+        # 333.83 USD: an absent figure and an empty account look identical, and
+        # only one of them means you cannot trade.
+        buying_power, bp_currency, bp_error = None, "", None
+        try:
+            spend = max(ccy_lines, key=lambda c: c["buying_power"], default=None)
+            if spend and spend["buying_power"] > 0:
+                buying_power, bp_currency = spend["buying_power"], spend["currency"]
+            else:
+                buying_power, bp_currency = broker.get_buying_power(balances, "USD"), "USD"
+        except Exception as bp_err:
+            bp_error = str(bp_err)
         
         # The P&L card printed the same number as both value and delta, so the
         # figure appeared twice with an arrow between them. The delta now says
@@ -1261,10 +1283,33 @@ with tab_portfolio:
             st.metric(f"Unrealised P&L ({currency or 'base'})", f"{day_pnl:,.2f}",
                       delta=f"{pnl_pct:+.2f}% on cost", delta_color="normal")
         with mcol3:
-            st.metric("Buying Power (USD)", f"{buying_power:,.2f}",
-                      help="Buying power is reported per currency; this is the USD line. "
-                           "Net liquidation above is in the account's base currency, "
-                           "which may differ.")
+            if buying_power is None:
+                st.metric("Buying Power", "unavailable",
+                          help=f"The buying-power line could not be read: {bp_error}. "
+                               "This is not the same as having none, so it does not "
+                               "say zero.")
+            else:
+                st.metric(f"Buying Power ({bp_currency})", f"{buying_power:,.2f}",
+                          help="The currency this account can actually spend. The two "
+                               f"figures to the left are the same money converted to "
+                               f"{currency or 'the base currency'} — not a separate "
+                               "balance.")
+
+        if ccy_lines:
+            # Spelled out because the base-currency total and the spendable line
+            # are the same money in different units, roughly an exchange rate
+            # apart, and nothing on the page said so.
+            held = ", ".join(f"{c['currency']}" for c in ccy_lines)
+            st.caption(
+                f"Held in {held}. **Net liquidation and unrealised P&L above are "
+                f"Webull's conversion of these into {currency or 'the base currency'}, "
+                "not money held separately in it.**")
+            st.dataframe(pd.DataFrame([{
+                "Currency": c["currency"],
+                "Buying power": f"{c['buying_power']:,.2f}",
+                "Cash": f"{c['cash_balance']:,.2f}",
+                "Market value": f"{c['market_value']:,.2f}",
+            } for c in ccy_lines]), width="stretch", hide_index=True)
 
         # ------------------------------------------------------------------
         # Value over time
