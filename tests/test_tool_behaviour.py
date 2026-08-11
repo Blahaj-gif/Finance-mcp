@@ -429,16 +429,36 @@ def test_indicator_readings_stay_descriptive_without_the_verdict(monkeypatch):
 # reader tell a live number from a merely acceptable one.
 
 def _tool_bodies():
-    """(name, source) for every registered tool, split on the decorator."""
+    """
+    (name, source) for every registered tool, split on the decorator.
+
+    Tolerates further decorators between @mcp.tool() and the def -- when
+    @webull_backed was added this silently stopped seeing eight tools, and a
+    coverage test that quietly covers less is worse than no test.
+    """
     import re
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "finance_mcp.py"), encoding="utf-8").read()
     out = []
     for chunk in re.split(r"\n@mcp\.tool\(\)\n", src)[1:]:
-        m = re.match(r"def (\w+)", chunk)
+        m = re.match(r"(?:@\w+\n)*def (\w+)", chunk)
         if m:
             out.append((m.group(1), chunk.split("\n@mcp.tool()")[0]))
     return out
+
+
+def test_the_tool_body_scanner_sees_every_tool():
+    """
+    Every source-scanning test above is only as good as this helper. It parsed
+    on an exact decorator pair, so one extra decorator dropped eight tools out
+    of coverage without failing anything.
+    """
+    import re
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "finance_mcp.py"), encoding="utf-8").read()
+    declared = re.findall(r"\n@mcp\.tool\(\)\n(?:@\w+\n)*def (\w+)", src)
+    assert sorted(name for name, _ in _tool_bodies()) == sorted(declared)
+    assert len(declared) == 39
 
 
 def test_every_tool_that_reads_prices_stamps_when_they_are_as_of():

@@ -569,9 +569,19 @@ class IbkrBroker:
             messages = first.get("message")
             if isinstance(messages, str):
                 messages = [messages]
+            reply_id = str(first.get("id", ""))
+            if not reply_id:
+                # A question with no reply id cannot be answered, so raising
+                # ConfirmationRequired would hand the caller a dead end. Say
+                # that instead: an order in an unknown state is the thing a
+                # person most needs told.
+                raise IbkrError(
+                    "IBKR returned a message but no reply id, so this order "
+                    "can be neither confirmed nor assumed placed. Check the "
+                    f"order book before retrying. Response: {payload!r}")
             raise ConfirmationRequired(
                 broker=self.name,
-                reply_id=str(first.get("id", "")),
+                reply_id=reply_id,
                 questions=[str(m) for m in (messages or [])],
                 client_order_id=client_order_id,
                 raw=payload)

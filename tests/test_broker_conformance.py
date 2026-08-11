@@ -503,6 +503,25 @@ def test_ibkr_can_decline_a_confirmation():
     assert captured == {"confirmed": False}
 
 
+def test_ibkr_refuses_a_question_it_could_never_answer():
+    """
+    A message with no reply id cannot be confirmed, so raising
+    ConfirmationRequired would hand the caller a dead end and leave an order in
+    an unknown state without saying so.
+    """
+    from dashboard.brokers.ibkr import IbkrError
+
+    def unanswerable(method, url, body, headers):
+        if url.endswith(f"/iserver/account/{IBKR_ACCOUNT}/orders") and method == "POST":
+            return [{"message": ["Something happened"]}]
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(unanswerable)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_u")
+    with pytest.raises(IbkrError, match="neither confirmed nor assumed placed"):
+        b.place_order(order)
+
+
 def test_ibkr_never_reports_a_placement_it_cannot_evidence():
     """
     Neither an order id nor a question means the outcome is unknown, and an
@@ -836,6 +855,97 @@ def test_a_broken_adapter_is_reported_not_swallowed(monkeypatch):
     monkeypatch.setattr(srv.brokers, "get", boom)
     out = srv.get_data_sources()
     assert "failed to load" in out and "no credentials" in out
+
+
+def test_every_webull_only_tool_says_so_instead_of_blaming_missing_credentials(monkeypatch):
+    """
+    Adding an adapter to the registry is not the same as routing the execution
+    tools through it. Before this guard, configuring FINANCE_BROKER=ibkr and
+    calling get_open_positions failed with "Webull App Key and App Secret are
+    not configured in .env" -- a true sentence about the wrong problem, which
+    sends a model looking for credentials the user deliberately does not have.
+    """
+    import inspect
+
+    import finance_mcp as srv
+    monkeypatch.setenv("FINANCE_BROKER", "ibkr")
+
+    for name in srv.WEBULL_ONLY_TOOLS:
+        fn = getattr(srv, name)
+        required = [p for p in inspect.signature(fn).parameters.values()
+                    if p.default is inspect.Parameter.empty]
+        args = [1.0 if p.annotation is float else "AAPL" for p in required]
+        with pytest.raises(Exception) as raised:
+            fn(*args)
+        message = str(raised.value)
+        assert "ibkr" in message, f"{name} did not name the configured broker"
+        assert "Webull App Key" not in message, (
+            f"{name} still blames missing Webull credentials")
+        assert "broker-agnostic" in message, (
+            f"{name} does not say which tools still work")
+
+
+def test_no_webull_backed_tool_escapes_the_list():
+    """
+    The guard is only as good as the list. A ninth tool reaching for
+    TradeClient without being declared would fail the old confusing way again,
+    so the list is checked against the source rather than trusted.
+    """
+    import inspect
+    import re
+
+    import finance_mcp as srv
+
+    source = open(srv.__file__, encoding="utf-8").read()
+    declared = set(re.findall(r"@mcp\.tool\(\)\s*\n(?:@webull_backed\s*\n)?def (\w+)",
+                              source))
+    touches_broker = set()
+    for name in declared:
+        fn = getattr(srv, name, None)
+        if fn is None:
+            continue
+        body = inspect.getsource(inspect.unwrap(fn))
+        if any(marker in body for marker in
+               ("TradeClient", "account_v2", "order_v3", "broker.get_")):
+            touches_broker.add(name)
+
+    assert touches_broker == set(srv.WEBULL_ONLY_TOOLS), (
+        "WEBULL_ONLY_TOOLS is out of step with the code. Undeclared: "
+        f"{sorted(touches_broker - set(srv.WEBULL_ONLY_TOOLS))}; "
+        f"declared but broker-free: {sorted(set(srv.WEBULL_ONLY_TOOLS) - touches_broker)}")
+
+
+def test_the_guard_stays_out_of_the_way_for_webull(monkeypatch):
+    """It is a routing check, not a second set of credentials to satisfy."""
+    import finance_mcp as srv
+    monkeypatch.setenv("FINANCE_BROKER", "webull")
+
+    called = {}
+
+    @srv.webull_backed
+    def sample():
+        called["yes"] = True
+        return "ok"
+
+    assert sample() == "ok" and called
+
+
+def test_the_broker_agnostic_tools_outnumber_the_webull_only_ones():
+    """
+    The claim the README makes. If a change inverts it the README is wrong,
+    and a reader deciding whether this is usable with their broker is misled.
+    """
+    import re
+
+    import finance_mcp as srv
+    source = open(srv.__file__, encoding="utf-8").read()
+    total = len(re.findall(r"@mcp\.tool\(\)\s*\n(?:@webull_backed\s*\n)?def \w+", source))
+    assert total == 39, f"tool count changed to {total}; the README says 39"
+    assert len(srv.WEBULL_ONLY_TOOLS) == 8
+    readme = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "README.md"), encoding="utf-8").read()
+    assert "31 of the 39" in readme, (
+        "README no longer states how many tools work with any broker")
 
 
 def test_the_help_wanted_document_matches_the_code():

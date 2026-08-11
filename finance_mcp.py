@@ -1,5 +1,6 @@
 import os
 import sys
+import functools
 import pandas as pd
 import json
 import math
@@ -40,6 +41,47 @@ HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over fiv
 # Initialize FastMCP Server
 mcp = FastMCP("Finance MCP")
 
+
+#: Tools that talk to Webull's SDK directly rather than through
+#: dashboard/broker_protocol.py. Everything else here is broker-agnostic: it
+#: reads prices, filings and macro data, and works the same whoever you clear
+#: through. See webull_backed() below for why the distinction is announced
+#: rather than left to fail as a missing-credentials error.
+WEBULL_ONLY_TOOLS = ("get_account_info", "get_open_positions", "get_open_orders",
+                     "draft_order", "preview_order", "cancel_order",
+                     "calculate_position_size", "get_portfolio_risk")
+
+
+def webull_backed(fn):
+    """
+    Mark a tool as still wired to Webull's SDK rather than the broker protocol.
+
+    Configuring FINANCE_BROKER=ibkr and calling one of these used to fail with
+    "Webull App Key and App Secret are not configured in .env", which is a true
+    sentence about the wrong problem: the user configured a broker, and the
+    tool does not know how to use it. A model reading that error will go and
+    look for Webull credentials the user deliberately does not have.
+
+    So it says what is actually the case. Adding an adapter to the registry is
+    not the same as routing the execution tools through it, and pretending
+    otherwise is how an unverified adapter ends up trusted.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        active = brokers.active_name()
+        if active != "webull":
+            raise ToolError(
+                f"`{fn.__name__}` is not available with FINANCE_BROKER={active!r}. "
+                f"It talks to Webull's SDK directly and has not been routed "
+                f"through the broker protocol yet, so it cannot use a "
+                f"{active} account. The other tools here — prices, indicators, "
+                f"filings, options, macro — are broker-agnostic and work "
+                f"normally. To use this one, set FINANCE_BROKER=webull with "
+                f"Webull credentials configured.")
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 @mcp.tool()
 def check_connection() -> str:
     """Tests connection to Webull API and Yahoo Finance fallback."""
@@ -56,6 +98,7 @@ def check_connection() -> str:
         return f"Connection test FAILED: {e}"
 
 @mcp.tool()
+@webull_backed
 def get_account_info() -> str:
     """Fetches account list / information from Webull TH (requires authenticated token)."""
     from webull.core.client import ApiClient
@@ -816,6 +859,7 @@ def get_journal_summary() -> str:
         raise ToolError(f"Error reading journal summary: {e}") from e
 
 @mcp.tool()
+@webull_backed
 def get_open_positions() -> str:
     """
     Pulls open Webull account positions and holdings summary.
@@ -1250,6 +1294,7 @@ def get_short_interest(symbol: str) -> str:
 # =====================================================================
 
 @mcp.tool()
+@webull_backed
 def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LMT", limit_price: float = None) -> str:
     """
     Drafts an order for human review and approval in the Streamlit Dashboard.
@@ -1384,6 +1429,7 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
 
 
 @mcp.tool()
+@webull_backed
 def preview_order(symbol: str, action: str, quantity: float, order_type: str = "LMT",
                   limit_price: float = None) -> str:
     """
@@ -1438,6 +1484,7 @@ def preview_order(symbol: str, action: str, quantity: float, order_type: str = "
         raise ToolError(f"Webull refused to preview this order: {e}") from e
 
 @mcp.tool()
+@webull_backed
 def get_open_orders() -> str:
     """
     Fetches all active/pending/working orders on the Webull account.
@@ -1463,6 +1510,7 @@ def get_open_orders() -> str:
         raise ToolError(f"Error fetching open orders: {e}") from e
 
 @mcp.tool()
+@webull_backed
 def cancel_order(order_id: str) -> str:
     """
     Cancels a pending or active order on the Webull account immediately.
@@ -1777,6 +1825,7 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
 # =====================================================================
 
 @mcp.tool()
+@webull_backed
 def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: float = 1.0,
                             entry_price: float = None, account_currency: str = "USD") -> str:
     """
@@ -1954,6 +2003,7 @@ def get_volume_profile(symbol: str, interval: str = "D", lookback: int = 100,
 
 
 @mcp.tool()
+@webull_backed
 def get_portfolio_risk() -> str:
     """
     Analyses the live account: position-level P&L, concentration, and portfolio

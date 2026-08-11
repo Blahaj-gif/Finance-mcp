@@ -70,11 +70,30 @@ rather than guess on the paths the docs did not pin down.
 runs the same suite against every adapter. `FINANCE_BROKER=ibkr` selects which
 adapter the protocol and the MCP tools report through.
 
-**The dashboard's submit button is still Webull-only.** Routing the live-money
-path through the registry means putting two unverified adapters on the one code
-path that has been exercised for real, and that trade is not worth making until
-somebody has run them. Until then, `FINANCE_BROKER` picks the adapter; it does
-not move where orders go.
+### What works with a non-Webull broker today
+
+**31 of the 39 tools are broker-agnostic** — prices, indicators, options, SEC
+filings, insider and institutional data, earnings, macro. They read public
+sources and work the same whoever you clear through. With no Webull credentials
+the price feed falls back to Yahoo and says so on every response.
+
+**8 are not**, and they are the account and order tools:
+
+| Tool | |
+|---|---|
+| `get_account_info` `get_open_positions` `get_open_orders` | read your account |
+| `draft_order` `preview_order` `cancel_order` | reach the order book |
+| `calculate_position_size` `get_portfolio_risk` | size against your real balance |
+
+These still call Webull's SDK directly rather than going through
+`broker_protocol.py`. Called with `FINANCE_BROKER=ibkr` they refuse and say why,
+rather than failing with a missing-Webull-key error about a broker you did not
+configure. **The dashboard's submit button is Webull-only for the same reason.**
+
+Routing them through the registry is the obvious next step and deliberately not
+taken yet: it would put two adapters that nobody has run on the one code path
+that has been exercised for real. Verification comes first — which is what
+[HELP-WANTED.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md) is asking for.
 
 IBKR is the Client Portal **Web** API — plain request/response JSON — not the TWS
 socket API. That distinction is why it is an adapter and not a rewrite. It also

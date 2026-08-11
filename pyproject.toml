@@ -19,7 +19,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-dashboard = ["streamlit", "plotly"]
+# The floor is the release that introduced `width=`. The dashboard used
+# `use_container_width=`, which Streamlit documented for removal after
+# 2025-12-31 -- a date already past -- against an unpinned dependency, so a
+# fresh install was one Streamlit release away from a dashboard that would not
+# render.
+dashboard = ["streamlit>=1.49", "plotly"]
 
 # Console commands, so an installed copy is launchable without knowing where
 # pip put it. `finance-mcp` is what an MCP client runs.

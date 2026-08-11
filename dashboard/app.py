@@ -298,7 +298,7 @@ with col_head:
     """)
 
 with col_set:
-    with st.popover("DISPLAY", use_container_width=True):
+    with st.popover("DISPLAY", width="stretch"):
         render_html('<div class="fm-set-head">Display settings</div>')
 
         st.radio(
@@ -759,7 +759,7 @@ with tab_charts:
     fig.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], linecolor=PALETTE["axis"],
                      zeroline=False, fixedrange=False)
 
-    st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+    st.plotly_chart(fig, width="stretch", config=CHART_CONFIG)
     st.caption("Drag to pan · scroll to zoom · double-click to reset · "
                "drag an axis to scale that axis alone")
 
@@ -835,7 +835,7 @@ with tab_backtest:
         fig_bt.update_xaxes(showgrid=True, gridcolor=PALETTE["grid"], zeroline=False)
         fig_bt.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"], zeroline=False)
         
-        st.plotly_chart(fig_bt, use_container_width=True)
+        st.plotly_chart(fig_bt, width="stretch")
 
 # Tab 3: Local Trading Journal
 with tab_journal:
@@ -1058,7 +1058,7 @@ with tab_execution:
 
                 # --- Step 1: price the order with the broker (non-binding) ---
                 with col_prev:
-                    if st.button("1 — Preview with Webull", key=f"btn_{preview_key}", use_container_width=True):
+                    if st.button("1 — Preview with Webull", key=f"btn_{preview_key}", width="stretch"):
                         with st.spinner("Asking Webull to price this order..."):
                             try:
                                 from webull.trade.trade_client import TradeClient
@@ -1137,19 +1137,19 @@ with tab_execution:
                 with col_exec:
                     if needs_consent:
                         st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
-                                  use_container_width=True, disabled=True,
+                                  width="stretch", disabled=True,
                                   help="Acknowledge the live account above first.")
                     elif not preview:
                         st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
-                                  use_container_width=True, disabled=True,
+                                  width="stretch", disabled=True,
                                   help="Preview the order first — we never submit an order the broker has not validated.")
                     elif preview.get("violations"):
                         st.button("2 — Approve and submit", key=f"exec_{draft['draft_id']}",
-                                  use_container_width=True, disabled=True,
+                                  width="stretch", disabled=True,
                                   help="This order breaks a broker rule that preview does not "
                                        "check. Fix the draft rather than submitting it to be refused.")
                     elif st.button(f"2 — APPROVE AND SUBMIT {draft['action']} {draft['quantity']} {draft['symbol']}",
-                                   key=f"exec_{draft['draft_id']}", use_container_width=True):
+                                   key=f"exec_{draft['draft_id']}", width="stretch"):
                         with st.spinner("Submitting order to Webull..."):
                             try:
                                 from webull.trade.trade_client import TradeClient
@@ -1356,7 +1356,7 @@ with tab_portfolio:
             fig_pnl.update_yaxes(showgrid=True, gridcolor=PALETTE["grid"],
                                  linecolor=PALETTE["axis"], zeroline=False,
                                  title_text=f"Position marks ({pos_ccy or 'mixed'})")
-            st.plotly_chart(fig_pnl, use_container_width=True, config=CHART_CONFIG)
+            st.plotly_chart(fig_pnl, width="stretch", config=CHART_CONFIG)
 
             caveats = []
             if recon:
@@ -1422,7 +1422,7 @@ with tab_portfolio:
                                title_text=f"Unrealised P&L ({pos_ccy or 'position currency'})")
             fig_c.update_yaxes(showgrid=False, linecolor=PALETTE["axis"],
                                autorange="reversed")
-            st.plotly_chart(fig_c, use_container_width=True, config=CHART_CONFIG)
+            st.plotly_chart(fig_c, width="stretch", config=CHART_CONFIG)
 
         st.markdown("#### Open Positions")
         if not positions:
@@ -1454,7 +1454,7 @@ with tab_portfolio:
             # / -3.1573 in the same table, so nothing lined up and the percent
             # column read as a price.
             st.dataframe(
-                pd.DataFrame(prows), use_container_width=True, hide_index=True,
+                pd.DataFrame(prows), width="stretch", hide_index=True,
                 column_config={
                     "Quantity": st.column_config.NumberColumn(format="%.4f"),
                     "Cost":     st.column_config.NumberColumn(f"Cost{money}", format="%.2f"),
@@ -1525,7 +1525,7 @@ with tab_events:
                 "Time (ET)": ev.get("time_et", ""),
                 "Reading": econ_calendar.describe_reading(ev) or "—",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
                      column_config={"Date": st.column_config.TextColumn(width="small"),
                                     "When": st.column_config.TextColumn(width="small"),
                                     "Source": st.column_config.TextColumn(width="small")})
@@ -1578,7 +1578,7 @@ with tab_events:
                 "Range": (f"{r['estimate']['low']:,.2f} – {r['estimate']['high']:,.2f}"
                           if r["estimate"].get("low") is not None
                           and r["estimate"].get("high") is not None else "—"),
-            } for r in er_rows]), use_container_width=True, hide_index=True,
+            } for r in er_rows]), width="stretch", hide_index=True,
                 column_config={"Symbol": st.column_config.TextColumn(width="small"),
                                "When": st.column_config.TextColumn(width="small")})
 
@@ -1623,7 +1623,7 @@ with tab_events:
                     "Surprise": "—" if h["surprise_pct"] is None else f"{h['surprise_pct']:+.2f}%",
                     "8-K accepted (UTC)": (h["filing"] or {}).get("accepted", "not matched"),
                     "Filing": (h["filing"] or {}).get("url", ""),
-                } for h in history]), use_container_width=True, hide_index=True,
+                } for h in history]), width="stretch", hide_index=True,
                     column_config={"Filing": st.column_config.LinkColumn(
                         "Filing", display_text="open")})
                 st.caption(
@@ -1646,7 +1646,7 @@ with tab_events:
                     "QoQ": "—" if r["qoq_pct"] is None else f"{r['qoq_pct']:+.1f}%",
                     "YoY": "—" if r["yoy_pct"] is None else f"{r['yoy_pct']:+.1f}%",
                     "Filed on": r["form"],
-                } for r in block["rows"]]), use_container_width=True, hide_index=True)
+                } for r in block["rows"]]), width="stretch", hide_index=True)
                 caption = (f"**{block['label']}, in USD** — the filed figure from "
                            f"{block['source']}, not an estimate. No free source publishes "
                            "consensus for this, so there is no surprise column: the "
@@ -1804,7 +1804,7 @@ with tab_events:
                 if new_filings:
                     new_filings.sort(key=lambda r: r["Accepted"], reverse=True)
                     st.dataframe(
-                        pd.DataFrame(new_filings), use_container_width=True, hide_index=True,
+                        pd.DataFrame(new_filings), width="stretch", hide_index=True,
                         column_config={
                             "Link": st.column_config.LinkColumn("Filing", display_text="open"),
                             "Symbol": st.column_config.TextColumn(width="small"),
@@ -1816,7 +1816,7 @@ with tab_events:
                 if move_rows:
                     move_rows.sort(key=lambda r: abs(r["Move %"]), reverse=True)
                     st.dataframe(
-                        pd.DataFrame(move_rows), use_container_width=True, hide_index=True,
+                        pd.DataFrame(move_rows), width="stretch", hide_index=True,
                         column_config={
                             "From": st.column_config.NumberColumn(format="%.2f"),
                             "To": st.column_config.NumberColumn(format="%.2f"),
@@ -1886,7 +1886,7 @@ with tab_alerts:
                  "no alert can fire until it parses.")
 
     if all_alerts:
-        st.dataframe(pd.DataFrame(all_alerts), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(all_alerts), width="stretch", hide_index=True)
         active = sum(1 for a in all_alerts if str(a.get("status", "")).upper() == "ACTIVE")
         st.caption(f"{active} active of {len(all_alerts)} total. A triggered alert re-arms "
                    f"after {alert_manager.ALERT_COOLDOWN_SECONDS // 60} minutes.")
@@ -1911,7 +1911,7 @@ with tab_data:
                                f"since {when}.")
                 with cdr:
                     if st.button("Revoke", key="revoke_live_consent",
-                                 use_container_width=True):
+                                 width="stretch"):
                         live_consent.revoke(_acct_d)
                         st.rerun()
             else:
@@ -1919,4 +1919,4 @@ with tab_data:
                            f"`{_acct_d}` — the first order will ask.")
 
     st.markdown("### Raw Historical and Calculated Indicator Columns")
-    st.dataframe(res.sort_values("time", ascending=False), use_container_width=True)
+    st.dataframe(res.sort_values("time", ascending=False), width="stretch")
