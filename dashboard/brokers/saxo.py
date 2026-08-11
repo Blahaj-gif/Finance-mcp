@@ -332,6 +332,16 @@ class SaxoBroker:
             "raw": payload,
         }
 
+    def confirm_order(self, reply_id: str, confirmed: bool = True) -> dict:
+        """
+        Saxo validates through precheck before placement rather than asking
+        afterwards, so there is nothing to answer. Documented; never exercised.
+        """
+        raise NotImplementedError(
+            "Saxo validates through /trade/v2/orders/precheck before placement "
+            "rather than asking a question after it. Nothing here needs "
+            "answering.")
+
     def cancel_order(self, client_order_id: str) -> dict:
         """
         Saxo's cancel takes ITS OrderId in the path, not our external reference.

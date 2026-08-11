@@ -2,9 +2,9 @@
 Broker adapters behind one interface (see dashboard/broker_protocol.py).
 
 `webull` is the reference implementation and the only one exercised against a
-live account -- placed, rested and cancelled a real order. `saxo` is built from
-Saxo's published REST and OAuth2 documentation and has never been run against
-their API; it says so in every piece of output it produces.
+live account -- placed, rested and cancelled a real order. `saxo` and `ibkr` are
+built from their published REST documentation and have never been run against
+either API; both say so in every piece of output they produce.
 """
 import os
 
@@ -48,8 +48,13 @@ def _register_builtins():
         from dashboard.brokers.saxo import SaxoBroker
         return SaxoBroker()
 
+    def ibkr_factory():
+        from dashboard.brokers.ibkr import IbkrBroker
+        return IbkrBroker()
+
     register("webull", webull_factory)
     register("saxo", saxo_factory)
+    register("ibkr", ibkr_factory)
 
 
 _register_builtins()

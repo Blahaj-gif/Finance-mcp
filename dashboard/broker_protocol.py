@@ -19,10 +19,20 @@ Three rules the protocol enforces on every implementation:
     USD buying-power line, and summing them is a category error. Buying power is
     always asked for by currency and never returned as a single number.
 
-  * **Cancel takes the id we generated.** Both brokers key cancellation on the
-    client order id rather than their own, and both 404 on the other one. The
-    protocol names the argument `client_order_id` so a caller cannot pass the
-    wrong id and discover it during an emergency.
+  * **Cancel takes the id we generated.** Webull keys cancellation on the client
+    order id and 404s on its own. Saxo and IBKR key it on theirs. The protocol
+    names the argument `client_order_id` regardless and makes the adapter do
+    whatever lookup its broker needs -- IBKR's live-orders response carries
+    `order_ref`, so it can; Saxo documents no mapping, so it refuses. A caller
+    holding the id it generated must never have to know which of those it got.
+
+  * **A broker may ask before it accepts.** IBKR can answer a placement with
+    warnings instead of an order -- no market data, likely to fill immediately,
+    price outside a percentage constraint -- each carrying a reply id that has
+    to be confirmed before anything is transmitted. Client libraries normally
+    answer these from a table of canned replies. Here they raise
+    `ConfirmationRequired` and go to the person who approved the order, because
+    a warning addressed to a human that a program answers is not a warning.
 
 Normalised shapes returned to callers, so the dashboard and the MCP tools do not
 branch on which broker is configured:
@@ -32,6 +42,28 @@ branch on which broker is configured:
     Position  {"symbol": str, "quantity": float, "currency": str, ...}
 """
 from typing import Protocol, runtime_checkable
+
+
+class ConfirmationRequired(Exception):
+    """
+    The broker will not accept this order until someone answers it.
+
+    Nothing has been transmitted when this is raised. `questions` holds the
+    broker's own words, to be shown unedited -- paraphrasing a risk warning is
+    how it stops being one -- and `reply_id` is what `confirm_order` needs
+    once a person has answered.
+    """
+
+    def __init__(self, broker: str, reply_id: str, questions,
+                 client_order_id: str = "", raw=None):
+        self.broker = broker
+        self.reply_id = reply_id
+        self.questions = list(questions or [])
+        self.client_order_id = client_order_id
+        self.raw = raw
+        joined = " | ".join(self.questions) or "(no message text returned)"
+        super().__init__(
+            f"{broker} will not place this order until it is confirmed: {joined}")
 
 
 @runtime_checkable
@@ -103,7 +135,22 @@ class Broker(Protocol):
         ...
 
     def place_order(self, order: dict) -> dict:
-        """Submit for execution. Callers must preview first. Returns a Placement."""
+        """
+        Submit for execution. Callers must preview first. Returns a Placement.
+
+        Raises `ConfirmationRequired` if the broker answers with questions
+        rather than an order id. Nothing has been sent when it does.
+        """
+        ...
+
+    def confirm_order(self, reply_id: str, confirmed: bool = True) -> dict:
+        """
+        Answer a `ConfirmationRequired` raised by `place_order`.
+
+        Brokers that never ask raise NotImplementedError rather than returning
+        a success that did not happen. Callers still route through here, so the
+        broker that does ask is not a special case at the call site.
+        """
         ...
 
     def cancel_order(self, client_order_id: str) -> dict:

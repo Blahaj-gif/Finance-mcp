@@ -60,14 +60,33 @@ free API keys.
 | Broker | Status |
 |---|---|
 | **Webull** | Verified end to end — a real order drafted, previewed, placed, watched resting and cancelled. |
-| **Saxo Bank** | **Unverified.** Built from Saxo's published OpenAPI reference and never run against their API. It says so in every tool output that uses it, and refuses rather than guesses on the paths the docs did not pin down. |
+| **Saxo Bank** | **Unverified.** Built from Saxo's published OpenAPI reference and never run against their API. |
+| **Interactive Brokers** | **Unverified.** Built from the Client Portal Web API reference and never run against it. Needs the local Client Portal Gateway. |
+
+Both unverified adapters say so in every tool output that uses them, and refuse
+rather than guess on the paths the docs did not pin down.
 
 `dashboard/broker_protocol.py` is the interface; `tests/test_broker_conformance.py`
-runs the same suite against every adapter. Select one with `FINANCE_BROKER=saxo`.
+runs the same suite against every adapter. `FINANCE_BROKER=ibkr` selects which
+adapter the protocol and the MCP tools report through.
 
-**[Help wanted →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)** — an hour with a Saxo simulation token would
-close the verification gap. The script that does it reads only; it never places
-an order.
+**The dashboard's submit button is still Webull-only.** Routing the live-money
+path through the registry means putting two unverified adapters on the one code
+path that has been exercised for real, and that trade is not worth making until
+somebody has run them. Until then, `FINANCE_BROKER` picks the adapter; it does
+not move where orders go.
+
+IBKR is the Client Portal **Web** API — plain request/response JSON — not the TWS
+socket API. That distinction is why it is an adapter and not a rewrite. It also
+brought the one broker behaviour the protocol did not already have: IBKR can
+answer a placement with warnings instead of an order, each needing confirmation
+before anything is transmitted. Client libraries normally answer those from a
+table of canned replies. This one raises them to the person who approved the
+order, which is the whole point of the tool.
+
+**[Help wanted →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)** — an hour with a Saxo simulation token or an
+IBKR paper account would close the verification gap. The scripts that do it read
+only; they never place an order.
 
 ---
 
@@ -143,21 +162,23 @@ Use `get_data_sources` at any time to see every source's configuration and remai
 
 ## Help wanted
 
-Two things where an hour from someone else is worth more than a day from me:
+Three things where an hour from someone else is worth more than a day from me:
 
-- **Verify the Saxo adapter.** It is written from Saxo's published reference and
-  has never been run against their API. A 24-hour simulation token is free and
-  needs no approval, and `tests/verify_saxo.py` answers the six open questions
-  without placing an order. → **[HELP-WANTED.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)**
+- **Verify the Saxo adapter.** Written from Saxo's published reference, never run
+  against their API. A 24-hour simulation token is free and needs no approval,
+  and `tests/verify_saxo.py` answers the six open questions without placing an
+  order.
+- **Verify the IBKR adapter.** Same situation, and a **paper account** is enough.
+  Run the Client Portal Gateway, log in through a browser, then
+  `python -m tests.verify_ibkr`. It submits nothing — it reads, and it calls
+  IBKR's own non-binding `whatif`. → **[HELP-WANTED.md](https://github.com/Blahaj-gif/Finance-mcp/blob/master/HELP-WANTED.md)**
 - **Install it on a clean machine.** `install.bat` and `install.sh` are covered
   by unit tests and inspection, never by a fresh OS — the first thing every new
   user touches is the least proven path here.
 
-Also open: **IG Markets** (REST, similar shape to Saxo) and **Interactive
-Brokers** (a persistent socket with async callbacks, so it is an architecture
-change rather than another adapter). `dashboard/broker_protocol.py` is the
-interface; `tests/test_broker_conformance.py` runs against anything that
-implements it.
+Also open: **IG Markets** (REST, similar shape to Saxo).
+`dashboard/broker_protocol.py` is the interface;
+`tests/test_broker_conformance.py` runs against anything that implements it.
 
 ---
 

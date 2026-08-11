@@ -6,9 +6,10 @@ it is that the guarantees the execution path depends on hold for both. Those
 guarantees were all learned the expensive way from Webull, and each test below
 names the incident that produced it.
 
-Saxo is driven through an injected session returning documented response shapes.
-That proves the adapter is wired to the API it was written against; it proves
-nothing about what Saxo actually returns. See HELP-WANTED.md.
+Saxo and IBKR are driven through an injected session returning documented
+response shapes. That proves each adapter is wired to the API it was written
+against; it proves nothing about what either API actually returns. See
+HELP-WANTED.md.
 """
 import os
 import sys
@@ -100,7 +101,75 @@ def make_webull():
     return Stub()
 
 
-ADAPTERS = {"webull": make_webull, "saxo": make_saxo}
+IBKR_ACCOUNT = "U1234567"
+
+
+def ibkr_session(method, url, body, headers):
+    """
+    Documented IBKR Client Portal Web API shapes. Not a recording -- IBKR has
+    never been called. Money comes back as display strings on purpose: that is
+    what the whatif endpoint documents, and it is the part most likely to be
+    parsed into a wrong number.
+    """
+    path = url.split("/v1/api", 1)[-1].split("?")[0]
+
+    if path == "/iserver/auth/status":
+        return {"authenticated": True, "connected": True, "competing": False}
+    if path == "/iserver/accounts":
+        return {"accounts": [IBKR_ACCOUNT], "selectedAccount": IBKR_ACCOUNT}
+    if path == "/portfolio/accounts":
+        return [{"accountId": IBKR_ACCOUNT, "currency": "USD"}]
+    if path == f"/portfolio/{IBKR_ACCOUNT}/ledger":
+        return {"USD": {"currency": "USD", "cashbalance": 4000.0,
+                        "settledcash": 4000.0, "key": "LedgerList"},
+                "BASE": {"currency": "USD", "cashbalance": 4000.0,
+                         "key": "LedgerList"}}
+    if path == f"/portfolio/{IBKR_ACCOUNT}/summary":
+        return {"buyingpower": {"amount": 5000.0, "currency": "USD",
+                                "isNull": False, "severity": 0},
+                "availablefunds": {"amount": 1250.0, "currency": "USD",
+                                   "isNull": False},
+                "netliquidation": {"amount": 7500.0, "currency": "USD",
+                                   "isNull": False}}
+    if path.startswith(f"/portfolio/{IBKR_ACCOUNT}/positions/"):
+        if path.endswith("/0"):
+            return [{"acctId": IBKR_ACCOUNT, "conid": 265598, "ticker": "AAPL",
+                     "contractDesc": "AAPL", "position": 10.0, "avgCost": 300.0,
+                     "avgPrice": 300.0, "mktPrice": 313.06, "mktValue": 3130.6,
+                     "currency": "USD", "assetClass": "STK"}]
+        return []
+    if path == "/iserver/secdef/search":
+        return [{"conid": "265598", "symbol": "AAPL", "companyName": "APPLE INC",
+                 "companyHeader": "APPLE INC - NASDAQ", "description": "NASDAQ",
+                 "sections": [{"secType": "STK"}, {"secType": "OPT"}]}]
+    if path == f"/iserver/account/{IBKR_ACCOUNT}/orders/whatif":
+        return {"amount": {"amount": "3,130.60 USD", "commission": "1.00 USD",
+                           "total": "3,131.60 USD"},
+                "equity": {"current": "7,500.00 USD", "after": "7,499.00 USD"},
+                "initial": {"current": "0.00 USD", "after": "1,565.30 USD"},
+                "maintenance": {"current": "0.00 USD", "after": "1,565.30 USD"},
+                "warn": None, "error": None}
+    if path == f"/iserver/account/{IBKR_ACCOUNT}/orders" and method == "POST":
+        sent = (body or {}).get("orders", [{}])[0]
+        return [{"order_id": "IB1", "order_status": "PreSubmitted",
+                 "local_order_id": sent.get("cOID", "")}]
+    if path == "/iserver/account/orders":
+        return {"orders": [{"orderId": "IB1", "order_ref": "DRFT_live",
+                            "ticker": "AAPL", "status": "Submitted",
+                            "side": "BUY", "remainingQuantity": 1.0}],
+                "snapshot": True}
+    if path.startswith(f"/iserver/account/{IBKR_ACCOUNT}/order/") and method == "DELETE":
+        return {"order_id": path.rsplit("/", 1)[-1], "msg": "Request was submitted"}
+    return {}
+
+
+def make_ibkr(session=ibkr_session):
+    from dashboard.brokers.ibkr import IbkrBroker
+    return IbkrBroker(base_url="https://localhost:5000/v1/api",
+                      account_id=IBKR_ACCOUNT, session=session)
+
+
+ADAPTERS = {"webull": make_webull, "saxo": make_saxo, "ibkr": make_ibkr}
 
 
 @pytest.fixture(params=sorted(ADAPTERS))
@@ -133,15 +202,27 @@ def test_an_unverified_adapter_says_so_in_its_own_description(broker):
         assert "never been run" in text
 
 
-def test_the_registry_exposes_both(monkeypatch):
-    assert set(brokers.available()) >= {"webull", "saxo"}
+def test_the_registry_exposes_every_adapter(monkeypatch):
+    assert set(brokers.available()) >= {"webull", "saxo", "ibkr"}
     monkeypatch.setenv("FINANCE_BROKER", "saxo")
     assert brokers.active_name() == "saxo"
 
 
 def test_an_unknown_broker_is_refused_by_name():
     with pytest.raises(ValueError, match="Unknown broker"):
-        brokers.get("interactive-brokers")
+        brokers.get("etrade")
+
+
+def test_a_broker_that_never_asks_says_so_rather_than_faking_a_confirmation(broker):
+    """
+    IBKR can answer a placement with questions; Webull and Saxo cannot. A
+    no-op `confirm_order` on the two that never ask would report success for
+    something that did not happen, so they refuse instead.
+    """
+    if broker.name == "ibkr":
+        return
+    with pytest.raises(NotImplementedError):
+        broker.confirm_order("whatever")
 
 
 # =====================================================================
@@ -358,6 +439,376 @@ def test_the_saxo_adapter_is_not_marked_verified():
 
 
 # =====================================================================
+# IBKR specifics: the two things it does that neither other broker does
+# =====================================================================
+
+def test_ibkr_raises_its_confirmation_questions_instead_of_answering_them():
+    """
+    This is the whole reason the IBKR adapter is worth having in a
+    human-approval tool. IBKR replies to a placement with warnings -- no market
+    data, likely to fill immediately, price outside a percentage constraint --
+    and every client library answers them from a table of canned replies so
+    that placement looks like one call. A warning addressed to a person that a
+    program answers is not a warning.
+    """
+    def asks(method, url, body, headers):
+        if url.endswith(f"/iserver/account/{IBKR_ACCOUNT}/orders") and method == "POST":
+            return [{"id": "reply-abc123",
+                     "message": ["You are submitting an order without market "
+                                 "data. We strongly recommend against this."],
+                     "isSuppressed": False, "messageIds": ["o354"]}]
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(asks)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_q")
+    with pytest.raises(bp.ConfirmationRequired) as raised:
+        b.place_order(order)
+
+    e = raised.value
+    assert e.reply_id == "reply-abc123"
+    assert e.broker == "ibkr"
+    assert e.client_order_id == "DRFT_q"
+    # The broker's own words, unedited. Paraphrasing a risk warning is how it
+    # stops being one.
+    assert "without market data" in e.questions[0]
+    assert "without market data" in str(e)
+
+
+def test_ibkr_confirmation_goes_to_the_reply_endpoint_and_carries_the_human_answer():
+    seen = []
+
+    def recording(method, url, body, headers):
+        seen.append((method, url.split("/v1/api", 1)[-1], body))
+        if "/iserver/reply/" in url:
+            return [{"order_id": "IB9", "order_status": "PreSubmitted",
+                     "local_order_id": "DRFT_q"}]
+        return ibkr_session(method, url, body, headers)
+
+    placed = make_ibkr(recording).confirm_order("reply-abc123", confirmed=True)
+    assert placed["order_id"] == "IB9"
+    assert ("POST", "/iserver/reply/reply-abc123", {"confirmed": True}) in seen
+
+
+def test_ibkr_can_decline_a_confirmation():
+    """`confirmed=False` is a real answer, not an error path."""
+    captured = {}
+
+    def recording(method, url, body, headers):
+        if "/iserver/reply/" in url:
+            captured.update(body or {})
+            return [{"order_id": "IB9", "order_status": "Cancelled"}]
+        return ibkr_session(method, url, body, headers)
+
+    make_ibkr(recording).confirm_order("reply-abc123", confirmed=False)
+    assert captured == {"confirmed": False}
+
+
+def test_ibkr_never_reports_a_placement_it_cannot_evidence():
+    """
+    Neither an order id nor a question means the outcome is unknown, and an
+    unknown outcome reported as success is how a duplicate order gets sent.
+    """
+    from dashboard.brokers.ibkr import IbkrError
+
+    def vague(method, url, body, headers):
+        if url.endswith(f"/iserver/account/{IBKR_ACCOUNT}/orders") and method == "POST":
+            return [{"order_status": "PreSubmitted"}]
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(vague)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_v")
+    with pytest.raises(IbkrError, match="unknown"):
+        b.place_order(order)
+
+
+def test_ibkr_cancels_by_our_id_through_the_lookup_saxo_lacks():
+    """
+    IBKR keys cancellation on its own orderId, like Saxo. Unlike Saxo it
+    documents order_ref on the live-orders response, so the mapping the
+    protocol requires exists and the adapter performs it.
+    """
+    seen = []
+
+    def recording(method, url, body, headers):
+        seen.append((method, url.split("/v1/api", 1)[-1]))
+        return ibkr_session(method, url, body, headers)
+
+    result = make_ibkr(recording).cancel_order("DRFT_live")
+    assert result["order_id"] == "IB1"
+    assert result["client_order_id"] == "DRFT_live"
+    assert ("GET", "/iserver/account/orders") in seen
+    assert ("DELETE", f"/iserver/account/{IBKR_ACCOUNT}/order/IB1") in seen
+
+
+def test_ibkr_refuses_to_cancel_an_id_it_cannot_find():
+    from dashboard.brokers.ibkr import IbkrError
+    with pytest.raises(IbkrError, match="Nothing was cancelled"):
+        make_ibkr().cancel_order("DRFT_never_placed")
+
+
+def test_ibkr_flags_a_missing_order_ref_rather_than_cancelling_something_plausible():
+    from dashboard.brokers.ibkr import IbkrNotVerified
+
+    def no_ref(method, url, body, headers):
+        if url.endswith("/iserver/account/orders"):
+            return {"orders": [{"orderId": "IB1", "ticker": "AAPL"}]}
+        return ibkr_session(method, url, body, headers)
+
+    with pytest.raises(IbkrNotVerified, match="VERIFIER"):
+        make_ibkr(no_ref).cancel_order("DRFT_live")
+
+
+def test_ibkr_will_not_send_the_cancel_everything_sentinel():
+    """IBKR documents -1 as "cancel every open order". Not reachable by accident."""
+    with pytest.raises(ValueError, match="every open order"):
+        make_ibkr().cancel_order_by_order_id("-1")
+
+
+def test_ibkr_refuses_a_currency_it_pools_margin_away_from():
+    """
+    IBKR reports cash per currency and buying power in the base currency only.
+    Reporting one under the other's name would be wrong in a safe direction,
+    and a guard that is wrong in a safe direction is a guard nobody trusts.
+    """
+    from dashboard.brokers.ibkr import IbkrError
+    with pytest.raises(IbkrError, match="computes buying power in USD"):
+        make_ibkr().buying_power("EUR")
+
+
+def test_ibkr_names_the_currency_to_ask_for_instead_of_just_refusing():
+    from dashboard.brokers.ibkr import IbkrError
+
+    def eur_base(method, url, body, headers):
+        if url.endswith("/ledger"):
+            return {"EUR": {"currency": "EUR", "cashbalance": 10.0},
+                    "BASE": {"currency": "EUR", "cashbalance": 10.0}}
+        return ibkr_session(method, url, body, headers)
+
+    with pytest.raises(IbkrError, match="Ask for EUR"):
+        make_ibkr(eur_base).buying_power("USD")
+
+
+def test_ibkr_reads_money_out_of_the_display_strings_whatif_returns():
+    """
+    IBKR prices orders in strings meant for a screen -- "3,130.60 USD" -- and
+    the comma is one bad parse away from a hundredfold error in the number a
+    person approves.
+    """
+    quote = make_ibkr().preview_order(
+        make_ibkr().build_order("AAPL", "BUY", 10, "LMT", 313.06,
+                                client_order_id="DRFT_m"))
+    assert quote["cost"] == pytest.approx(3130.6)
+    assert quote["fee"] == pytest.approx(1.0)
+    assert quote["currency"] == "USD"
+    assert quote["initial_margin"] == pytest.approx(1565.3)
+
+
+def test_ibkr_takes_the_expensive_end_of_a_commission_range():
+    """
+    IBKR sometimes prices commission as a range. The number is shown to a
+    person deciding whether to spend it, so the direction to be wrong in is the
+    one that costs less than expected.
+    """
+    def ranged(method, url, body, headers):
+        if url.endswith("/orders/whatif"):
+            return {"amount": {"amount": "3,130.60 USD",
+                               "commission": "1.00 - 2.50 USD"}}
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(ranged)
+    quote = b.preview_order(b.build_order("AAPL", "BUY", 10, "LMT", 313.06,
+                                          client_order_id="DRFT_r"))
+    assert quote["fee"] == pytest.approx(2.5)
+
+
+def test_ibkr_refuses_to_price_an_order_the_broker_errored_on():
+    from dashboard.brokers.ibkr import IbkrError
+
+    def errored(method, url, body, headers):
+        if url.endswith("/orders/whatif"):
+            return {"error": "Order size exceeds the limit"}
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(errored)
+    with pytest.raises(IbkrError, match="refused to price"):
+        b.preview_order(b.build_order("AAPL", "BUY", 10, "LMT", 313.06,
+                                      client_order_id="DRFT_e"))
+
+
+def test_ibkr_stops_when_another_session_has_taken_the_login():
+    """
+    IBKR allows one brokerage session per login, so signing into the mobile app
+    takes it -- and the symptom is calls that succeed while doing nothing.
+    """
+    from dashboard.brokers.ibkr import IbkrError
+
+    def competing(method, url, body, headers):
+        if url.endswith("/iserver/auth/status"):
+            return {"authenticated": True, "connected": True, "competing": True}
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(competing)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_c")
+    with pytest.raises(IbkrError, match="competing"):
+        b.place_order(order)
+
+
+def test_ibkr_stops_when_the_gateway_is_not_logged_in():
+    from dashboard.brokers.ibkr import IbkrError
+
+    def logged_out(method, url, body, headers):
+        if url.endswith("/iserver/auth/status"):
+            return {"authenticated": False, "connected": True, "competing": False}
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(logged_out)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_l")
+    with pytest.raises(IbkrError, match="not authenticated"):
+        b.place_order(order)
+
+
+def test_ibkr_opens_the_brokerage_session_before_it_sends_an_order():
+    """IBKR documents GET /iserver/accounts as a prerequisite. Skipping it fails
+    at placement, which is the worst place to find out."""
+    seen = []
+
+    def recording(method, url, body, headers):
+        seen.append(url.split("/v1/api", 1)[-1].split("?")[0])
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(recording)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_s")
+    seen.clear()
+    b.place_order(order)
+    assert seen.index("/iserver/accounts") < seen.index(
+        f"/iserver/account/{IBKR_ACCOUNT}/orders")
+
+
+def test_ibkr_refuses_an_ambiguous_ticker():
+    from dashboard.brokers.ibkr import IbkrError
+
+    def ambiguous(method, url, body, headers):
+        if "/iserver/secdef/search" in url:
+            return [{"conid": "265598", "symbol": "AAPL", "description": "NASDAQ",
+                     "sections": [{"secType": "STK"}]},
+                    {"conid": "1234567", "symbol": "AAPL", "description": "AEB",
+                     "sections": [{"secType": "STK"}]}]
+        return ibkr_session(method, url, body, headers)
+
+    with pytest.raises(IbkrError, match="ambiguous"):
+        make_ibkr(ambiguous).build_order("AAPL", "BUY", 1, "LMT", 1.0)
+
+
+def test_ibkr_refuses_several_accounts_rather_than_choosing_one():
+    from dashboard.brokers.ibkr import IbkrBroker, IbkrError
+
+    def two_accounts(method, url, body, headers):
+        if url.endswith("/portfolio/accounts"):
+            return [{"accountId": "U1", "currency": "USD"},
+                    {"accountId": "U2", "currency": "EUR"}]
+        return ibkr_session(method, url, body, headers)
+
+    b = IbkrBroker(base_url="https://localhost:5000/v1/api", account_id="",
+                   session=two_accounts)
+    with pytest.raises(IbkrError, match="IBKR_ACCOUNT_ID"):
+        b.primary_account_id()
+
+
+def test_ibkr_will_not_answer_for_buying_power_without_knowing_the_units():
+    """
+    A ledger with no readable BASE entry means the currency the answer would be
+    denominated in is unknown. Answering anyway is how a guard passes for the
+    wrong reason.
+    """
+    from dashboard.brokers.ibkr import IbkrNotVerified
+
+    def no_base(method, url, body, headers):
+        if url.endswith("/ledger"):
+            return {"USD": {"cashbalance": 4000.0}}
+        return ibkr_session(method, url, body, headers)
+
+    with pytest.raises(IbkrNotVerified, match="VERIFIER"):
+        make_ibkr(no_base).buying_power("USD")
+
+
+def test_ibkr_marks_an_undocumented_summary_field_rather_than_returning_zero():
+    from dashboard.brokers.ibkr import IbkrNotVerified
+
+    def odd_summary(method, url, body, headers):
+        if url.endswith("/summary"):
+            return {"someFieldWeHaveNeverSeen": {"amount": 1.0}}
+        return ibkr_session(method, url, body, headers)
+
+    with pytest.raises(IbkrNotVerified, match="VERIFIER"):
+        make_ibkr(odd_summary).buying_power("USD")
+
+
+def test_ibkr_calls_an_unknown_environment_live_rather_than_paper(monkeypatch):
+    """
+    The failure directions are not symmetric. Calling a live account PAPER
+    invites someone to approve an order they would have refused.
+    """
+    from dashboard.brokers.ibkr import IbkrBroker
+    monkeypatch.delenv("IBKR_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("IBKR_ENVIRONMENT", raising=False)
+    assert IbkrBroker(account_id="", session=ibkr_session).environment_label() == "LIVE"
+    assert IbkrBroker(account_id="DU7654321").environment_label() == "PAPER"
+    assert IbkrBroker(account_id="U1234567").environment_label() == "LIVE"
+
+
+def test_ibkr_does_not_disable_tls_verification_on_its_own(monkeypatch):
+    """
+    The Client Portal Gateway serves a self-signed certificate, and the usual
+    fix is a blanket verify=False. That is a decision about the connection
+    carrying your orders, so it takes an explicit opt-in and says which one is
+    in force.
+    """
+    import ssl
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.delenv("IBKR_TLS_INSECURE", raising=False)
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    ctx = IbkrBroker(account_id=IBKR_ACCOUNT)._ssl_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+    monkeypatch.setenv("IBKR_TLS_INSECURE", "1")
+    opted_in = IbkrBroker(account_id=IBKR_ACCOUNT)._ssl_context()
+    assert opted_in.verify_mode == ssl.CERT_NONE
+
+
+def test_ibkr_hits_the_documented_paths():
+    """Pins the adapter to the endpoints it was written against."""
+    seen = []
+
+    def recording(method, url, body, headers):
+        seen.append((method, url.split("/v1/api", 1)[-1].split("?")[0]))
+        return ibkr_session(method, url, body, headers)
+
+    b = make_ibkr(recording)
+    order = b.build_order("AAPL", "BUY", 1, "LMT", 1.0, client_order_id="DRFT_p")
+    b.preview_order(order)
+    b.place_order(order)
+    b.positions()
+    b.buying_power("USD")
+
+    paths = [p for _, p in seen]
+    for expected in ("/iserver/secdef/search",
+                     f"/iserver/account/{IBKR_ACCOUNT}/orders/whatif",
+                     f"/iserver/account/{IBKR_ACCOUNT}/orders",
+                     "/iserver/auth/status", "/iserver/accounts",
+                     f"/portfolio/{IBKR_ACCOUNT}/positions/0",
+                     f"/portfolio/{IBKR_ACCOUNT}/ledger",
+                     f"/portfolio/{IBKR_ACCOUNT}/summary"):
+        assert expected in paths, f"{expected} was never called; got {paths}"
+
+
+def test_the_ibkr_adapter_is_not_marked_verified():
+    from dashboard.brokers.ibkr import IbkrBroker
+    assert IbkrBroker.verified is False, (
+        "set verified = True only after a real run, alongside the evidence")
+
+
+# =====================================================================
 # The unverified status has to reach the reader
 # =====================================================================
 
@@ -394,24 +845,34 @@ def test_the_help_wanted_document_matches_the_code():
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     doc = open(os.path.join(root, "HELP-WANTED.md"), encoding="utf-8").read()
-    src = open(os.path.join(root, "dashboard", "brokers", "saxo.py"), encoding="utf-8").read()
 
-    for referenced in ("buying_power", "cancel_order", "preview_order",
-                       "positions", "build_order", "resolve_uic"):
-        assert referenced in doc, f"HELP-WANTED does not mention {referenced}"
-        assert f"def {referenced}(" in src, f"{referenced} no longer exists in saxo.py"
+    referenced_by_adapter = {
+        "saxo.py": ("buying_power", "cancel_order", "preview_order",
+                    "positions", "build_order", "resolve_uic"),
+        "ibkr.py": ("buying_power", "preview_order", "positions",
+                    "build_order", "resolve_conid", "order_id_for"),
+    }
+    for filename, names in referenced_by_adapter.items():
+        src = open(os.path.join(root, "dashboard", "brokers", filename),
+                   encoding="utf-8").read()
+        for referenced in names:
+            assert referenced in doc, f"HELP-WANTED does not mention {referenced}"
+            assert f"def {referenced}(" in src, f"{referenced} no longer exists in {filename}"
 
-    assert os.path.exists(os.path.join(root, "tests", "verify_saxo.py")), (
-        "HELP-WANTED tells people to run tests/verify_saxo.py")
+    for script in ("verify_saxo.py", "verify_ibkr.py"):
+        assert os.path.exists(os.path.join(root, "tests", script)), (
+            f"HELP-WANTED tells people to run tests/{script}")
 
 
-def test_the_verification_script_cannot_place_an_order():
+@pytest.mark.parametrize("script", ["verify_saxo.py", "verify_ibkr.py"])
+def test_the_verification_scripts_cannot_place_an_order(script):
     """
-    It is handed to strangers to run against their own brokerage account. It
-    reads, and it prechecks, which Saxo documents as non-binding.
+    They are handed to strangers to run against their own brokerage account.
+    They read, and they preview, which both brokers document as non-binding.
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, "tests", "verify_saxo.py"), encoding="utf-8").read()
+    src = open(os.path.join(root, "tests", script), encoding="utf-8").read()
     assert "place_order" not in src
     assert "cancel_order" not in src
+    assert "confirm_order" not in src
     assert "READ ONLY" in src

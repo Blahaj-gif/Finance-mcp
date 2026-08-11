@@ -100,6 +100,16 @@ class WebullBroker:
             "raw": res,
         }
 
+    def confirm_order(self, reply_id: str, confirmed: bool = True) -> dict:
+        """
+        Webull accepts or refuses an order outright; it never asks a question
+        back. Saying so is better than a no-op that reports success for
+        something that did not happen.
+        """
+        raise NotImplementedError(
+            "Webull does not ask for confirmation after placement — it accepts "
+            "or rejects. Nothing here needs answering.")
+
     def cancel_order(self, client_order_id: str) -> dict:
         res = _wb.cancel_order(self._client(), self.primary_account_id(), client_order_id)
         return {
