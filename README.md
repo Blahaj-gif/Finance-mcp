@@ -55,6 +55,22 @@ free API keys.
 
 ---
 
+## Brokers
+
+| Broker | Status |
+|---|---|
+| **Webull** | Verified end to end — a real order drafted, previewed, placed, watched resting and cancelled. |
+| **Saxo Bank** | **Unverified.** Built from Saxo's published OpenAPI reference and never run against their API. It says so in every tool output that uses it, and refuses rather than guesses on the paths the docs did not pin down. |
+
+`dashboard/broker_protocol.py` is the interface; `tests/test_broker_conformance.py`
+runs the same suite against every adapter. Select one with `FINANCE_BROKER=saxo`.
+
+**[Help wanted →](HELP-WANTED.md)** — an hour with a Saxo simulation token would
+close the verification gap. The script that does it reads only; it never places
+an order.
+
+---
+
 ## Works with any MCP client
 
 Nothing in the server is specific to one assistant. It speaks MCP over stdio, so

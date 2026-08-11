@@ -21,6 +21,8 @@ import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
 import dashboard.broker as broker
+import dashboard.brokers as brokers
+import dashboard.broker_protocol as broker_protocol
 import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 
@@ -2853,6 +2855,18 @@ def get_data_sources() -> str:
         # Which broker surface is live is the single most consequential line in
         # this report -- it decides whether an approved order spends money.
         paper = webull_client.is_paper_environment()
+        # Which adapter is configured, and whether anyone has ever run it. A
+        # figure from an unverified adapter is a different kind of figure from
+        # one that has placed a real order, and that distinction has to reach
+        # the reader rather than staying an attribute on a class.
+        active = brokers.active_name()
+        if active != "webull":
+            try:
+                adapter = brokers.get(active)
+                out += f"**Broker adapter: {broker_protocol.describe(adapter)}**\n\n"
+            except Exception as e:
+                out += f"**Broker adapter `{active}` failed to load:** {str(e)[:140]}\n\n"
+
         out += "**Webull OpenAPI** — primary price feed and broker\n"
         out += (f"* **Environment: {webull_client.environment_label()}** — "
                 + ("orders are simulated against Webull's sandbox.\n" if paper else
