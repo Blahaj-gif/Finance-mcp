@@ -385,4 +385,41 @@ def test_server_json_matches_the_package_version():
     version = re.search(r'^version = "([^"]+)"', toml, re.M).group(1)
     assert manifest["version"] == version
     assert manifest["packages"][0]["version"] == version
-    assert manifest["packages"][0]["identifier"] == "finance-mcp"
+    # The identifier is asserted against pyproject rather than hardcoded, so a
+    # rename cannot leave the two claiming different packages.
+    dist = re.search(r'^name = "([^"]+)"', toml, re.M).group(1)
+    assert manifest["packages"][0]["identifier"] == dist
+
+
+def test_we_do_not_claim_a_pypi_name_that_belongs_to_someone_else():
+    """
+    server.json first claimed `finance-mcp`, which is an active Alibaba project
+    (flowllm-ai/finance-mcp) with a different scope. A registry entry pointing
+    at somebody else's package is worse than no entry: it is a claim on their
+    name, and it would install their code for anyone who followed it.
+    """
+    import json, os, re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    manifest = json.load(open(os.path.join(root, "server.json"), encoding="utf-8"))
+    taken = {"finance-mcp", "finance_mcp", "finance-mcp-server"}
+    identifier = manifest["packages"][0]["identifier"]
+    assert identifier not in taken, f"{identifier} is taken on PyPI by another project"
+
+    toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    dist = re.search(r'^name = "([^"]+)"', toml, re.M).group(1)
+    assert dist == identifier, (
+        f"pyproject name {dist!r} and server.json identifier {identifier!r} must "
+        "match, or the registry entry points at a package that is never published")
+    assert dist not in taken
+
+
+def test_the_console_commands_are_stable_across_a_rename():
+    """
+    The distribution name changed; the command an MCP client runs did not. Every
+    config we have published says `finance-mcp`, and breaking that would silently
+    unhook the server from anyone who already installed it.
+    """
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    toml = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    assert 'finance-mcp = "dashboard.cli:serve"' in toml

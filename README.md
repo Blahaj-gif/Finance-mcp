@@ -141,6 +141,26 @@ Use `get_data_sources` at any time to see every source's configuration and remai
 
 ---
 
+## Help wanted
+
+Two things where an hour from someone else is worth more than a day from me:
+
+- **Verify the Saxo adapter.** It is written from Saxo's published reference and
+  has never been run against their API. A 24-hour simulation token is free and
+  needs no approval, and `tests/verify_saxo.py` answers the six open questions
+  without placing an order. → **[HELP-WANTED.md](HELP-WANTED.md)**
+- **Install it on a clean machine.** `install.bat` and `install.sh` are covered
+  by unit tests and inspection, never by a fresh OS — the first thing every new
+  user touches is the least proven path here.
+
+Also open: **IG Markets** (REST, similar shape to Saxo) and **Interactive
+Brokers** (a persistent socket with async callbacks, so it is an architecture
+change rather than another adapter). `dashboard/broker_protocol.py` is the
+interface; `tests/test_broker_conformance.py` runs against anything that
+implements it.
+
+---
+
 ## Where the numbers come from
 
 Not all data carries the same weight, and the tools say which is which.
