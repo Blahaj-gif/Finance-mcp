@@ -17,6 +17,11 @@ given account sees 39 or 40 of them.
 queue; sending requires a broker preview and your click in the dashboard. That
 path does not exist on the tool side, so no prompt can reach it.
 
+Every tool declares this to the client rather than only to the reader: **35 of
+39 are annotated read-only, one is destructive** (`cancel_order`, which pulls a
+resting order). A client that respects MCP annotations can wave through a price
+lookup and stop on the one call that reaches the market.
+
 ---
 
 ![Charts tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/charts.png)
@@ -118,6 +123,23 @@ that returns one level means an L1 subscription, not a missing endpoint.
 probe can only ever *withdraw* a capability and never invent one, and it records
 **what** a call did rather than why. Inferring a cause from an error message is
 how this file previously came to blame a region for a parameter mistake.
+
+### Macro releases
+
+CPI prints at 08:30:00 ET. The calendar carries the print that happened or the
+prior one, **never a forecast** — there is no consensus feed here, street
+estimates are a licensed product, so a "surprise" against a prior reading is not
+a surprise.
+
+Near a scheduled release the macro cache collapses from six hours to three
+seconds, so the answer is the freshest available whenever you ask. Set
+`FINANCE_MACRO_WATCH=1` and a background thread also fetches the print as it
+publishes, so it is already in hand.
+
+Neither bursts. BLS documents 50 requests per 10 seconds; the fast cadence uses
+ten. Polling faster does not make BLS publish sooner — a burst of identical
+requests fired at the instant all return the same stale payload, because the
+wait is on an external event rather than on throughput.
 
 ### Prices come from your broker
 

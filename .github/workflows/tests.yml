@@ -62,3 +62,88 @@ jobs:
             exit 1
           fi
           echo "No credential files or literals tracked."
+
+  package:
+    # The suite above runs against a source checkout, where every module is
+    # present by definition. That is exactly why it cannot catch the worst bug
+    # this project has nearly shipped: `packages = ["dashboard"]` is an explicit
+    # list rather than a prefix, so dashboard/brokers was absent from the wheel
+    # and the installed server died on import with ModuleNotFoundError. 1200
+    # passing tests said nothing about it. Only building, installing and
+    # *starting* it does.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --quiet dist/*.whl
+
+      - name: Every declared subpackage must be importable from the wheel
+        run: |
+          cd /tmp        # outside the checkout, so nothing resolves by accident
+          /tmp/clean/bin/python - <<'PY'
+          import importlib
+          for module in ("dashboard", "dashboard.brokers", "dashboard.brokers.webull",
+                         "dashboard.brokers.saxo", "dashboard.brokers.ibkr",
+                         "dashboard.capabilities", "dashboard.live_signals",
+                         "dashboard.macro_watch", "dashboard.broker_protocol",
+                         "finance_mcp"):
+              importlib.import_module(module)
+          print("all packages import from the wheel")
+          PY
+
+      - name: The installed server must answer a real MCP handshake
+        run: |
+          cd /tmp
+          cat > handshake.jsonl <<'EOF'
+          {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}
+          {"jsonrpc":"2.0","method":"notifications/initialized"}
+          {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+          EOF
+          /tmp/clean/bin/finance-mcp < handshake.jsonl > out.jsonl 2> err.txt || true
+          /tmp/clean/bin/python - <<'PY'
+          import json, sys
+          lines = [l for l in open("out.jsonl", encoding="utf-8") if l.strip()]
+          # Anything that is not JSON-RPC on stdout corrupts the stream for
+          # every client, so this is checked before the contents.
+          stray = [l[:80] for l in lines if not l.lstrip().startswith("{")]
+          assert not stray, f"non-JSON on stdout: {stray}"
+          tools = None
+          for line in lines:
+              message = json.loads(line)
+              if message.get("id") == 2:
+                  tools = message["result"]["tools"]
+          assert tools, "the server never answered tools/list"
+          assert len(tools) >= 39, f"only {len(tools)} tools registered"
+          missing = [t["name"] for t in tools
+                     if not t.get("inputSchema") or not t.get("description")
+                     or not t.get("annotations")]
+          assert not missing, f"incomplete tool definitions: {missing}"
+          print(f"{len(tools)} tools, schemas and annotations present, stdout clean")
+          PY
+
+      - name: server.json must point at a version that will exist
+        run: |
+          python - <<'PY'
+          import json, re
+          listing = json.load(open("server.json"))
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+          name = re.search(r'^name = "([^"]+)"', pyproject, re.M).group(1)
+          assert listing["version"] == version, (listing["version"], version)
+          assert listing["packages"][0]["version"] == version
+          assert listing["packages"][0]["identifier"] == name
+          print(f"server.json agrees with pyproject: {name} {version}")
+          PY

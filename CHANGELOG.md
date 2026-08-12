@@ -3,6 +3,34 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
+## Unreleased
+
+- **MCP tool annotations.** 35 of 39 tools declare `readOnlyHint`; `cancel_order`
+  is the only `destructiveHint`. The safety claim was prose a model had to be
+  persuaded by; it is now machine-readable, and a client that respects
+  annotations can enforce it.
+- **Macro release watching**, off by default behind `FINANCE_MACRO_WATCH=1`. A
+  background thread fetches a BLS print as it publishes so it is in hand before
+  anyone asks. Serial, 10 requests per 10 seconds against a documented ceiling
+  of 50, and it stops the moment the print lands — a punctual release costs one
+  call.
+- **Release-aware macro caching.** Near a scheduled release the cache drops from
+  six hours to three seconds, judged on the reference period rather than a
+  timestamp.
+- **Parser reconciliation.** 13F holdings are checked against the entry count
+  and total value the filing declares on its own cover page, and the result is
+  reported in the tool output. Verified across ten institutions and 82,701 rows,
+  values matching to the dollar. Property-based tests over `parse_number` and
+  all three reconciliations, mutation-checked.
+- **CI builds the wheel.** The source checkout always has every module, which is
+  why the suite could not catch `dashboard/brokers` being absent from the
+  distribution. CI now builds, installs into a clean environment, and runs a
+  real MCP handshake.
+- Fixed: a test that passed on every day except the one its fixture named; a
+  quota reserve larger than the whole unregistered BLS quota, which silently
+  disabled release polling; `live_signals` failing mid-render on a stale module
+  rather than at import.
+
 ## 0.3.0 — 2026-08-11
 
 ### Three brokers behind one protocol

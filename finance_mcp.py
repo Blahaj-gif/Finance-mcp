@@ -7,6 +7,7 @@ import math
 import time
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 # Adjust path to find local modules
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -3650,6 +3651,84 @@ def get_updates(symbols: str | list[str] = "", since: str = "24h",
     except Exception as e:
         raise ToolError(f"Error building the update diff: {e}") from e
 
+
+
+# =====================================================================
+# TOOL ANNOTATIONS
+# =====================================================================
+# MCP lets a tool declare whether it only reads, whether it can destroy
+# something, and whether it reaches outside the process. A client that respects
+# those hints can wave through a price lookup and stop on an order.
+#
+# This server's entire claim is that reads are safe and the order path is not,
+# and until now that claim lived only in prose a model had to be persuaded by.
+# These annotations make it machine-readable, which is the difference between
+# saying the assistant cannot place an order and letting the client enforce it.
+#
+# Hints, not permissions. The real guarantee is still structural -- there is no
+# code path from a tool to a live submission, and no flag that creates one.
+
+#: Tools that change something. Everything not listed here only reads, which is
+#: 34 of 41 and is the honest shape of this server.
+WRITING_TOOLS = {
+    # Writes a draft to a local queue. Reaches no market: approval happens in
+    # the dashboard, and the draft is inert until then.
+    "draft_order": {"destructive": False, "idempotent": False},
+    # Writes a local alert definition.
+    "set_alert": {"destructive": False, "idempotent": False},
+    # Appends to a local journal.
+    "log_journal_entry": {"destructive": False, "idempotent": False},
+    # The only tool that acts on the market. Pulling a resting order cannot be
+    # undone, and a second call after a fill is not a no-op -- it is a 404 on
+    # an order that already executed.
+    "cancel_order": {"destructive": True, "idempotent": False},
+}
+
+#: Tools that touch nothing outside this machine. Everything else reaches a
+#: broker, an exchange, the SEC or a statistics agency.
+LOCAL_ONLY_TOOLS = {"log_journal_entry", "get_journal_summary", "set_alert"}
+
+
+def annotate_tools():
+    """
+    Attach MCP annotations to every registered tool. Returns how many.
+
+    Applied after registration rather than at each decorator: the alternative
+    is forty call sites that have to be kept in step with a table, and the one
+    that drifts is the one that matters.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass                      # no loop: the ordinary startup path
+    else:
+        # Already inside one -- a host importing this module rather than
+        # running it. Annotations are a startup concern, so decline. Checked
+        # *before* building the coroutine: creating one and abandoning it
+        # leaves "coroutine was never awaited" on stderr, and this server's
+        # stderr is where its diagnostics have to stay legible.
+        return 0
+
+    tools = asyncio.run(mcp._list_tools())
+
+    annotated = 0
+    for tool in tools:
+        name = tool.name
+        write = WRITING_TOOLS.get(name)
+        tool.annotations = ToolAnnotations(
+            title=name.replace("_", " ").strip().title(),
+            readOnlyHint=write is None,
+            destructiveHint=bool(write and write["destructive"]),
+            idempotentHint=(True if write is None else write["idempotent"]),
+            openWorldHint=name not in LOCAL_ONLY_TOOLS,
+        )
+        annotated += 1
+    return annotated
+
+
+ANNOTATED_TOOL_COUNT = annotate_tools()
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
