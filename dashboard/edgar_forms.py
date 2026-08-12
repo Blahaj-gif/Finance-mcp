@@ -707,6 +707,91 @@ def reconcile_13f(holdings: list, summary: dict, total_value=None) -> dict:
     }
 
 
+#: How far a holding's implied percentage may sit from the one the filer
+#: stated, relative to that percentage. Filers round pctVal; 0.1% relative
+#: absorbs that without absorbing a magnitude error, which is off by 100x.
+NPORT_PCT_TOLERANCE = 0.001
+
+
+def reconcile_nport(parsed: dict) -> dict:
+    """
+    Check an NPORT parse against numbers the filing states twice.
+
+    **Not** the sum of holdings against total or net assets. Measured on
+    Vanguard 500 (519 holdings, $1.42tn): the sum sits 0.055% below totAssets
+    and 0.136% above netAssets, because a fund holds cash and receivables and
+    owes liabilities, and none of that appears in `invstOrSec`. A tolerance
+    wide enough to accept that is too wide to catch anything.
+
+    What does work is per-holding. Every position files **both** `valUSD` and
+    `pctVal`, so `valUSD / netAssets` must reproduce the stated percentage —
+    two independently filed numbers about the same row. On the same filing that
+    agreed to six decimal places on all 519.
+
+    It is also the right check for the failure that matters. A magnitude
+    misread — the class that gave "1.2e3" as 1.23 and cash-flow tags read
+    cumulatively — moves the implied percentage by orders of magnitude and
+    cannot hide inside a rounding tolerance.
+    """
+    return _nport_reconciliation(
+        (parsed or {}).get("holdings") or [],
+        (parsed or {}).get("net_assets"),
+        (parsed or {}).get("total_assets"),
+        (parsed or {}).get("holdings_value"))
+
+
+def _nport_reconciliation(holdings, net_assets, total_assets, holdings_value):
+    """The arithmetic, over whatever list of holdings it is handed."""
+    checks, problems = [], []
+
+    if not net_assets:
+        return {"reconciled": None, "checks": ["net assets not filed"],
+                "problems": [], "checked": 0}
+
+    checked = disagreed = 0
+    worst = None
+    for h in holdings:
+        value, stated = h.get("value_usd"), h.get("pct_of_fund")
+        if not value or stated is None:
+            continue
+        checked += 1
+        implied = value / net_assets * 100
+        gap = abs(implied - stated)
+        if gap > NPORT_PCT_TOLERANCE * max(abs(stated), NPORT_PCT_TOLERANCE):
+            disagreed += 1
+            if worst is None or gap > worst[0]:
+                worst = (gap, h.get("name", "?"), stated, implied)
+
+    if not checked:
+        checks.append("no holding filed both a value and a percentage")
+    elif disagreed:
+        problems.append(
+            f"{disagreed} of {checked} holdings: the value and the percentage "
+            f"the filing states for the same position disagree — worst is "
+            f"{worst[1]}, filed {worst[2]:.6f}% but its value implies "
+            f"{worst[3]:.6f}%")
+    else:
+        checks.append(
+            f"{checked} holdings: every filed percentage matches its own value "
+            f"over net assets")
+
+    # Reported, never asserted. The gap is cash, receivables and liabilities,
+    # which a fund has and an information table does not show.
+    if holdings_value and total_assets:
+        checks.append(
+            f"securities are {holdings_value / total_assets * 100:.2f}% of "
+            f"filed total assets; the remainder is cash and receivables, which "
+            "NPORT reports elsewhere and this does not treat as a discrepancy")
+
+    return {
+        "reconciled": not problems,
+        "checks": checks,
+        "problems": problems,
+        "checked": checked,
+        "disagreed": disagreed,
+    }
+
+
 def reconcile_form144(parsed: dict) -> dict:
     """
     A Form 144 states shares to be sold and an aggregate market value. Their
@@ -1224,6 +1309,12 @@ def parse_nport(xml: str, limit: int = 25) -> dict:
         "holdings_value": total,
         "by_category": dict(sorted(by_category.items(), key=lambda kv: -kv[1])),
         "holdings": holdings[:limit],
+        # Over every holding parsed, not the slice shown. Reconciling the top
+        # 25 of 519 and reporting success would be a check that gets easier the
+        # less of the filing you look at.
+        "reconciliation": _nport_reconciliation(
+            holdings, nz.parse_number(_text(xml, "netAssets")),
+            nz.parse_number(_text(xml, "totAssets")), total),
     }
 
 

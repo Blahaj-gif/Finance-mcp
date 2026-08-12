@@ -2876,7 +2876,18 @@ def _render_fund_holdings(identifier: str, limit: int) -> str:
     except Exception:
         out += table.to_string(index=False)
 
-    return out + ("\n\n*NPORT-P is filed monthly and covers the whole portfolio — bonds, "
+    rec = d.get("reconciliation") or {}
+    if rec.get("reconciled") is True:
+        recon = "\n\n*Reconciled: " + "; ".join(rec.get("checks", [])) + ".*"
+    elif rec.get("reconciled") is False:
+        recon = ("\n\n**Does not reconcile against the filing's own numbers:** "
+                 + "; ".join(rec.get("problems", []))
+                 + ". Treat these figures as suspect.")
+    else:
+        recon = "\n\n*Not reconciled — " + str(
+            rec.get("unavailable") or "the filing states no net assets") + ".*"
+
+    return out + recon + ("\n\n*NPORT-P is filed monthly and covers the whole portfolio — bonds, "
                   "derivatives and short positions included — where a 13F shows only US-listed "
                   "long equity and options, quarterly.*")
 
