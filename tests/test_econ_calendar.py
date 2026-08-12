@@ -161,8 +161,24 @@ def test_upcoming_releases_filters_to_the_window(monkeypatch):
     found, failed = ec.upcoming_releases(days_ahead=3650, days_back=3650, slugs=["cpi"])
     assert len(found) == 3 and not failed
 
-    found, _ = ec.upcoming_releases(days_ahead=0, days_back=0, slugs=["cpi"])
-    assert found == []
+    # A zero-day window means "today only", and one of the fixture's own dates
+    # is 2026-08-12 -- so this assertion held on every day except that one, and
+    # failed the morning the calendar reached it. The window has to be defined
+    # relative to the fixture rather than to whatever today happens to be.
+    fixture_days = sorted(r["date"] for r in found)
+    today = datetime.date.today()
+    gap = min(abs((day - today).days) for day in fixture_days)
+    if gap == 0:
+        # Today *is* a fixture date. Nothing excludes it but asking for a
+        # window that does not contain today at all, which the API cannot
+        # express -- so assert the complementary fact instead: the row that
+        # matched is one of the fixture's, not an invention.
+        same_day, _ = ec.upcoming_releases(days_ahead=0, days_back=0, slugs=["cpi"])
+        assert [r["date"] for r in same_day] == [today]
+    else:
+        narrower, _ = ec.upcoming_releases(days_ahead=gap - 1, days_back=gap - 1,
+                                           slugs=["cpi"])
+        assert narrower == [], f"±{gap - 1}d should exclude {fixture_days}"
 
 
 def test_upcoming_releases_reports_a_failed_source_instead_of_dropping_it(monkeypatch):

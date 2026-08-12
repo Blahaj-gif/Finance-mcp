@@ -36,6 +36,7 @@ import json
 import os
 import re
 import threading
+import zoneinfo
 import time
 import urllib.error
 import urllib.request
@@ -222,7 +223,7 @@ _MONTHS = {m: i for i, m in enumerate(
      "August", "September", "October", "November", "December"], start=1)}
 
 
-def fetch_bls_series(keys, start_year=None, end_year=None):
+def fetch_bls_series(keys, start_year=None, end_year=None, ttl=None):
     """
     Fetch one or more macro series and compute month-over-month and
     year-over-year changes.
@@ -239,7 +240,7 @@ def fetch_bls_series(keys, start_year=None, end_year=None):
     start_year = start_year or (end_year - 2)
 
     cache_key = ("bls", tuple(sorted(keys)), start_year, end_year, bool(BLS_API_KEY))
-    cached = CACHE.get(cache_key, TTL_MACRO)
+    cached = CACHE.get(cache_key, TTL_MACRO if ttl is None else ttl)
     if cached is not None:
         return cached
 
@@ -463,6 +464,185 @@ _QUARTERS = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4,
              "first": 1, "second": 2, "third": 3, "fourth": 4}
 
 
+# ---------------------------------------------------------------------
+# Release-window polling
+# ---------------------------------------------------------------------
+# BLS publishes at an announced instant -- 08:30:00 ET, to the second -- and a
+# six-hour cache meant the one number people came for could be half a day stale
+# on the one morning it mattered.
+#
+# The obvious fix is to poll hard across the release. It is also wrong, and the
+# arithmetic says why. BLS documents **500 queries a day and 50 requests per 10
+# seconds** for a registered v2 key. A 40-per-second burst is eight times over
+# the rate limit and spends 80% of the day's quota in ten seconds -- and buys
+# nothing, because polling faster does not make BLS publish sooner. All poll
+# frequency buys is *detection latency*:
+#
+#     400 calls at 40/s     -> detected within  ~25 ms   (rate limit breached)
+#     one call every 3 s    -> detected within    3 s    (~3.3 req/10 s)
+#
+# Three seconds, for eight times the permitted rate. So the cadence here is
+# three seconds, and the leverage comes from somewhere else: **BLS accepts 50
+# series in a single request**, and this project tracks nine. Every series we
+# publish already arrives in one call. "Aggregated real time" is a batching
+# property, not a concurrency one.
+#
+# The window closes when the print lands rather than on a timer, so a release
+# that arrives on time costs a handful of calls rather than a budget.
+
+ET = zoneinfo.ZoneInfo("America/New_York")
+
+#: How early the fast cadence starts. Being late to our own window would waste
+#: the point of having one.
+WINDOW_OPENS_BEFORE = datetime.timedelta(seconds=90)
+
+#: How long to keep watching when nothing appears. BLS is occasionally minutes
+#: late; after this the release is treated as delayed and the normal cadence
+#: resumes, because a poll loop that never gives up is a quota leak.
+WINDOW_CLOSES_AFTER = datetime.timedelta(minutes=20)
+
+#: Cadence inside the window: ~3.3 requests per 10 seconds against a documented
+#: ceiling of 50.
+TTL_MACRO_LIVE = 3
+
+#: How long the fast cadence lasts after the announced instant. BLS is punctual
+#: to the second in the ordinary case, so this is the part that matters.
+FAST_WINDOW = datetime.timedelta(minutes=2)
+
+#: Cadence for the rest of the window, once a release is demonstrably late.
+#: A flat 3s for the full 21.5 minutes is 430 calls -- 86% of the day's quota
+#: spent watching a release that did not arrive. Stepping down costs 30 seconds
+#: of detection latency in the uncommon case and takes the worst case to ~106.
+TTL_MACRO_LATE = 30
+
+#: Never open a window below this much remaining quota. A release is worth a
+#: handful of calls; it is not worth the reserve that keeps every other tool
+#: answering for the rest of the day.
+QUOTA_RESERVE = 60
+
+
+def release_moment(entry):
+    """
+    A calendar row's announced instant, as an aware datetime, or None.
+
+    Rows carry a date and a wall-clock time in Eastern -- "2026-08-12" and
+    "08:30 AM" -- because that is how BLS publishes them. Eastern rather than
+    a fixed offset: the schedule spans a daylight-saving boundary twice a year
+    and an hour is a long time to be wrong about on release morning.
+    """
+    raw_date = (entry or {}).get("date")
+    time_text = ((entry or {}).get("time_et") or "").strip()
+    if not raw_date:
+        return None
+    # Rows carry a real date object; a JSON round trip turns it into a string,
+    # and this is called on both sides of that.
+    if isinstance(raw_date, datetime.datetime):
+        day = raw_date.date()
+    elif isinstance(raw_date, datetime.date):
+        day = raw_date
+    else:
+        try:
+            day = datetime.datetime.strptime(str(raw_date), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    clock = datetime.time(8, 30)
+    if time_text:
+        for fmt in ("%I:%M %p", "%H:%M"):
+            try:
+                clock = datetime.datetime.strptime(time_text, fmt).time()
+                break
+            except ValueError:
+                continue
+    return datetime.datetime.combine(day, clock, tzinfo=ET)
+
+
+def release_window(entries, now=None):
+    """
+    The BLS release being watched right now, or None.
+
+    Only rows this project actually publishes a series for -- there is no point
+    polling the API across a release whose numbers we do not show. `entries`
+    come from the schedule, which is cached for a day, so release morning
+    spends no API quota rediscovering when the release is.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    for entry in entries or []:
+        if not RELEASE_SERIES.get(entry.get("slug")):
+            continue
+        moment = release_moment(entry)
+        if moment is None:
+            continue
+        if moment - WINDOW_OPENS_BEFORE <= now <= moment + WINDOW_CLOSES_AFTER:
+            return entry
+    return None
+
+
+def has_landed(entry, data):
+    """
+    Whether the reading a release covers is already present.
+
+    Compares the release's reference period -- "July 2026" -- against the
+    newest observation of the series it publishes. This is what closes the
+    window, and it is about the *period* rather than a timestamp: a payload
+    refetched after publication still shows the prior month until BLS swaps it,
+    and that is exactly the state worth polling through.
+    """
+    if not entry or not data:
+        return False
+    parsed = parse_reference_period(entry.get("reference_period") or "")
+    if not parsed:
+        return False
+    want_year, want_month = parsed[0], parsed[1]
+    for key in RELEASE_SERIES.get(entry.get("slug"), []):
+        observations = ((data or {}).get(key) or {}).get("observations") or []
+        if not observations:
+            continue
+        newest = observations[0]
+        try:
+            year = int(newest.get("year"))
+            month = int(str(newest.get("period", "")).lstrip("MQ") or 0)
+        except (TypeError, ValueError):
+            continue
+        if year == want_year and month == want_month:
+            return True
+    return False
+
+
+def macro_ttl(entries, now=None, landed=False):
+    """
+    How long a cached macro payload may be reused, in seconds.
+
+    TTL_MACRO normally; a few seconds inside a release window, but only while
+    the print is actually missing. Polling for something already in hand is the
+    most expensive kind of nothing.
+    """
+    if landed:
+        return TTL_MACRO
+    window = release_window(entries, now)
+    if window is None:
+        return TTL_MACRO
+    remaining = BLS_LIMITER.remaining_today()
+    if remaining is not None and remaining <= QUOTA_RESERVE:
+        return TTL_MACRO
+
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    moment = release_moment(window)
+    if moment is not None and now > moment + FAST_WINDOW:
+        return TTL_MACRO_LATE
+    return TTL_MACRO_LIVE
+
+
+def poll_budget():
+    """
+    Worst-case calls one release window can cost, for anyone checking the
+    arithmetic rather than trusting it. The realistic cost is a handful: the
+    window closes the moment the print lands.
+    """
+    fast = (WINDOW_OPENS_BEFORE + FAST_WINDOW).total_seconds() // TTL_MACRO_LIVE
+    late = (WINDOW_CLOSES_AFTER - FAST_WINDOW).total_seconds() // TTL_MACRO_LATE
+    return int(fast + late)
+
+
 def parse_reference_period(text):
     """
     "July 2026" -> (2026, 7, "month");  "2nd Quarter 2026" -> (2026, 6, "quarter").
@@ -568,6 +748,23 @@ def attach_release_values(entries, today=None, data=None):
     # result in -- get_economic_calendar was spending two of the day's queries
     # per call, one here and one for its "latest prints" table, because the two
     # key sets differ and so miss each other's cache entry.
+    if data is None:
+        # Inside a release window the cached payload is reusable for seconds
+        # rather than hours -- and only while the print is still missing. The
+        # first fetch answers "has it landed?", so a release that arrives on
+        # time closes its own window immediately.
+        try:
+            ttl = macro_ttl(entries)
+            if ttl != TTL_MACRO:
+                probe = fetch_bls_series(
+                    wanted, start_year=min(e["date"].year for e in entries) - 1,
+                    ttl=ttl)
+                if has_landed(release_window(entries), probe):
+                    ttl = TTL_MACRO
+                data = probe
+        except Exception:
+            ttl = TTL_MACRO      # fall through to the ordinary path below
+
     if data is None:
         try:
             data = fetch_bls_series(wanted, start_year=min(e["date"].year for e in entries) - 1)
