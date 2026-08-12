@@ -117,7 +117,14 @@ jobs:
           # when this fails is on stderr, and a step that fails without showing
           # it costs a whole round trip to diagnose.
           set +e
-          /tmp/clean/bin/finance-mcp < handshake.jsonl > out.jsonl 2> err.txt
+          # Held open for a moment after the last request. With a plain `<`
+          # redirect stdin hits EOF the instant the three lines are read, and
+          # the server may shut down before it has flushed the tools/list
+          # response -- which showed up as "no tools/list response among 1
+          # messages", intermittently. A real client keeps the pipe open; this
+          # imitates that rather than racing it.
+          { cat handshake.jsonl; sleep 5; } \
+            | /tmp/clean/bin/finance-mcp > out.jsonl 2> err.txt
           status=$?
           set -e
           echo "exit status: $status"
@@ -183,8 +190,15 @@ jobs:
           # an exchange or the SEC. A server that needs the internet to list its
           # own tools fails in a sandbox, which is where directories run it.
           set +e
-          docker run --rm -i --network none finance-mcp:ci \
-            < handshake.jsonl > out.jsonl 2> err.txt
+          # Held open for a moment after the last request. With a plain `<`
+          # redirect stdin hits EOF the instant the three lines are read, and
+          # the server may shut down before it has flushed the tools/list
+          # response -- which showed up as "no tools/list response among 1
+          # messages", intermittently. A real client keeps the pipe open; this
+          # imitates that rather than racing it.
+          { cat handshake.jsonl; sleep 5; } \
+            | docker run --rm -i --network none finance-mcp:ci \
+              > out.jsonl 2> err.txt
           status=$?
           set -e
           echo "exit status: $status"
