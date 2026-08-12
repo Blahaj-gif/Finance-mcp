@@ -107,25 +107,37 @@ jobs:
       - name: The installed server must answer a real MCP handshake
         run: |
           cd /tmp
-          cat > handshake.jsonl <<'EOF'
-          {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}
-          {"jsonrpc":"2.0","method":"notifications/initialized"}
-          {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-          EOF
-          /tmp/clean/bin/finance-mcp < handshake.jsonl > out.jsonl 2> err.txt || true
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            > handshake.jsonl
+          # No `|| true`: a server that exits non-zero is a finding, not noise
+          # to swallow. Both streams are kept because the interesting evidence
+          # when this fails is on stderr, and a step that fails without showing
+          # it costs a whole round trip to diagnose.
+          set +e
+          /tmp/clean/bin/finance-mcp < handshake.jsonl > out.jsonl 2> err.txt
+          status=$?
+          set -e
+          echo "exit status: $status"
+          echo "--- stdout (first 400 bytes) ---"; head -c 400 out.jsonl || true
+          echo; echo "--- stderr (last 40 lines) ---"; tail -n 40 err.txt || true
+          echo "--------------------------------"
           /tmp/clean/bin/python - <<'PY'
-          import json, sys
+          import json
           lines = [l for l in open("out.jsonl", encoding="utf-8") if l.strip()]
           # Anything that is not JSON-RPC on stdout corrupts the stream for
           # every client, so this is checked before the contents.
           stray = [l[:80] for l in lines if not l.lstrip().startswith("{")]
           assert not stray, f"non-JSON on stdout: {stray}"
+          assert lines, "the server wrote nothing to stdout; see stderr above"
           tools = None
           for line in lines:
               message = json.loads(line)
               if message.get("id") == 2:
                   tools = message["result"]["tools"]
-          assert tools, "the server never answered tools/list"
+          assert tools, f"no tools/list response among {len(lines)} messages"
           assert len(tools) >= 39, f"only {len(tools)} tools registered"
           missing = [t["name"] for t in tools
                      if not t.get("inputSchema") or not t.get("description")
