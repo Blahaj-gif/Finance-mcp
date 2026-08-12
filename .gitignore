@@ -46,3 +46,9 @@ dashboard/live_consent.json
 
 # The mcp-publisher binary, fetched on demand. 20 MB of Go, not source.
 tools/
+
+# Everything the dashboard writes beside its own code. Listed one by one this
+# missed iv_history.json, which was untracked but not ignored -- one `git add
+# -A` from being committed, and it had already shipped in four releases via
+# setuptools, which globs the filesystem rather than the git index.
+dashboard/*.json

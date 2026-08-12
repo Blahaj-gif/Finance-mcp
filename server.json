@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Blahaj-gif/hitl-finance-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "title": "Finance MCP",
   "description": "Market data, SEC filings and risk tools for Webull, Saxo and IBKR. Only you can send an order.",
   "websiteUrl": "https://github.com/Blahaj-gif/Finance-mcp",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "hitl-finance-mcp",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

@@ -1,6 +1,6 @@
 [project]
 name = "hitl-finance-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server for market data, macro calendar, SEC filings and risk tooling, with human-approved order execution"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -52,12 +52,31 @@ exclude = ["tests*", "docs*"]
 
 [tool.setuptools]
 py-modules = ["finance_mcp"]
+# Off, deliberately. It defaults to *true* for a pyproject config, which means
+# setuptools sweeps files it finds beside the code -- including the runtime
+# state the dashboard writes into its own package directory, and including
+# whatever a stale egg-info SOURCES.txt happens to remember from an earlier
+# build. Removing the package-data glob alone did not stop it; this does.
+include-package-data = false
 
-# The Streamlit theme and the golden vectors travel with the package. Without
-# the config the dashboard loses its theme when installed; without the vectors
-# the TA core cannot be re-verified from an install.
-[tool.setuptools.package-data]
-dashboard = ["*.json"]
+# No package data. There was a `dashboard = ["*.json"]` glob here, added to
+# ship "the Streamlit theme and the golden vectors" -- but the theme lives in
+# dashboard/theme.py as Python and the vectors live in tests/fixtures/, which
+# this package excludes. It shipped neither.
+#
+# What it did ship was every runtime state file the dashboard writes beside its
+# own code: order_drafts.json, portfolio_history.json, live_consent.json,
+# iv_history.json. Those are gitignored, so nothing in the repository showed
+# it; setuptools globs the filesystem rather than the index, and the build ran
+# from a working tree where the author had used the tool. Four published
+# versions carried a real account id, a portfolio's positions and value day by
+# day, and a live order with the broker's own order id.
+#
+# It was also a correctness bug: a fresh install started with somebody else's
+# drafts already in the approval queue.
+#
+# If an asset ever genuinely needs to ship, name the file. Never a glob over a
+# directory that the program also writes to.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,6 +3,34 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
+## 0.3.1 — 2026-08-12
+
+**Security: earlier releases contained the author's account state. Upgrade, and
+do not install 0.2.0 through 0.3.0.**
+
+`include-package-data` defaults to *true* for a pyproject config, and setuptools
+globs the filesystem rather than the git index. The dashboard writes its runtime
+state beside its own code, so four published releases carried:
+
+- a real Webull account id and the timestamp of its live-trading consent
+- a portfolio's positions, cost basis and net liquidation, day by day
+- a live order with the broker's own order id
+
+No API key, secret or token was exposed, and nothing in those files grants
+access to anything — this is personal financial data, not a credential
+compromise. Nothing in the repository showed it either: every one of those files
+is gitignored, which is exactly why review never caught it.
+
+It was a correctness bug as well: a fresh install began with somebody else's
+drafts already in the approval queue.
+
+Fixed by setting `include-package-data = false` and deleting a package-data glob
+that shipped nothing legitimate — the theme it claimed to carry is Python, and
+the golden vectors live in `tests/`, which the package excludes. `.gitignore`
+now covers `dashboard/*.json` as a glob; listing the files one by one had missed
+`iv_history.json`. Tests read the packaging configuration and ask git directly,
+so this fails before a build rather than after a publish.
+
 ## Unreleased
 
 - **MCP tool annotations.** 35 of 39 tools declare `readOnlyHint`; `cancel_order`
