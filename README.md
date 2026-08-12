@@ -17,8 +17,8 @@ given account sees 36 or 37 of them.
 queue; sending requires a broker preview and your click in the dashboard. That
 path does not exist on the tool side, so no prompt can reach it.
 
-Every tool declares this to the client rather than only to the reader: **35 of
-39 are annotated read-only, one is destructive** (`cancel_order`, which pulls a
+Every tool declares this to the client rather than only to the reader: **32 of
+36 are annotated read-only, one is destructive** (`cancel_order`, which pulls a
 resting order). A client that respects MCP annotations can wave through a price
 lookup and stop on the one call that reaches the market.
 

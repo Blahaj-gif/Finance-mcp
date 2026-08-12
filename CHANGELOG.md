@@ -33,7 +33,7 @@ so this fails before a build rather than after a publish.
 
 ## Unreleased
 
-- **MCP tool annotations.** 35 of 39 tools declare `readOnlyHint`; `cancel_order`
+- **MCP tool annotations.** Tools declare `readOnlyHint`; `cancel_order`
   is the only `destructiveHint`. The safety claim was prose a model had to be
   persuaded by; it is now machine-readable, and a client that respects
   annotations can enforce it.

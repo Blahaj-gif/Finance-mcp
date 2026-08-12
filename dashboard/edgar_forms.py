@@ -145,6 +145,17 @@ def _text(xml: str, tag: str, default=None):
     inner = m.group(1)
     v = re.search(rf"<{_NS}value>(.*?)</{_NS}value>", inner, re.S | re.I)
     raw = v.group(1) if v else inner
+
+    # CDATA is literal text, not markup, and it has to come out before the tag
+    # stripper runs. `<[^>]+>` matches from `<!` to the first `>` inside the
+    # section, so `<![CDATA[Acme <&> Co]]>` was returning "Co]]>" -- the tail
+    # after the accidental match, which reads like a value rather than like a
+    # parse failure. SEC filings use CDATA for exactly the names that contain
+    # the characters that break naive stripping.
+    sections = re.findall(r"<!\[CDATA\[(.*?)\]\]>", raw, re.S)
+    if sections:
+        return nz.normalize_text(" ".join(sections)) or default
+
     return nz.normalize_text(re.sub(r"<[^>]+>", " ", raw)) or default
 
 

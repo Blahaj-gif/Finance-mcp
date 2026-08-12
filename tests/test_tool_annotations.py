@@ -189,3 +189,23 @@ def test_the_tool_list_stays_within_a_reasonable_context_budget():
     })) for t in _tools())
     assert total < 45_000, f"tools/list is {total} characters"
 
+
+
+def test_the_readme_states_the_real_read_only_count():
+    """
+    The README and the awesome-list entry both quote this ratio, and both said
+    "35 of 39" for a day after three tools were removed. A number in prose
+    drifts silently; deriving it from the server is the only way it stays true.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    match = re.search(r"\*\*(\d+) of\s*\n?(\d+) are annotated read-only", readme)
+    assert match, "the README no longer states the read-only ratio"
+
+    tools = _tools()
+    read_only = sum(1 for t in tools if t.annotations.readOnlyHint)
+    assert (int(match.group(1)), int(match.group(2))) == (read_only, len(tools)), (
+        f"README says {match.group(1)} of {match.group(2)}; "
+        f"the server registers {read_only} of {len(tools)}")
