@@ -136,3 +136,51 @@ def test_annotating_never_stops_the_server_from_starting():
         "should decline rather than raise when a loop is already running")
     # And the tools are still there afterwards.
     assert len(_tools()) >= 39
+
+
+def test_no_tool_declares_the_boilerplate_output_schema():
+    """
+    Every tool here returns markdown prose, and FastMCP infers
+    {"result": {"type": "string"}} from the `-> str` annotation -- then honours
+    it by sending the payload a second time as structuredContent.
+
+    Measured on get_ohlcv before this was dropped: 657 characters of content
+    and 690 of an identical copy. 105% overhead on every call, plus 4,641
+    characters of the same boilerplate across tools/list. A schema saying "this
+    returns a string" is what the annotation already said.
+    """
+    for tool in _tools():
+        assert tool.output_schema is None, (
+            f"{tool.name} declares an output schema; its responses will be "
+            "sent twice")
+
+
+def test_a_response_is_not_sent_twice():
+    import asyncio as _asyncio
+
+    async def call():
+        return await srv.mcp._call_tool_mcp(
+            "get_journal_summary", {})          # local-only: no network
+
+    result = _asyncio.run(call())
+    structured = getattr(result, "structuredContent", None)
+    assert structured is None, (
+        "structuredContent duplicates the text content verbatim")
+
+
+def test_the_tool_list_stays_within_a_reasonable_context_budget():
+    """
+    A client pays for this on every conversation before a question is asked.
+    It was 41,832 characters; the boilerplate schemas were an eighth of that.
+    This is a ceiling, not a target -- but a fortieth tool with a 900-character
+    description should have to be a deliberate choice.
+    """
+    import json as _json
+
+    total = sum(len(_json.dumps({
+        "name": t.name, "description": t.description,
+        "inputSchema": t.parameters,
+        "annotations": t.annotations.model_dump() if t.annotations else None,
+    })) for t in _tools())
+    assert total < 45_000, f"tools/list is {total} characters"
+

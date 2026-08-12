@@ -3716,6 +3716,19 @@ def annotate_tools():
     annotated = 0
     for tool in tools:
         name = tool.name
+
+        # Every tool here returns markdown prose. FastMCP infers an output
+        # schema from the `-> str` annotation -- {"result": {"type": "string"}}
+        # -- and then honours it by sending the payload a second time as
+        # structuredContent. Measured on get_ohlcv: 657 characters of content
+        # and 690 of an identical copy, 105% overhead on every call, plus 4,641
+        # characters of the same boilerplate schema repeated across tools/list.
+        #
+        # None of it carries information a reader does not already have. A
+        # schema saying "this returns a string" is what the type annotation
+        # said, and the copy is the copy. Dropped, which also drops the
+        # duplicate: no declared schema, no structured content.
+        tool.output_schema = None
         write = WRITING_TOOLS.get(name)
         tool.annotations = ToolAnnotations(
             title=name.replace("_", " ").strip().title(),
