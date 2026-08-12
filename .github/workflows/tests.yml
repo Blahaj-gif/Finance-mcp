@@ -159,3 +159,62 @@ jobs:
           assert listing["packages"][0]["identifier"] == name
           print(f"server.json agrees with pyproject: {name} {version}")
           PY
+
+  docker:
+    # I could not test the Dockerfile where it was written -- no Docker on that
+    # machine -- so it is tested here instead. An untested Dockerfile in a repo
+    # is a promise to a stranger that nobody has checked, and a directory that
+    # builds it is exactly the stranger who finds out.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t finance-mcp:ci .
+
+      - name: It must start and answer introspection with no credentials at all
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            > handshake.jsonl
+          # --network none: introspection must not depend on reaching a broker,
+          # an exchange or the SEC. A server that needs the internet to list its
+          # own tools fails in a sandbox, which is where directories run it.
+          set +e
+          docker run --rm -i --network none finance-mcp:ci \
+            < handshake.jsonl > out.jsonl 2> err.txt
+          status=$?
+          set -e
+          echo "exit status: $status"
+          echo "--- stdout (first 400 bytes) ---"; head -c 400 out.jsonl || true
+          echo; echo "--- stderr (last 30 lines) ---"; tail -n 30 err.txt || true
+          echo "--------------------------------"
+          python - <<'PY'
+          import json
+          lines = [l for l in open("out.jsonl", encoding="utf-8") if l.strip()]
+          stray = [l[:80] for l in lines if not l.lstrip().startswith("{")]
+          assert not stray, f"non-JSON on stdout: {stray}"
+          assert lines, "the container wrote nothing to stdout; see stderr above"
+          tools = None
+          for line in lines:
+              message = json.loads(line)
+              if message.get("id") == 2:
+                  tools = message["result"]["tools"]
+          assert tools, f"no tools/list response among {len(lines)} messages"
+          assert len(tools) >= 39, f"only {len(tools)} tools registered"
+          print(f"{len(tools)} tools from the container, offline, stdout clean")
+          PY
+
+      - name: It must not run as root, and must carry no credentials
+        run: |
+          user=$(docker run --rm --entrypoint id finance-mcp:ci -un)
+          echo "runs as: $user"
+          test "$user" != "root"
+          # A key baked into a layer survives every `docker save` and every
+          # push to a public registry.
+          leaked=$(docker run --rm --entrypoint env finance-mcp:ci \
+                   | grep -iE 'APP_KEY|APP_SECRET|ACCESS_TOKEN|API_KEY' || true)
+          test -z "$leaked" || { echo "::error::credentials in the image: $leaked"; exit 1; }
+          echo "no credentials in the image environment"
