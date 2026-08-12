@@ -33,6 +33,18 @@ def _at(day, hour, minute=0, second=0):
 DAY = datetime.date(2026, 8, 12)
 
 
+@pytest.fixture(autouse=True)
+def _registered_quota(monkeypatch):
+    """
+    Pin the quota for every test here. Without this the cadence tests passed
+    only on a machine with a BLS key: unregistered is 25 queries a day, which
+    cannot pay for a window, so the window correctly refuses to open and the
+    assertions read as failures. CI has no key and caught it.
+    """
+    monkeypatch.setattr(ec.BLS_LIMITER, "daily_cap", 500)
+    monkeypatch.setattr(ec.BLS_LIMITER, "remaining_today", lambda: 500)
+
+
 # =====================================================================
 # The cadence, and why it is what it is
 # =====================================================================
@@ -53,12 +65,41 @@ def test_the_cadence_stays_inside_the_documented_rate_limit():
 def test_a_single_window_cannot_eat_the_day():
     """
     A flat 3s cadence across the full 21.5-minute window is 430 calls, 86% of
-    the daily quota, spent watching a release that may not have arrived. The
-    step down to 30s after two minutes is what makes the worst case affordable.
+    the registered quota, spent watching a release that may not have arrived.
+    The step down to 30s after two minutes is what makes the worst case
+    affordable.
     """
     assert ec.poll_budget() < 150, f"worst case is {ec.poll_budget()} calls"
-    reserve_survives = 500 - ec.poll_budget() > ec.QUOTA_RESERVE
-    assert reserve_survives, "a single late release would strand every other tool"
+    assert 500 - ec.poll_budget() > ec.quota_reserve(), (
+        "a single late release would strand every other tool")
+
+
+def test_polling_is_refused_on_a_quota_that_cannot_pay_for_it(monkeypatch):
+    """
+    Unregistered BLS is 25 queries a day and a window's worst case is ~106.
+    Opening one and running out partway would spend the day and still miss the
+    print. This must be a decision, not an accident of two constants -- the
+    reserve was once a flat 60, larger than the whole unregistered quota, so
+    the window never opened and nothing said why.
+    """
+    entries = [_entry(DAY)]
+
+    monkeypatch.setattr(ec.BLS_LIMITER, "daily_cap", 25)
+    monkeypatch.setattr(ec.BLS_LIMITER, "remaining_today", lambda: 25)
+    assert ec.can_afford_window() is False
+    assert ec.macro_ttl(entries, _at(DAY, 8, 30)) == ec.TTL_MACRO
+
+    monkeypatch.setattr(ec.BLS_LIMITER, "daily_cap", 500)
+    monkeypatch.setattr(ec.BLS_LIMITER, "remaining_today", lambda: 500)
+    assert ec.can_afford_window() is True
+    assert ec.macro_ttl(entries, _at(DAY, 8, 30)) == ec.TTL_MACRO_LIVE
+
+
+def test_the_reserve_scales_with_the_cap(monkeypatch):
+    monkeypatch.setattr(ec.BLS_LIMITER, "daily_cap", 500)
+    assert ec.quota_reserve() == 60
+    monkeypatch.setattr(ec.BLS_LIMITER, "daily_cap", 25)
+    assert ec.quota_reserve() == ec.QUOTA_RESERVE_FLOOR
 
 
 def test_the_window_opens_before_the_announced_instant_and_closes_after():
@@ -101,7 +142,7 @@ def test_the_window_closes_when_the_print_lands_not_when_the_timer_expires():
 def test_the_quota_reserve_stops_a_window_from_stranding_other_tools(monkeypatch):
     entries = [_entry(DAY)]
     monkeypatch.setattr(ec.BLS_LIMITER, "remaining_today",
-                        lambda: ec.QUOTA_RESERVE - 1)
+                        lambda: ec.quota_reserve() + 1)
     assert ec.macro_ttl(entries, _at(DAY, 8, 30)) == ec.TTL_MACRO
 
 

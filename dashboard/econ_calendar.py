@@ -515,10 +515,37 @@ FAST_WINDOW = datetime.timedelta(minutes=2)
 #: of detection latency in the uncommon case and takes the worst case to ~106.
 TTL_MACRO_LATE = 30
 
-#: Never open a window below this much remaining quota. A release is worth a
-#: handful of calls; it is not worth the reserve that keeps every other tool
-#: answering for the rest of the day.
-QUOTA_RESERVE = 60
+#: Quota kept back for everything else, as a fraction of the day's cap. Fixed
+#: at 60 this was larger than the entire unregistered quota of 25, so without a
+#: key the window silently never opened -- correct behaviour arrived at by
+#: accident, which is the kind that stops being correct when a constant moves.
+QUOTA_RESERVE_FRACTION = 0.12
+QUOTA_RESERVE_FLOOR = 5
+
+
+def quota_reserve():
+    """Calls kept back so a release cannot strand the rest of the day."""
+    cap = BLS_LIMITER.daily_cap
+    if cap is None:
+        return 0
+    return max(QUOTA_RESERVE_FLOOR, int(cap * QUOTA_RESERVE_FRACTION))
+
+
+def can_afford_window():
+    """
+    Whether today's remaining quota can pay for a whole release window and
+    still leave the reserve.
+
+    On an unregistered key this is always false: the cap is 25 queries a day
+    and a window's worst case is ~106. Polling a release is not something 25
+    queries can buy, and half-polling it -- opening the window then running out
+    partway -- would spend the day and still miss the print. A free registered
+    key raises the cap to 500 and makes it affordable.
+    """
+    remaining = BLS_LIMITER.remaining_today()
+    if remaining is None:
+        return True
+    return remaining - poll_budget() >= quota_reserve()
 
 
 def release_moment(entry):
@@ -621,8 +648,7 @@ def macro_ttl(entries, now=None, landed=False):
     window = release_window(entries, now)
     if window is None:
         return TTL_MACRO
-    remaining = BLS_LIMITER.remaining_today()
-    if remaining is not None and remaining <= QUOTA_RESERVE:
+    if not can_afford_window():
         return TTL_MACRO
 
     now = now or datetime.datetime.now(datetime.timezone.utc)
