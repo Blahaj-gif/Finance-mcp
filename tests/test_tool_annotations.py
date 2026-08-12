@@ -30,7 +30,7 @@ def test_every_registered_tool_is_annotated():
     tools = _tools()
     missing = [t.name for t in tools if not t.annotations]
     assert not missing, f"unannotated: {missing}"
-    assert len(tools) >= 39
+    assert len(tools) >= 36
 
 
 def test_the_only_destructive_tool_is_the_one_that_acts_on_the_market():
@@ -135,7 +135,7 @@ def test_annotating_never_stops_the_server_from_starting():
     assert asyncio.run(inside_a_loop()) == 0, (
         "should decline rather than raise when a loop is already running")
     # And the tools are still there afterwards.
-    assert len(_tools()) >= 39
+    assert len(_tools()) >= 36
 
 
 def test_no_tool_declares_the_boilerplate_output_schema():

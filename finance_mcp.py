@@ -307,7 +307,11 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
     except Exception as e:
         raise ToolError(f"Error executing market analysis: {e}") from e
 
-@mcp.tool()
+# Not registered as a tool. get_market_analysis computes the same indicators
+# and already takes include_verdict to choose between raw values and
+# interpretation, so this was a second door onto one room -- and one more
+# choice for a model to get wrong. It stays as the "technicals" section of
+# get_company_profile.
 def get_technical_indicators(symbol: str, interval: str = "D", count: int = 5) -> str:
     """
     Returns the latest calculated technical indicator values in markdown table format.
@@ -444,7 +448,7 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
     """
     Fetches raw OHLCV (Open, High, Low, Close, Volume) candlestick bars for a symbol.
     Use when you need the price series itself — to eyeball recent action or do your own
-    maths. For indicators use get_technical_indicators; for a verdict use get_market_analysis.
+    maths. For indicators and a reading of them use get_market_analysis.
     
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
@@ -1715,81 +1719,6 @@ def get_news(symbol: str, count: int = 10) -> str:
 
 # NOTE: get_earnings is defined once, in the TIER 2 section above. A second
 # definition used to live here and silently shadowed it.
-
-@mcp.tool()
-def get_insider_trades(symbol: str) -> str:
-    """
-    Recent insider transactions as Yahoo reports them — a quick summary view.
-
-    Prefer `get_insider_activity` for anything you will act on: it parses the Form 4
-    XML from SEC EDGAR directly, so it can tell an open-market purchase (code P) from
-    a grant or from shares withheld to pay tax on a vest, and it reports whether a
-    sale was pre-scheduled under a Rule 10b5-1 plan. Yahoo's table flattens all of
-    those into one "Transaction" column, which is how routine compensation mechanics
-    get reported as "insiders sold $X".
-
-    Args:
-        symbol: Stock ticker (e.g. AAPL, NVDA).
-    """
-    try:
-        tk = webull_client.yahoo_ticker(symbol)
-        df = tk.insider_transactions
-        if df is None or df.empty:
-            return f"No recent insider transactions found for {symbol}."
-
-        table = df.head(10).copy()
-        # Yahoo leaves several columns empty per row. `to_markdown` renders those
-        # as the literal string "nan", which sits in a money column looking like
-        # a value. Blank is the honest rendering of a field the source omitted.
-        table = table.where(pd.notna(table), "")
-        for col in table.columns:
-            if pd.api.types.is_numeric_dtype(df[col]):
-                table[col] = df[col].head(10).map(
-                    lambda v: "" if pd.isna(v) else f"{v:,.2f}".rstrip("0").rstrip("."))
-
-        out = f"### Insider Transactions for {symbol.upper()} — via Yahoo\n\n"
-        try:
-            out += table.to_markdown(index=False)
-        except Exception:
-            out += table.to_string(index=False)
-        out += ("\n\n*Yahoo's summary. Blank cells are fields Yahoo did not supply, not "
-                "zeros. For transaction codes, 10b5-1 plan status and filing timestamps, "
-                "use `get_insider_activity`, which reads the Form 4 XML itself.*")
-        return out
-    except Exception as e:
-        raise ToolError(f"Error fetching insider transactions for {symbol}: {e}") from e
-
-@mcp.tool()
-def get_sec_filings(symbol: str) -> str:
-    """
-    The most recent SEC filings for a company and their URLs — a filing index,
-    not the contents.
-
-    This is Yahoo's list of filings. For anything you will act on prefer
-    `read_filing` (fetches and sections a document from EDGAR itself),
-    `get_insider_activity` (parses Form 4 XML) or `get_company_financials`
-    (filed XBRL), all of which read the source rather than a summary of it.
-
-    Args:
-        symbol: Ticker symbol, e.g. AAPL or MU.
-    """
-    try:
-        tk = webull_client.yahoo_ticker(symbol)
-        filings = tk.sec_filings
-        if not filings:
-            return f"No SEC filings found for {symbol}."
-            
-        out = f"### Recent SEC Filings for {symbol.upper()}\n\n"
-        for idx, f in enumerate(filings[:10]):
-            title = f.get("title", f.get("type", "Unknown Filing"))
-            date_str = f.get("date", "")
-            link = f.get("edgarUrl", "#")
-            out += f"**{idx+1}. {title}**\n"
-            out += f"* Date: {date_str} • [EDGAR Link]({link})\n\n"
-        return out
-    except Exception as e:
-        raise ToolError(f"Error fetching SEC filings for {symbol}: {e}") from e
-
 
 # How much weight a section's numbers carry. Merging many sources into one
 # answer is only safe if this survives the merge -- otherwise a filed figure and

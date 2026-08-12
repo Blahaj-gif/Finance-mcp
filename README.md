@@ -8,10 +8,10 @@ An MCP server that gives an AI assistant read access to your real brokerage
 account and the market around it — and gives you, not the assistant, the only
 button that sends an order.
 
-41 tools over Webull, Saxo, IBKR, Yahoo Finance, SEC EDGAR, BLS, the Federal
+38 tools over Webull, Saxo, IBKR, Yahoo Finance, SEC EDGAR, BLS, the Federal
 Reserve and the BEA, plus a Streamlit dashboard that is the sole path to
 execution. The list is filtered to what your broker can actually serve, so a
-given account sees 39 or 40 of them.
+given account sees 36 or 37 of them.
 
 **The assistant can draft an order. It cannot place one.** Drafts go to a local
 queue; sending requires a broker preview and your click in the dashboard. That
@@ -81,7 +81,7 @@ adapter the protocol and the MCP tools report through.
 
 ### What works with which broker
 
-**31 of the 41 tools are broker-agnostic** — indicators, options, SEC filings,
+**28 of the 38 tools are broker-agnostic** — indicators, options, SEC filings,
 insider and institutional data, earnings, macro. They work the same whoever you
 clear through, though the *prices* underneath them now come from your broker
 where it serves bars (see below).

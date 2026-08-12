@@ -97,15 +97,36 @@ def test_trading_days_between_is_bounded():
     assert mc.trading_days_between(old, datetime.date(2026, 8, 7)) == 999
 
 
+# `sessions_stale` reckons in UTC. These used to build their reference from
+# `date.today()`, which is *local*, so east of UTC the two disagree for the
+# first hours of every day -- this suite failed at 07:38 in UTC+7 and passed
+# again by mid-morning, and CI runs in UTC so it would never have seen it.
+# Pinned to a fixed Thursday instead: what these assert is the arithmetic, not
+# what day it happens to be.
+STALE_NOW = datetime.date(2026, 8, 13)          # a Thursday, ordinary session
+
+
 def test_sessions_stale_treats_latest_session_as_fresh():
-    latest = mc.previous_trading_day(datetime.date.today() + datetime.timedelta(days=1))
-    assert mc.sessions_stale(latest) == 0
+    latest = mc.previous_trading_day(STALE_NOW + datetime.timedelta(days=1))
+    assert mc.sessions_stale(latest, now=STALE_NOW) == 0
 
 
 def test_sessions_stale_grows_one_per_session():
-    latest = mc.previous_trading_day(datetime.date.today() + datetime.timedelta(days=1))
+    latest = mc.previous_trading_day(STALE_NOW + datetime.timedelta(days=1))
     prior = mc.previous_trading_day(latest)
-    assert mc.sessions_stale(prior) == 1
+    assert mc.sessions_stale(prior, now=STALE_NOW) == 1
+
+
+def test_sessions_stale_does_not_depend_on_the_caller_timezone():
+    """
+    The bug this closes: the function's reference date came from UTC and the
+    test's came from the local clock. Anyone east of UTC saw a failure in their
+    morning that nobody west of it could reproduce.
+    """
+    friday = datetime.date(2026, 8, 14)
+    thursday = datetime.date(2026, 8, 13)
+    assert mc.sessions_stale(thursday, now=thursday) == 0
+    assert mc.sessions_stale(thursday, now=friday) == 1
 
 
 # =====================================================================

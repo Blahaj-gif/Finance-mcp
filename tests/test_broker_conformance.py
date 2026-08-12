@@ -1256,11 +1256,11 @@ def test_the_broker_agnostic_tools_outnumber_the_gated_ones():
     total = len(re.findall(
         r"\n(?:@mcp\.tool\(\)|@needs\([^)]*\))\n(?:@[\w.]+(?:\([^)]*\))?\n)*def \w+",
         source))
-    assert total == 41, f"tool count changed to {total}; the README says 41"
+    assert total == 38, f"tool count changed to {total}; the README says 38"
     assert len(srv.BROKER_TOOLS) == 10
     readme = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "README.md"), encoding="utf-8").read()
-    assert "31 of the 41" in readme, (
+    assert "28 of the 38" in readme, (
         "README no longer states how many tools work with any broker")
 
 
