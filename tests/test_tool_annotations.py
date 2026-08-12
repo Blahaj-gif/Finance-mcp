@@ -144,10 +144,15 @@ def test_no_tool_declares_the_boilerplate_output_schema():
     {"result": {"type": "string"}} from the `-> str` annotation -- then honours
     it by sending the payload a second time as structuredContent.
 
-    Measured on get_ohlcv before this was dropped: 657 characters of content
-    and 690 of an identical copy. 105% overhead on every call, plus 4,641
-    characters of the same boilerplate across tools/list. A schema saying "this
-    returns a string" is what the annotation already said.
+    Measured on the serialised result before this was dropped: +64% on a
+    114-character reply, +89% on get_ohlcv, +98% on get_data_sources. The
+    overhead approaches 100% as the payload grows and the fixed JSON envelope
+    stops diluting it -- an earlier note here said 105%, which compared the
+    structuredContent field against the raw text rather than against the
+    serialised content block, and no honest measurement exceeds 100% for a
+    verbatim copy. Plus 4,641 characters of the same boilerplate across
+    tools/list. A schema saying "this returns a string" is what the annotation
+    already said.
     """
     for tool in _tools():
         assert tool.output_schema is None, (

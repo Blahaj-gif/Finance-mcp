@@ -1762,8 +1762,16 @@ def get_insider_trades(symbol: str) -> str:
 @mcp.tool()
 def get_sec_filings(symbol: str) -> str:
     """
-    Fetches the most recent SEC filings (10-K, 10-Q, 8-K) and their URLs.
-    Provides raw access to corporate regulatory documents.
+    The most recent SEC filings for a company and their URLs — a filing index,
+    not the contents.
+
+    This is Yahoo's list of filings. For anything you will act on prefer
+    `read_filing` (fetches and sections a document from EDGAR itself),
+    `get_insider_activity` (parses Form 4 XML) or `get_company_financials`
+    (filed XBRL), all of which read the source rather than a summary of it.
+
+    Args:
+        symbol: Ticker symbol, e.g. AAPL or MU.
     """
     try:
         tk = webull_client.yahoo_ticker(symbol)
@@ -3720,9 +3728,13 @@ def annotate_tools():
         # Every tool here returns markdown prose. FastMCP infers an output
         # schema from the `-> str` annotation -- {"result": {"type": "string"}}
         # -- and then honours it by sending the payload a second time as
-        # structuredContent. Measured on get_ohlcv: 657 characters of content
-        # and 690 of an identical copy, 105% overhead on every call, plus 4,641
-        # characters of the same boilerplate schema repeated across tools/list.
+        # structuredContent, byte-identical to the text.
+        #
+        # Measured on the serialised JSON-RPC result: +64% on a 114-character
+        # reply, +89% on get_ohlcv, +98% on get_data_sources -- the overhead
+        # approaches 100% as the payload grows and the fixed envelope stops
+        # diluting it. Plus 4,641 characters of the same boilerplate schema
+        # repeated across tools/list.
         #
         # None of it carries information a reader does not already have. A
         # schema saying "this returns a string" is what the type annotation
