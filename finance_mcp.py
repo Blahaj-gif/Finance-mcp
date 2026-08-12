@@ -26,6 +26,7 @@ import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
 import dashboard.capabilities as capabilities
 import dashboard.live_signals as live_signals
+import dashboard.macro_watch as macro_watch
 import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 
@@ -3086,6 +3087,9 @@ def get_data_sources() -> str:
             out += (f"* To register: visit {econ_calendar.BLS_REGISTRATION_URL}, confirm by email, "
                     "then put the key in `.env` as `BLS_API_KEY=...` and restart. "
                     "Re-run this tool to confirm it was accepted.\n")
+        out += "\n"
+
+        out += f"* {macro_watch.status()}\n"
         out += "\n"
 
         out += "**SEC EDGAR** — filings and filed financials\n"
