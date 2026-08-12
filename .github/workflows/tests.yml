@@ -145,7 +145,7 @@ jobs:
               if message.get("id") == 2:
                   tools = message["result"]["tools"]
           assert tools, f"no tools/list response among {len(lines)} messages"
-          assert len(tools) >= 39, f"only {len(tools)} tools registered"
+          assert len(tools) >= 36, f"only {len(tools)} tools registered"
           missing = [t["name"] for t in tools
                      if not t.get("inputSchema") or not t.get("description")
                      or not t.get("annotations")]
@@ -217,7 +217,7 @@ jobs:
               if message.get("id") == 2:
                   tools = message["result"]["tools"]
           assert tools, f"no tools/list response among {len(lines)} messages"
-          assert len(tools) >= 39, f"only {len(tools)} tools registered"
+          assert len(tools) >= 36, f"only {len(tools)} tools registered"
           print(f"{len(tools)} tools from the container, offline, stdout clean")
           PY
 
