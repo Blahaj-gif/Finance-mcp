@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "hypothesis"]
 # The floor is the release that introduced `width=`. The dashboard used
 # `use_container_width=`, which Streamlit documented for removal after
 # 2025-12-31 -- a date already past -- against an unpinned dependency, so a

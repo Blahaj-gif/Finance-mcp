@@ -2983,6 +2983,22 @@ def get_institutional_holdings(institution: str, limit: int = 25, source: str = 
         except Exception:
             table_str = table.to_string(index=False)
 
+        # What the filing says about itself, checked against what we parsed. A
+        # dropped row makes a portfolio look smaller, and a smaller number is
+        # indistinguishable from a smaller portfolio unless something says so.
+        rec = data.get("reconciliation") or {}
+        if rec.get("reconciled") is True:
+            recon_note = ("\n\n*Reconciled against the filing's own cover page: "
+                          + "; ".join(rec.get("checks", [])) + ".*")
+        elif rec.get("reconciled") is False:
+            recon_note = ("\n\n**Does not reconcile against the filing's own cover "
+                          "page:** " + "; ".join(rec.get("problems", []))
+                          + ". Treat these figures as suspect.")
+        else:
+            recon_note = ("\n\n*Not reconciled — "
+                          + str(rec.get("unavailable") or "no declared totals")
+                          + ".*")
+
         shown = sum(h["value"] or 0 for h in data["holdings"])
         return (f"### 13F Holdings — {data['institution']}\n"
                 f"*Quarter ending {data['period']} · filed {data['filed']} · "
@@ -2990,7 +3006,7 @@ def get_institutional_holdings(institution: str, limit: int = 25, source: str = 
                 + table_str
                 + f"\n\n*Top {len(rows)} shown = {shown / total * 100:.1f}% of reported value. "
                   "13F covers US-listed long equity and options only — it excludes cash, bonds, "
-                  "shorts and foreign listings, so it is not the whole portfolio.*")
+                  "shorts and foreign listings, so it is not the whole portfolio.*") + recon_note
     except ToolError:
         raise
     except Exception as e:

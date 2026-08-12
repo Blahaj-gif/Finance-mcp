@@ -590,6 +590,173 @@ def parse_13f(xml: str) -> list:
     return rows
 
 
+# ---------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------
+# Every parser here was verified by its author reading its output, which is the
+# weakest kind of verification: a parse that silently drops rows produces a
+# smaller number, and a smaller number looks exactly like a smaller portfolio.
+#
+# Several SEC forms declare their own totals on a cover page the parser does not
+# read. That is an independent statement of the same fact, filed by the same
+# people, and comparing the two turns "we parsed it" into "we parsed it and it
+# adds up". It is the only check available that is not this project marking its
+# own homework.
+#
+# Reconciliation never rewrites a parse. It reports.
+
+
+def _tag(xml: str, name: str):
+    m = re.search(r"<(?:\w+:)?%s>(.*?)</(?:\w+:)?%s>" % (name, name), xml or "",
+                  re.S | re.I)
+    return m.group(1).strip() if m else None
+
+
+def fetch_13f_summary(cik: str, accession: str) -> dict:
+    """
+    The totals a 13F declares about itself, from its cover page.
+
+    `tableEntryTotal` counts **rows in the information table**, not distinct
+    issuers -- a manager filing the same holding through several subsidiaries
+    files a row each. Berkshire's 2026-Q1 filing declares 90 entries across 29
+    issuers. Comparing against a de-duplicated position count would report a
+    false discrepancy on exactly the filings most worth reading.
+    """
+    doc = _fetch(f"{_filing_dir(cik, accession)}/primary_doc.xml")
+    entries = nz.parse_number(_tag(doc, "tableEntryTotal"))
+    value = nz.parse_number(_tag(doc, "tableValueTotal"))
+    omitted = (_tag(doc, "isConfidentialOmitted") or "").strip().lower()
+    return {
+        "entries": int(entries) if entries is not None else None,
+        "value": value,
+        "quarter": _tag(doc, "reportCalendarOrQuarter"),
+        "other_managers": nz.parse_number(_tag(doc, "otherIncludedManagersCount")),
+        # A filing may lawfully withhold positions pending a confidential
+        # treatment request. Then the table is *meant* to be short, and calling
+        # that a parse failure would be the tool misreading the law.
+        "confidential_omitted": omitted in ("true", "1", "y", "yes"),
+        "source": "cover page (primary_doc.xml)",
+    }
+
+
+def reconcile_13f(holdings: list, summary: dict, total_value=None) -> dict:
+    """
+    Check a parsed information table against what the filing says about itself.
+
+    Returns a verdict rather than raising: a holdings list that does not
+    reconcile is still worth showing, provided the reader is told. Silence is
+    the only unacceptable outcome.
+    """
+    summary = summary or {}
+    rows = sum(int(h.get("rows", 1) or 1) for h in holdings or [])
+    value = total_value
+    if value is None:
+        value = sum(float(h.get("value") or 0) for h in holdings or [])
+
+    checks, problems = [], []
+
+    declared_entries = summary.get("entries")
+    if declared_entries is None:
+        checks.append("entry count: not declared")
+    elif rows == declared_entries:
+        checks.append(f"entry count: {rows} = {declared_entries} declared")
+    elif summary.get("confidential_omitted"):
+        checks.append(
+            f"entry count: {rows} of {declared_entries} declared — the rest are "
+            "withheld under a confidential treatment request, which is lawful "
+            "and not a parse failure")
+    else:
+        problems.append(
+            f"entry count: parsed {rows} rows, filing declares {declared_entries}")
+
+    declared_value = summary.get("value")
+    if declared_value is None:
+        checks.append("total value: not declared")
+    else:
+        # Whole dollars on modern filings, thousands before 2013. A tolerance
+        # of one dollar per row absorbs rounding without hiding a dropped
+        # position, which would be off by a position's worth.
+        tolerance = max(1.0, rows * 1.0)
+        if abs(value - declared_value) <= tolerance:
+            checks.append(f"total value: {value:,.0f} = {declared_value:,.0f} declared")
+        else:
+            gap = value - declared_value
+            problems.append(
+                f"total value: parsed {value:,.0f}, filing declares "
+                f"{declared_value:,.0f} (off by {gap:,.0f})")
+
+    return {
+        "reconciled": not problems,
+        "checks": checks,
+        "problems": problems,
+        "rows": rows,
+        "declared_entries": declared_entries,
+        "parsed_value": value,
+        "declared_value": declared_value,
+    }
+
+
+def reconcile_form144(parsed: dict) -> dict:
+    """
+    A Form 144 states shares to be sold and an aggregate market value. Their
+    ratio is an implied price, and a price that is not a plausible share price
+    means one of the two was parsed with the wrong magnitude -- the failure
+    mode a units mistake produces, and one that reads as a real number.
+    """
+    shares = parsed.get("shares_to_sell") or parsed.get("shares")
+    value = parsed.get("aggregate_market_value") or parsed.get("market_value")
+    if not shares or not value:
+        return {"reconciled": None, "checks": ["no shares/value pair to check"],
+                "problems": []}
+    implied = float(value) / float(shares)
+    if 0.01 <= implied <= 100_000:
+        return {"reconciled": True, "implied_price": implied,
+                "checks": [f"implied price {implied:,.2f} per share is plausible"],
+                "problems": []}
+    return {"reconciled": False, "implied_price": implied, "checks": [],
+            "problems": [f"implied price {implied:,.2f} per share is not a "
+                         "plausible share price; shares or value is off by a "
+                         "factor"]}
+
+
+def reconcile_form4(parsed: dict) -> dict:
+    """
+    Form 4 states the holding remaining after each transaction. Running the
+    transactions forward and landing somewhere else means shares or the
+    acquired/disposed flag was misread -- and the sign of an insider trade is
+    the whole point of reading one.
+    """
+    # Non-derivative rows only: a derivative holding (options, RSUs) carries its
+    # own running balance, and chaining the two together compares a share count
+    # against an option count -- a mismatch that means nothing.
+    transactions = [t for t in (parsed.get("transactions") or [])
+                    if not t.get("derivative")
+                    and t.get("shares") is not None
+                    and t.get("shares_after") is not None]
+    if len(transactions) < 2:
+        return {"reconciled": None, "problems": [],
+                "checks": ["needs two or more transactions with running totals"]}
+
+    problems = []
+    for earlier, later in zip(transactions, transactions[1:]):
+        signed = float(later["shares"] or 0)
+        if str(later.get("direction", "")).lower().startswith("dispos"):
+            signed = -signed
+        expected = float(earlier["shares_after"] or 0) + signed
+        actual = float(later["shares_after"] or 0)
+        # Fractional holdings exist; a share and a half of drift does not.
+        if abs(expected - actual) > 1.5:
+            problems.append(
+                f"running total: {earlier['shares_after']:,.4g} "
+                f"{'-' if signed < 0 else '+'} {abs(signed):,.4g} should be "
+                f"{expected:,.4g}, filing says {actual:,.4g}")
+    return {
+        "reconciled": not problems,
+        "checks": [f"{len(transactions)} transactions chained"] if not problems else [],
+        "problems": problems,
+    }
+
+
 def institutional_holdings(symbol_or_cik: str, limit: int = 25) -> dict:
     """
     Latest 13F-HR holdings for an institution, largest position first.
@@ -650,9 +817,20 @@ def institutional_holdings(symbol_or_cik: str, limit: int = 25) -> dict:
     holdings = sorted(merged.values(), key=lambda h: h.get("value") or 0, reverse=True)
     total = sum(h.get("value") or 0 for h in holdings)
 
+    # Check the parse against what the filing declares about itself. Never
+    # fatal: a holdings list that does not reconcile is still worth showing,
+    # provided the reader is told. Silence is the only unacceptable outcome.
+    try:
+        summary = fetch_13f_summary(cik, f.get("accession", ""))
+        reconciliation = reconcile_13f(holdings, summary, total_value=total)
+    except Exception as exc:
+        reconciliation = {"reconciled": None, "checks": [], "problems": [],
+                          "unavailable": f"cover page unreadable: {str(exc)[:120]}"}
+
     return {"institution": name, "cik": cik, "filed": f.get("filing_date"),
             "period": f.get("report_date"), "positions": len(holdings),
-            "total_value": total, "holdings": holdings[:limit]}
+            "total_value": total, "holdings": holdings[:limit],
+            "reconciliation": reconciliation}
 
 
 # =====================================================================
