@@ -175,13 +175,58 @@ def record(broker, results: dict):
     _save(data)
 
 
+def missing_credentials(broker):
+    """
+    Why this broker cannot be used at all, or None if it can be — or might.
+
+    The gap this closes: every adapter constructs lazily, by design, so that
+    listing tools never opens a socket. `WebullBroker()` therefore succeeds
+    perfectly for someone with an empty `.env`, and capability was keyed on
+    *which broker is configured* rather than on *whether it can be used*. A user
+    with no credentials was offered the account tools and every one of them
+    failed with the same missing-key error -- the exact thing this module exists
+    to stop, arrived at from the other direction.
+
+    Adapters answer with `credentials_present()`, and are allowed three answers
+    rather than two:
+
+      True  -- the secrets needed to authenticate are present. Says nothing
+               about whether they are *correct*; that costs a network call.
+      False -- they are definitely absent. The tools are hidden.
+      None  -- cannot be known offline. IBKR's local gateway holds the session
+               after a browser login and wants no token at all, so an empty
+               environment is a perfectly normal configuration for it.
+
+    `None` and a missing method both fail **open**, because the cost of the two
+    mistakes is not symmetric: hiding a tool that would have worked leaves a
+    user with no way to find out why, while offering one that fails leaves them
+    with an error message that names the fix.
+    """
+    check = getattr(broker, "credentials_present", None)
+    if check is None:
+        return None
+    try:
+        present = check()
+    except Exception:
+        return None                      # unknowable is not the same as absent
+    if present is False:
+        return getattr(broker, "credentials_hint", None) or (
+            f"no credentials are configured for {getattr(broker, 'name', 'this broker')}")
+    return None
+
+
 def effective(broker) -> frozenset:
     """
     What to actually offer: declared, minus anything a probe caught refusing.
 
     A probe never *adds* a capability. If the adapter does not implement it,
     the API supporting it changes nothing.
+
+    Nothing at all is offered by a broker that has no credentials to offer it
+    with -- see `missing_credentials`.
     """
+    if missing_credentials(broker):
+        return frozenset()
     out = set(declared(broker))
     for name, result in probed(broker).items():
         if isinstance(result, dict) and result.get("status") == "refused":
@@ -196,6 +241,15 @@ def unprobed(broker) -> frozenset:
 
 def summary(broker) -> str:
     """One block a person or a model can read, for get_data_sources."""
+    unconfigured = missing_credentials(broker)
+    if unconfigured:
+        # Deliberately not phrased as a capability list. "Capabilities: none"
+        # reads as a broker that cannot do anything, when the truth is a broker
+        # that has not been asked yet, and the difference is one env var.
+        return (f"* Broker `{getattr(broker, 'name', '?')}` is not configured — "
+                f"{unconfigured}. Its account and order tools are not registered; "
+                "everything that does not need a broker — prices, indicators, "
+                "options, filings, macro — is unaffected.\n")
     have = sorted(effective(broker))
     missing = sorted(set(declared(broker)) - set(have))
     never = sorted(unprobed(broker))

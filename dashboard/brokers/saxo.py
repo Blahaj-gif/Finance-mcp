@@ -113,6 +113,20 @@ class SaxoBroker:
         # network, and so a verifier can log every exchange.
         self._session = session or self._http
 
+    credentials_hint = ("SAXO_ACCESS_TOKEN is not set — obtain one through the "
+                        "OAuth flow (see saxo_authorization_url) and put it in .env")
+
+    def credentials_present(self) -> bool:
+        """
+        Whether there is a token to send. Offline, and no claim that it is live.
+
+        Saxo's tokens expire in twenty minutes on sim and an hour on live, so a
+        present token is frequently a dead one. That is a runtime failure with a
+        clear message; an absent token is a configuration state, and only the
+        second one should hide tools.
+        """
+        return bool(self._token)
+
     # -- transport --------------------------------------------------------
     def _http(self, method: str, url: str, body=None, headers=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None

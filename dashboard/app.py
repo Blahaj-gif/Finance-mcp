@@ -39,6 +39,17 @@ def render_html(markup: str, target=None):
         sink.markdown(cleaned, unsafe_allow_html=True)
 
 
+class _NoBrokerConfigured(Exception):
+    """
+    This machine has no broker credentials — a configuration, not a failure.
+
+    Kept distinct from every other exception the account panels can raise so
+    that "you have not added a key yet" never renders in the same red box as
+    "the broker rejected the request". The two need opposite reactions and the
+    old handler gave them the same one.
+    """
+
+
 def _money(value) -> str:
     """
     A large USD figure at a glance. $109,420,000,000 is exact and unreadable;
@@ -77,6 +88,8 @@ from dashboard import edgar_forms
 from dashboard import earnings
 from dashboard import highlight
 from dashboard import live_signals
+from dashboard import brokers
+from dashboard import capabilities
 import indicators
 import backtester
 import forecaster
@@ -489,6 +502,26 @@ if _needs_briefing:
                 st.rerun()
         st.caption("Shown once per account. Everything except order submission "
                    "works before you acknowledge it. Revoke from the Data tab.")
+
+# ------------------------------------------------------------------
+# Is there a broker at all?
+# ------------------------------------------------------------------
+# Six of the nine tabs need no credentials, and two of the three that do used to
+# behave as though the answer were always yes: Portfolio answered a missing key
+# with a red box containing a broker exception, and Execution told someone with
+# an empty .env that approving here "spends real money" at a real account it
+# could not reach. Both read as broken software rather than an unconfigured one.
+#
+# Computed once, above the tabs, because Execution renders before Portfolio and
+# both need it. `brokers` and `capabilities` are imported at the top of the file
+# so a stale module fails loudly at import rather than being swallowed here.
+try:
+    _broker_unconfigured = capabilities.missing_credentials(brokers.get())
+except Exception:
+    # Unknowable fails open, exactly as it does in the MCP server: attempt the
+    # call and let the real error speak, rather than claim a configuration
+    # problem that may not exist.
+    _broker_unconfigured = None
 
 # ------------------------------------------------------------------
 # Dashboard Tab Selection
@@ -1021,7 +1054,17 @@ with tab_execution:
     # This is the one screen where a click spends money. Which account surface
     # that click reaches is stated here, not left to be inferred from a .env
     # file the person approving may never have opened.
-    if IS_PAPER:
+    # The unconfigured case first, because the LIVE banner below is the default
+    # and it told someone with an empty .env that approving here "reaches the
+    # real account and spends real money" -- alarming, and not true of a machine
+    # that cannot reach an account at all.
+    if _broker_unconfigured:
+        st.info(
+            f"No broker is connected — {_broker_unconfigured}. Drafts still "
+            "queue here and an assistant can still write them, which is a "
+            "useful way to see what it would have done. Nothing can be "
+            "previewed or sent until credentials are in `.env`.")
+    elif IS_PAPER:
         st.info(f"PAPER — orders are simulated against Webull's sandbox "
                 f"({webull_client.SANDBOX_ENDPOINTS[webull_client.WEBULL_REGION_ID.lower()]['api']}). "
                 "Nothing here reaches a real account.")
@@ -1230,13 +1273,25 @@ with tab_execution:
 with tab_portfolio:
     st.markdown("### Portfolio & Analytics")
     st.markdown("Live account balance and open positions straight from Webull.")
-    
+
+    # Six of the nine tabs work with no credentials at all, and this is where a
+    # first-time visitor lands to find that out. It used to answer with a red
+    # box containing a broker exception -- which reads as "this software is
+    # broken" rather than "this one tab needs a key you have not added". Say
+    # which key, say where it goes, and say what already works without it.
     col_port1, col_port2 = st.columns([4, 1])
     with col_port2:
-        if st.button("Refresh Portfolio"):
+        if st.button("Refresh Portfolio", disabled=bool(_broker_unconfigured)):
             st.rerun()
-            
+
     try:
+        # Raised rather than branched, so the unconfigured panel is one more
+        # handler on the existing try instead of a re-indent of the 300 lines
+        # below it. `st.stop()` is not an option here: it halts the whole
+        # script run, which would take Events, Alerts and Data down with it.
+        if _broker_unconfigured:
+            raise _NoBrokerConfigured(_broker_unconfigured)
+
         from webull.core.client import ApiClient
         from webull.trade.trade_client import TradeClient
         import webull_client
@@ -1549,6 +1604,21 @@ with tab_portfolio:
             with st.expander("Raw broker payload"):
                 st.json(positions)
             
+    except _NoBrokerConfigured as e:
+        with st.container(border=True):
+            st.markdown("#### No broker is connected")
+            st.markdown(
+                f"This tab reads a real account, so it needs credentials: "
+                f"**{e}**.\n\n"
+                "Put them in the `.env` file beside this project — run "
+                "`finance-mcp-config` to print its path — then reload. The keys "
+                "stay on this machine and are sent nowhere but the broker.")
+            st.markdown(
+                "**Working right now, without any of that:** Charts, Backtest, "
+                "Signals, Alerts, Journal and Events. Prices come from the public "
+                "feed, filings from SEC EDGAR, and the macro calendar from the "
+                "issuing agencies. Execution needs a broker for the same reason "
+                "this tab does.")
     except Exception as e:
         st.error(f"Failed to fetch Webull account data: {str(e)}")
 

@@ -166,6 +166,40 @@ class IbkrBroker:
         # network, and so a verifier can log every exchange.
         self._session = session or self._http
 
+    def credentials_present(self):
+        """
+        Unknowable offline for the gateway, knowable for the hosted endpoint.
+
+        IBKR has two deployments and they disagree about what a credential even
+        is. The local Client Portal Gateway holds the session itself after a
+        browser login and wants **no** Authorization header, so an entirely
+        empty environment is its normal, correct configuration -- answering
+        False there would hide the tools of a user whose setup is fine. The
+        hosted endpoint does take a bearer token, and its absence is decidable.
+
+        So: None (fail open) unless the base URL is IBKR's own hosted host and
+        no token was supplied.
+
+        The test is on the host specifically, not on "differs from the default".
+        Running the gateway somewhere other than localhost -- a headless box, a
+        container, another port -- is an ordinary setup, and a rule keyed on
+        "not the default URL" would hide the tools of everyone who did that
+        while their configuration was entirely correct.
+        """
+        try:
+            host = urllib.parse.urlsplit(self.base).hostname or ""
+        except ValueError:
+            return None
+        host = host.lower()
+        if (host == "ibkr.com" or host.endswith(".ibkr.com")) and not self._token:
+            return False
+        return None
+
+    credentials_hint = ("IBKR_BASE_URL points at IBKR's hosted API but "
+                        "IBKR_ACCESS_TOKEN is not set — only the Client Portal "
+                        "Gateway authenticates without a token, by holding the "
+                        "browser session itself")
+
     # -- transport --------------------------------------------------------
     def _ssl_context(self):
         """

@@ -93,6 +93,24 @@ class Broker(Protocol):
         """"LIVE" or "PAPER" -- the word a human sees before approving."""
         ...
 
+    def credentials_present(self):
+        """
+        Whether this adapter has what it needs to authenticate. **Offline.**
+
+        Optional, and optional in a load-bearing way: an adapter that does not
+        implement it fails open and keeps every tool it declares. Three answers,
+        not two -- True, False, or None for "cannot be known without a network
+        call", which is the honest answer for a deployment whose session lives
+        somewhere this process cannot see.
+
+        Never a claim that the credentials are *valid*. Only that they exist.
+        Validity costs a request, and this is called while listing tools, which
+        must work with no network at all.
+
+        See dashboard/capabilities.missing_credentials for what is done with it.
+        """
+        ...
+
     def primary_account_id(self) -> str:
         """
         The account every other call is scoped to.

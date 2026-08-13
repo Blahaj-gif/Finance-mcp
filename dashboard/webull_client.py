@@ -884,13 +884,19 @@ def _price_sources(symbol: str, interval: str, count: int) -> list:
     goes through the protocol. Yahoo is always last and always announces itself
     -- a fallback that does not say it is one is how a divergence between two
     feeds went unnoticed for months.
+
+    A broker with no credentials is not tried at all. It is not a fallback if
+    the first source could never have worked: every price lookup paid for a
+    round trip that was going to fail, and printed a scary line about the feed
+    failing to a user whose only mistake was not having an account.
     """
     sources = []
     broker_name = os.getenv("FINANCE_BROKER", "webull").strip().lower()
 
     if broker_name == "webull":
-        sources.append((lambda: get_webull_data(symbol, interval, count),
-                        "Webull OpenAPI"))
+        if WEBULL_APP_KEY and WEBULL_APP_SECRET:
+            sources.append((lambda: get_webull_data(symbol, interval, count),
+                            "Webull OpenAPI"))
     else:
         def broker_bars():
             from dashboard import brokers, capabilities
@@ -900,10 +906,19 @@ def _price_sources(symbol: str, interval: str, count: int) -> list:
                     f"{adapter.name} does not serve historical bars here")
             return adapter.history_bars(symbol, interval, count)
 
-        sources.append((broker_bars, f"{broker_name.upper()} broker feed"))
+        try:
+            from dashboard import brokers, capabilities
+            configured = not capabilities.missing_credentials(brokers.get())
+        except Exception:
+            configured = True            # unknowable fails open, as everywhere else
+        if configured:
+            sources.append((broker_bars, f"{broker_name.upper()} broker feed"))
 
+    # Not labelled a fallback when it is the only source. Someone running
+    # without a broker is on Yahoo by design, and calling their normal feed a
+    # fallback reads as a degradation they should fix.
     sources.append((lambda: get_yfinance_data(symbol, interval, count),
-                    "Yahoo Finance (Fallback)"))
+                    "Yahoo Finance (Fallback)" if sources else "Yahoo Finance"))
     return sources
 
 
@@ -1132,9 +1147,23 @@ def fallback_warning(source: str) -> str:
 
     Callers that drop the source string are how a silent source substitution
     goes unnoticed, so make it impossible to render the data without it.
+
+    A substitution and a configuration are not the same event, and the wording
+    used to conflate them. Someone who never connected a broker was told on
+    every single price that "the primary Webull feed did not serve this
+    request" -- an alarm about the absence of something they had not asked for,
+    on what is their normal and correct feed. `_price_sources` only omits the
+    "(Fallback)" suffix when no broker feed was in the running at all, so the
+    label is enough to tell the two apart.
     """
-    if source.startswith("Webull OpenAPI"):
+    if source.startswith("Webull OpenAPI") or source.endswith(" broker feed"):
         return ""
+    if "(Fallback)" not in source:
+        return (
+            f"> Data source: {source}. No broker is configured, so prices come "
+            "from the public feed — which is what the broker-free setup is meant "
+            "to do. Connect a broker if you want its own quotes.\n\n"
+        )
     return (
         f"> **Warning — data source: {source}.** The primary Webull feed did not serve this "
         "request. Values may differ from the broker's own quotes.\n\n"

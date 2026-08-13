@@ -33,9 +33,29 @@ class WebullBroker:
         _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER,
         _cap.HISTORY_BARS))
 
+    #: What to tell someone whose environment is empty. Named, not generic:
+    #: "no credentials" sends people to the README, a variable name sends them
+    #: to the line they have to write.
+    credentials_hint = ("WEBULL_APP_KEY and WEBULL_APP_SECRET are not set in "
+                        ".env or the environment")
+
     def __init__(self):
         self._trade_client = None
         self._account_id = None
+
+    def credentials_present(self) -> bool:
+        """
+        Whether this adapter has the secrets to authenticate with. Offline.
+
+        Reads the module attributes rather than `os.getenv` for two reasons: the
+        `.env` file is loaded into them once at import, so they are the settled
+        answer rather than whichever of two sources happened to win; and a test
+        can substitute them without touching the process environment.
+
+        True is not a claim that the keys are *valid* -- finding that out costs
+        a signed request, and this is called while listing tools.
+        """
+        return bool(_wc.WEBULL_APP_KEY and _wc.WEBULL_APP_SECRET)
 
     # -- plumbing ---------------------------------------------------------
     def _client(self):

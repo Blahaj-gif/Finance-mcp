@@ -33,6 +33,28 @@ so this fails before a build rather than after a publish.
 
 ## Unreleased
 
+- **A broker-free install no longer advertises tools that cannot work.**
+  Capability gating asked which broker was configured, never whether it could be
+  used. Every adapter constructs lazily so that listing tools opens no socket,
+  so an empty `.env` built a `WebullBroker` quite happily and all eight account
+  and order tools were offered — measured against a fresh environment holding
+  only `SEC_USER_AGENT`, four zero-argument ones failed identically with the
+  same missing-key error. Adapters now answer `credentials_present()` offline,
+  and a broker with none registers nothing: **28 tools that all work, rather
+  than 36 of which eight cannot.** The answer may be `None` for a deployment
+  whose session lives somewhere this process cannot see — IBKR's Client Portal
+  Gateway holds a browser login and takes no token — and `None` fails open,
+  because hiding a working tool leaves nobody a way to find out why.
+- **Yahoo is a feed, not an apology.** With no broker configured, the price path
+  no longer tries a request that could never have succeeded, and the banner says
+  "no broker is configured, so prices come from the public feed" instead of
+  warning that the primary Webull feed failed to serve a request the user never
+  made. A Saxo or IBKR user served by their own broker is no longer warned about
+  Webull either.
+- **The dashboard's Portfolio tab has an empty state.** It answered a missing
+  key with a red box containing a broker exception, which reads as broken
+  software rather than an unconfigured one. It now names the variable, says
+  where it goes, and lists the six tabs that already work without it.
 - **MCP tool annotations.** Tools declare `readOnlyHint`; `cancel_order`
   is the only `destructiveHint`. The safety claim was prose a model had to be
   persuaded by; it is now machine-readable, and a client that respects

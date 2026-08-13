@@ -105,6 +105,14 @@ jobs:
           PY
 
       - name: The installed server must answer a real MCP handshake
+        # Placeholder broker credentials, because the account tools do not
+        # register without any (dashboard/capabilities.missing_credentials) and
+        # this step is asserting the full tool surface. Fake by design: no call
+        # made here authenticates, and the container step below deliberately
+        # runs with nothing at all to check the other side of the same gate.
+        env:
+          WEBULL_APP_KEY: ci-placeholder-not-a-real-credential
+          WEBULL_APP_SECRET: ci-placeholder-not-a-real-credential
         run: |
           cd /tmp
           printf '%s\n' \
@@ -217,8 +225,22 @@ jobs:
               if message.get("id") == 2:
                   tools = message["result"]["tools"]
           assert tools, f"no tools/list response among {len(lines)} messages"
-          assert len(tools) >= 36, f"only {len(tools)} tools registered"
-          print(f"{len(tools)} tools from the container, offline, stdout clean")
+          # This container has no credentials of any kind, which is the whole
+          # point of the step -- so it must NOT be offered the broker tools.
+          # Four of them used to be, and all four failed identically when
+          # called. The count is lower here than in the wheel step above by
+          # exactly that set, and that difference is the assertion.
+          names = {t["name"] for t in tools}
+          offered = names & {"get_account_info", "get_open_positions",
+                             "get_open_orders", "get_portfolio_risk",
+                             "draft_order", "preview_order", "cancel_order",
+                             "calculate_position_size"}
+          assert not offered, (
+              f"broker tools offered to a container with no credentials: "
+              f"{sorted(offered)}")
+          assert len(tools) >= 28, f"only {len(tools)} tools registered"
+          print(f"{len(tools)} broker-free tools from the container, offline, "
+                "stdout clean")
           PY
 
       - name: It must not run as root, and must carry no credentials

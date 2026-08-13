@@ -1222,8 +1222,13 @@ def test_capability_records_are_keyed_per_entity_not_per_broker_name(tmp_path, m
                         lambda: str(tmp_path / "caps.json"))
     from dashboard.brokers.ibkr import IbkrBroker
 
+    # The hosted endpoint is given a token because this test is about *keys*,
+    # not about configuration: an unconfigured broker offers nothing at all
+    # (capabilities.missing_credentials), which would make the assertion below
+    # pass or fail for a reason that has nothing to do with fingerprinting.
     gateway = IbkrBroker(base_url="https://localhost:5000/v1/api", account_id="U1")
-    hosted = IbkrBroker(base_url="https://api.ibkr.com/v1/api", account_id="U1")
+    hosted = IbkrBroker(base_url="https://api.ibkr.com/v1/api", account_id="U1",
+                        access_token="t")
     assert capabilities.fingerprint(gateway) != capabilities.fingerprint(hosted)
 
     other_account = IbkrBroker(base_url="https://localhost:5000/v1/api", account_id="DU9")
