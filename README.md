@@ -11,7 +11,8 @@ button that sends an order.
 38 tools over Webull, Saxo, IBKR, Yahoo Finance, SEC EDGAR, BLS, the Federal
 Reserve and the BEA, plus a Streamlit dashboard that is the sole path to
 execution. The list is filtered to what your broker can actually serve, so a
-given account sees 36 or 37 of them.
+given account sees 36 or 37 of them — and **28 with no broker at all**, which
+is a working install, not a broken one.
 
 **The assistant can draft an order. It cannot place one.** Drafts go to a local
 queue; sending requires a broker preview and your click in the dashboard. That
@@ -50,7 +51,7 @@ holidays are collapsed, so there are no blank stretches.*
 | **OS** | Windows, macOS, Linux. Desktop alerts use each platform's own notifier (PowerShell, `osascript`, `notify-send`) and report plainly when a machine has none, which a headless server will not. |
 | **Install** | `uv tool install --with streamlit --with plotly hitl-finance-mcp`, then point your client at the `finance-mcp` command. Scripted installers (`install.sh`, `install.bat`) add a config template, client registration and a shortcut. |
 | **Python** | 3.10 or 3.12, both covered by CI. `uv` is installed for you. |
-| **Broker** | Webull, Saxo or IBKR — set `FINANCE_BROKER`. Only Webull has been run against a live account. Without any broker, prices fall back to Yahoo and the account and order tools are not registered; the other 31 still work. |
+| **Broker** | Optional. Webull, Saxo or IBKR — set `FINANCE_BROKER`. Only Webull has been run against a live account. With no broker credentials, the account and order tools are not registered, prices come from Yahoo, and the other 28 tools work normally. |
 | **Keys** | `SEC_USER_AGENT` (a contact address, required by the SEC for filings) and optionally a free BLS key. |
 
 **[Installation guide →](https://github.com/Blahaj-gif/Finance-mcp/blob/master/INSTALL.md)** — fifteen minutes, most of it waiting for
@@ -101,6 +102,16 @@ they need:
 cancels by its own order id and documents no mapping from ours, so a cancel tool
 would be a tool that can only refuse. An unusable tool costs a model context on every
 request and is one more wrong choice available to it.
+
+The same rule covers having no broker. Every adapter constructs lazily, so that
+listing tools never opens a socket — which meant an empty `.env` built a broker
+object quite happily and all eight account tools were offered to someone who
+could not call a single one of them. They now check for their credentials
+offline and register only if they have them, so a broker-free install lists 28
+tools that all work rather than 36 of which eight cannot. Where the answer is
+genuinely unknowable offline — IBKR's Client Portal Gateway holds the session
+after a browser login and wants no token at all — the tools stay registered,
+because hiding a tool that would have worked leaves nobody a way to find out why.
 
 Two more exist only for the broker that has them: **`saxo_corporate_actions`**
 (dividends, splits, tenders and their election deadlines — Saxo is the only one

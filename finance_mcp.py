@@ -96,6 +96,19 @@ def needs(capability):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             if capability not in _active_capabilities():
+                # Two different situations wear the same absence, and sending
+                # someone hunting for an entitlement they already have because
+                # the real answer was a missing env var is the worse of the two
+                # failures. Say which one it is.
+                try:
+                    unconfigured = capabilities.missing_credentials(brokers.get())
+                except Exception:
+                    unconfigured = None
+                if unconfigured:
+                    raise ToolError(
+                        f"`{fn.__name__}` needs a configured broker: "
+                        f"{unconfigured}. The broker-agnostic tools — prices, "
+                        "indicators, filings, options, macro — work without one.")
                 raise ToolError(
                     f"`{fn.__name__}` needs the {capability!r} capability, which "
                     f"the configured broker ({brokers.active_name()}) does not "

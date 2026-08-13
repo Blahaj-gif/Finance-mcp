@@ -19,6 +19,23 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Placeholder broker credentials, set before any test module imports the server.
+#
+# The tool surface is gated on whether the configured broker has credentials at
+# all (dashboard/capabilities.missing_credentials), and that is decided once, at
+# import, because `tools/list` must not open a socket. So without this a CI
+# runner with an empty environment registers 28 tools and a developer with a
+# real `.env` registers 36, and every count assertion in the suite measures the
+# machine rather than the server.
+#
+# Deliberately fake, and it does not matter that they are: nothing in the suite
+# makes an authenticated call. `envfile.load_env` never overwrites a variable
+# already in the environment, so these also stop a real `.env` from reaching the
+# tests -- which is the point. A test that wants the unconfigured case patches
+# `webull_client.WEBULL_APP_KEY` directly (see test_credential_gating.py).
+os.environ.setdefault("WEBULL_APP_KEY", "test-app-key-not-a-real-credential")
+os.environ.setdefault("WEBULL_APP_SECRET", "test-app-secret-not-a-real-credential")
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolated_bar_cache():

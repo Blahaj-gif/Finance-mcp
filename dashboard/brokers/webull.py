@@ -33,9 +33,32 @@ class WebullBroker:
         _cap.PREVIEW_ORDER, _cap.PLACE_ORDER, _cap.CANCEL_ORDER,
         _cap.HISTORY_BARS))
 
+    #: What to tell someone whose environment is empty. Named, not generic:
+    #: "no credentials" sends people to the README, a variable name sends them
+    #: to the line they have to write.
+    credentials_hint = ("WEBULL_APP_KEY and WEBULL_APP_SECRET are not set in "
+                        ".env or the environment")
+
     def __init__(self):
         self._trade_client = None
         self._account_id = None
+
+    def credentials_present(self) -> bool:
+        """
+        Whether this adapter has the secrets to authenticate with. Offline.
+
+        Delegates to `webull_client.have_credentials` rather than reading the
+        live pair here, because paper is a separate Webull deployment with its
+        own registry and takes its own key pair when one is set. Checking only
+        the live names would have hidden all eight account tools from someone
+        running paper with paper keys -- a working setup, told it had no
+        credentials. One resolution rule, in one place, beside the code that
+        authenticates with it.
+
+        True is not a claim that the keys are *valid* -- finding that out costs
+        a signed request, and this is called while listing tools.
+        """
+        return _wc.have_credentials()
 
     # -- plumbing ---------------------------------------------------------
     def _client(self):

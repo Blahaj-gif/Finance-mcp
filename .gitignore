@@ -52,3 +52,8 @@ tools/
 # -A` from being committed, and it had already shipped in four releases via
 # setuptools, which globs the filesystem rather than the git index.
 dashboard/*.json
+
+# A separate project with its own git repository, kept in this folder for
+# convenience only. Nothing in Finance MCP imports it and nothing in it imports
+# Finance MCP.
+crossfoot/

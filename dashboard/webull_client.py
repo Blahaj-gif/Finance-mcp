@@ -98,6 +98,33 @@ def is_paper_environment() -> bool:
     return WEBULL_ENVIRONMENT.strip().lower() in PAPER_ALIASES
 
 
+def resolved_credentials():
+    """
+    The (key, secret) pair this process would actually authenticate with.
+
+    The sandbox is a separate Webull deployment with its own registry, so paper
+    takes its own pair when one is set and falls back to the live pair when it
+    is not. That rule lived only inside `get_api_client`, which was fine while
+    nothing else needed to know — and stopped being fine the moment tool
+    registration started asking whether credentials exist at all. A gate that
+    checked only the live pair would have hidden all eight account tools from
+    someone running paper with paper keys, which is a working setup.
+
+    One rule, one place. Either half may be empty; the caller decides what that
+    means.
+    """
+    if is_paper_environment():
+        return (WEBULL_PAPER_APP_KEY or WEBULL_APP_KEY,
+                WEBULL_PAPER_APP_SECRET or WEBULL_APP_SECRET)
+    return WEBULL_APP_KEY, WEBULL_APP_SECRET
+
+
+def have_credentials() -> bool:
+    """Whether there is anything to authenticate with. Offline; no network call."""
+    key, secret = resolved_credentials()
+    return bool(key and secret)
+
+
 def environment_label() -> str:
     """A word for the surface being traded, for anywhere a human can see it."""
     return "PAPER" if is_paper_environment() else "LIVE"
@@ -714,10 +741,7 @@ def get_api_client():
         # environment". Paper therefore takes its own pair when one is set, and
         # says exactly this when it is not, rather than leaving someone to read
         # a bare 401 as "my key is wrong".
-        app_key, app_secret = WEBULL_APP_KEY, WEBULL_APP_SECRET
-        if is_paper_environment():
-            app_key = WEBULL_PAPER_APP_KEY or WEBULL_APP_KEY
-            app_secret = WEBULL_PAPER_APP_SECRET or WEBULL_APP_SECRET
+        app_key, app_secret = resolved_credentials()
 
         if not app_key or not app_secret:
             raise ValueError("Webull App Key and App Secret must be set in .env")
@@ -884,13 +908,19 @@ def _price_sources(symbol: str, interval: str, count: int) -> list:
     goes through the protocol. Yahoo is always last and always announces itself
     -- a fallback that does not say it is one is how a divergence between two
     feeds went unnoticed for months.
+
+    A broker with no credentials is not tried at all. It is not a fallback if
+    the first source could never have worked: every price lookup paid for a
+    round trip that was going to fail, and printed a scary line about the feed
+    failing to a user whose only mistake was not having an account.
     """
     sources = []
     broker_name = os.getenv("FINANCE_BROKER", "webull").strip().lower()
 
     if broker_name == "webull":
-        sources.append((lambda: get_webull_data(symbol, interval, count),
-                        "Webull OpenAPI"))
+        if have_credentials():
+            sources.append((lambda: get_webull_data(symbol, interval, count),
+                            "Webull OpenAPI"))
     else:
         def broker_bars():
             from dashboard import brokers, capabilities
@@ -900,10 +930,19 @@ def _price_sources(symbol: str, interval: str, count: int) -> list:
                     f"{adapter.name} does not serve historical bars here")
             return adapter.history_bars(symbol, interval, count)
 
-        sources.append((broker_bars, f"{broker_name.upper()} broker feed"))
+        try:
+            from dashboard import brokers, capabilities
+            configured = not capabilities.missing_credentials(brokers.get())
+        except Exception:
+            configured = True            # unknowable fails open, as everywhere else
+        if configured:
+            sources.append((broker_bars, f"{broker_name.upper()} broker feed"))
 
+    # Not labelled a fallback when it is the only source. Someone running
+    # without a broker is on Yahoo by design, and calling their normal feed a
+    # fallback reads as a degradation they should fix.
     sources.append((lambda: get_yfinance_data(symbol, interval, count),
-                    "Yahoo Finance (Fallback)"))
+                    "Yahoo Finance (Fallback)" if sources else "Yahoo Finance"))
     return sources
 
 
@@ -1132,9 +1171,23 @@ def fallback_warning(source: str) -> str:
 
     Callers that drop the source string are how a silent source substitution
     goes unnoticed, so make it impossible to render the data without it.
+
+    A substitution and a configuration are not the same event, and the wording
+    used to conflate them. Someone who never connected a broker was told on
+    every single price that "the primary Webull feed did not serve this
+    request" -- an alarm about the absence of something they had not asked for,
+    on what is their normal and correct feed. `_price_sources` only omits the
+    "(Fallback)" suffix when no broker feed was in the running at all, so the
+    label is enough to tell the two apart.
     """
-    if source.startswith("Webull OpenAPI"):
+    if source.startswith("Webull OpenAPI") or source.endswith(" broker feed"):
         return ""
+    if "(Fallback)" not in source:
+        return (
+            f"> Data source: {source}. No broker is configured, so prices come "
+            "from the public feed — which is what the broker-free setup is meant "
+            "to do. Connect a broker if you want its own quotes.\n\n"
+        )
     return (
         f"> **Warning — data source: {source}.** The primary Webull feed did not serve this "
         "request. Values may differ from the broker's own quotes.\n\n"
