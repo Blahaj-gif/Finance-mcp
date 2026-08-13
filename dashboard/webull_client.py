@@ -98,6 +98,33 @@ def is_paper_environment() -> bool:
     return WEBULL_ENVIRONMENT.strip().lower() in PAPER_ALIASES
 
 
+def resolved_credentials():
+    """
+    The (key, secret) pair this process would actually authenticate with.
+
+    The sandbox is a separate Webull deployment with its own registry, so paper
+    takes its own pair when one is set and falls back to the live pair when it
+    is not. That rule lived only inside `get_api_client`, which was fine while
+    nothing else needed to know — and stopped being fine the moment tool
+    registration started asking whether credentials exist at all. A gate that
+    checked only the live pair would have hidden all eight account tools from
+    someone running paper with paper keys, which is a working setup.
+
+    One rule, one place. Either half may be empty; the caller decides what that
+    means.
+    """
+    if is_paper_environment():
+        return (WEBULL_PAPER_APP_KEY or WEBULL_APP_KEY,
+                WEBULL_PAPER_APP_SECRET or WEBULL_APP_SECRET)
+    return WEBULL_APP_KEY, WEBULL_APP_SECRET
+
+
+def have_credentials() -> bool:
+    """Whether there is anything to authenticate with. Offline; no network call."""
+    key, secret = resolved_credentials()
+    return bool(key and secret)
+
+
 def environment_label() -> str:
     """A word for the surface being traded, for anywhere a human can see it."""
     return "PAPER" if is_paper_environment() else "LIVE"
@@ -714,10 +741,7 @@ def get_api_client():
         # environment". Paper therefore takes its own pair when one is set, and
         # says exactly this when it is not, rather than leaving someone to read
         # a bare 401 as "my key is wrong".
-        app_key, app_secret = WEBULL_APP_KEY, WEBULL_APP_SECRET
-        if is_paper_environment():
-            app_key = WEBULL_PAPER_APP_KEY or WEBULL_APP_KEY
-            app_secret = WEBULL_PAPER_APP_SECRET or WEBULL_APP_SECRET
+        app_key, app_secret = resolved_credentials()
 
         if not app_key or not app_secret:
             raise ValueError("Webull App Key and App Secret must be set in .env")
@@ -894,7 +918,7 @@ def _price_sources(symbol: str, interval: str, count: int) -> list:
     broker_name = os.getenv("FINANCE_BROKER", "webull").strip().lower()
 
     if broker_name == "webull":
-        if WEBULL_APP_KEY and WEBULL_APP_SECRET:
+        if have_credentials():
             sources.append((lambda: get_webull_data(symbol, interval, count),
                             "Webull OpenAPI"))
     else:

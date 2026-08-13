@@ -47,15 +47,18 @@ class WebullBroker:
         """
         Whether this adapter has the secrets to authenticate with. Offline.
 
-        Reads the module attributes rather than `os.getenv` for two reasons: the
-        `.env` file is loaded into them once at import, so they are the settled
-        answer rather than whichever of two sources happened to win; and a test
-        can substitute them without touching the process environment.
+        Delegates to `webull_client.have_credentials` rather than reading the
+        live pair here, because paper is a separate Webull deployment with its
+        own registry and takes its own key pair when one is set. Checking only
+        the live names would have hidden all eight account tools from someone
+        running paper with paper keys -- a working setup, told it had no
+        credentials. One resolution rule, in one place, beside the code that
+        authenticates with it.
 
         True is not a claim that the keys are *valid* -- finding that out costs
         a signed request, and this is called while listing tools.
         """
-        return bool(_wc.WEBULL_APP_KEY and _wc.WEBULL_APP_SECRET)
+        return _wc.have_credentials()
 
     # -- plumbing ---------------------------------------------------------
     def _client(self):

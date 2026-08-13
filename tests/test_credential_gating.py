@@ -27,6 +27,18 @@ from dashboard.brokers.saxo import SaxoBroker
 from dashboard.brokers.webull import WebullBroker
 
 
+@pytest.fixture(autouse=True)
+def _no_paper_pair(monkeypatch):
+    """
+    Paper has its own key pair, and a developer's real `.env` may hold one.
+    Without clearing it, "no credentials" tests would pass on CI and fail on
+    the machine that has a sandbox key -- measuring the machine again.
+    """
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_KEY", "", raising=False)
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_SECRET", "", raising=False)
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "live", raising=False)
+
+
 # --------------------------------------------------------------------------
 # The gate itself
 # --------------------------------------------------------------------------
@@ -245,3 +257,58 @@ def test_a_brokers_own_feed_is_not_warned_about():
     about a broker they never configured.
     """
     assert wc.fallback_warning("SAXO broker feed") == ""
+
+
+# --------------------------------------------------------------------------
+# Paper, which is a separate Webull deployment with its own registry
+# --------------------------------------------------------------------------
+
+def test_paper_keys_alone_count_as_credentials(monkeypatch):
+    """
+    The gap the audit found in this very change. Paper takes its own key pair
+    when one is set, so a gate that checked only the live names would have
+    hidden all eight account tools from a working paper setup.
+    """
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_KEY", "pk")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_SECRET", "ps")
+
+    assert wc.have_credentials() is True
+    assert WebullBroker().credentials_present() is True
+    assert capabilities.GATING <= capabilities.effective(WebullBroker())
+
+
+def test_paper_falls_back_to_the_live_pair(monkeypatch):
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "k")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "s")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_KEY", "")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_SECRET", "")
+    assert wc.resolved_credentials() == ("k", "s")
+
+
+def test_live_never_reaches_for_the_paper_pair(monkeypatch):
+    """
+    Production credentials authenticate against the sandbox as 401, and the
+    reverse is just as wrong. The fallback runs one way only.
+    """
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "live")
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_KEY", "pk")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_SECRET", "ps")
+    assert wc.have_credentials() is False
+
+
+def test_the_price_feed_uses_the_same_rule_as_the_gate(monkeypatch):
+    """Two copies of this rule would drift, and the drift would be silent."""
+    monkeypatch.setenv("FINANCE_BROKER", "webull")
+    monkeypatch.setattr(wc, "WEBULL_ENVIRONMENT", "paper")
+    monkeypatch.setattr(wc, "WEBULL_APP_KEY", "")
+    monkeypatch.setattr(wc, "WEBULL_APP_SECRET", "")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_KEY", "pk")
+    monkeypatch.setattr(wc, "WEBULL_PAPER_APP_SECRET", "ps")
+    labels = [label for _, label in wc._price_sources("AAPL", "D", 10)]
+    assert labels == ["Webull OpenAPI", "Yahoo Finance (Fallback)"]
