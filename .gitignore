@@ -60,3 +60,7 @@ crossfoot/
 # Its successor. Same reason: a separate repository that happens to live in
 # this working tree.
 pgsow/
+
+# The watcher log. What it holds is a record of what this machine saw, not
+# something to publish, and it grows.
+dashboard/events.jsonl

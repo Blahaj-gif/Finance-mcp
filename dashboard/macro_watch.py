@@ -168,16 +168,47 @@ def run_watcher_loop(sleeper=time.sleep, once=False):
             landed, _ = watch_release(entry)
             WATCH_STATE["watching"] = None
             if landed:
+                at = datetime.datetime.now(datetime.timezone.utc)
                 WATCH_STATE["last_landed"] = {
                     "release": entry.get("release"),
                     "period": entry.get("reference_period"),
-                    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "at": at.isoformat(),
                 }
+                # Recorded and shown. Until now a landing updated a dict that
+                # only the dashboard read, so the one moment this loop exists
+                # for reached nobody who was not already looking at it.
+                _announce(entry, at)
         except Exception as exc:
             WATCH_STATE["last_error"] = str(exc)[:200]
             sleeper(60)
         if once:
             return
+
+
+def _announce(entry, at):
+    """Write the landing to the event log and show it. Never raises.
+
+    Imported here rather than at module top because `events` and the notifier
+    are both optional at runtime -- a headless box has no notification daemon,
+    and this loop must keep running on one.
+    """
+    try:
+        from . import events
+        try:
+            from .alert_manager import send_notification as notifier
+        except Exception:
+            notifier = None
+        release = entry.get("release", "release")
+        period = entry.get("reference_period", "")
+        events.record(
+            kind=events.MACRO,
+            title=f"{release} printed",
+            key=f"macro:{release}:{period or at.date().isoformat()}",
+            detail=f"reference period {period}" if period else "",
+            notifier=notifier,
+        )
+    except Exception as exc:
+        print(f"[macro-watch] could not record landing: {exc}", file=sys.stderr)
 
 
 def enabled() -> bool:

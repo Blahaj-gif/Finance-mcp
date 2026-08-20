@@ -30,6 +30,8 @@ import dashboard.live_signals as live_signals
 import dashboard.macro_watch as macro_watch
 import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
+import dashboard.events as events
+import dashboard.watchers as watchers
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -3479,6 +3481,13 @@ def get_updates(symbols: str | list[str] = "", since: str = "24h",
 
         span_hours = (now - cutoff).total_seconds() / 3600.0
         span = (f"{span_hours:.0f}h" if span_hours < 48 else f"{span_hours / 24:.1f}d")
+
+        # Anything the watcher already saw, first. It polls EDGAR and Treasury
+        # on their own schedule and writes what landed, so if it has been
+        # running this is instant and exact rather than a diff recomputed from
+        # scratch. If it has not, the log is empty and everything below still
+        # answers the question the slow way.
+        watched = events.recent(since=cutoff.isoformat())
         tickers = symbols.split(",") if isinstance(symbols, str) else list(symbols)
         tickers = [t.strip().upper() for t in tickers if str(t).strip()][:12]
 
@@ -3593,6 +3602,15 @@ def get_updates(symbols: str | list[str] = "", since: str = "24h",
                         f"({quiet}).\n\n")
             if skipped:
                 problems.append("no bars inside the window for " + ", ".join(skipped))
+
+        # The watcher's own record, if it was running. These are things that
+        # already reached the person at the moment they happened; repeating them
+        # here is what makes the assistant's first turn after an event as
+        # informed as the desktop notification was.
+        if watched:
+            found_anything = True
+            out += (f"**Seen live by the watcher ({len(watched)})** — recorded when they landed, not rediscovered now\n\n```\n"
+                    + events.describe(watched) + "\n```\n\n")
 
         if not found_anything:
             out += ("**Nothing new in this window.** That is a result, not an error — "
