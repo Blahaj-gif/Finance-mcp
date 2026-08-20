@@ -63,7 +63,8 @@ MAX_SLEEP = 15 * 60
 FILING_POLL = int(os.getenv("FINANCE_FILING_POLL_SECONDS", "60"))
 
 WATCH_STATE = {"running": False, "watching": None, "last_landed": None,
-               "calls": 0, "windows": 0, "last_error": None}
+               "calls": 0, "windows": 0, "last_error": None,
+               "polls_ok": 0, "polls_failed": 0, "filings_seen": 0}
 
 
 def poll_interval(seconds_since_release: float) -> float:
@@ -148,6 +149,14 @@ def run_watcher_loop(sleeper=time.sleep, once=False):
     WATCH_STATE["running"] = True
     print(f"[macro-watch] started; release windows polled closely, filings every "
           f"{FILING_POLL}s", file=sys.stderr)
+    # SEC refuses traffic that does not declare who is sending it, and the
+    # placeholder default is refused with a 403 on every single call. Said once
+    # at startup, where it can still be acted on, rather than discovered as an
+    # absence of filings that never arrive.
+    if "@" not in os.getenv("SEC_USER_AGENT", ""):
+        print("[macro-watch] SEC_USER_AGENT is not set to a contact address; "
+              "SEC will answer every filing request with 403 and no filing "
+              "will ever be seen", file=sys.stderr)
     while True:
         try:
             entries, _ = ec.upcoming_releases(days_ahead=7, days_back=0)
@@ -210,9 +219,26 @@ def _sleep_in_pieces(seconds, sleeper):
         try:
             from . import watchers
             from .alert_manager import send_notification as notifier
-            watchers.poll_once(notifier=notifier)
+            result = watchers.poll_once(notifier=notifier)
+            # `poll_once` returns its failures rather than raising them, so
+            # that one dead source cannot take the release window down with
+            # it. That return value used to be discarded here, which turned a
+            # deliberate non-raise into a genuine silence: without
+            # SEC_USER_AGENT set, SEC answers every request with 403, the
+            # watcher reported no error, and `status()` said it was running.
+            # A watcher that has never successfully read anything must not
+            # look identical to one that is simply having a quiet day.
+            if result["errors"]:
+                WATCH_STATE["last_error"] = (
+                    f"filing poll: {'; '.join(result['errors'][:2])[:160]}")
+                WATCH_STATE["polls_failed"] += 1
+            else:
+                WATCH_STATE["last_error"] = None
+                WATCH_STATE["polls_ok"] += 1
+                WATCH_STATE["filings_seen"] += len(result["new"])
         except Exception as exc:
             WATCH_STATE["last_error"] = f"filing poll: {str(exc)[:160]}"
+            WATCH_STATE["polls_failed"] += 1
 
 
 def _announce(entry, at):
@@ -278,6 +304,15 @@ def status() -> str:
         parts.append(f"watching {watching} now")
     if landed:
         parts.append(f"last landed {landed['release']} ({landed['period']})")
+    polled = WATCH_STATE["polls_ok"] + WATCH_STATE["polls_failed"]
+    if polled:
+        parts.append(
+            f"{WATCH_STATE['polls_ok']}/{polled} filing polls succeeded, "
+            f"{WATCH_STATE['filings_seen']} seen")
+    if WATCH_STATE["polls_ok"] == 0 and WATCH_STATE["polls_failed"] > 0:
+        # The state worth spelling out: it is running and it has never once
+        # read anything.
+        parts.append("no filing poll has ever succeeded")
     if WATCH_STATE["last_error"]:
         parts.append(f"last error {WATCH_STATE['last_error']}")
     return " — ".join(parts)

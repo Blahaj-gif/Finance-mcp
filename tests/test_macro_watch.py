@@ -200,3 +200,60 @@ def test_the_status_line_reports_what_it_has_spent():
         assert "2 windows" in text and "7 API calls" in text
     finally:
         mw.WATCH_STATE["running"] = False
+
+
+# ---------------------------------------------------------------------------
+# A watcher that has never read anything must not look like a quiet one.
+
+def _reset_watch_state():
+    mw.WATCH_STATE.update({"running": True, "watching": None, "last_landed": None,
+                           "calls": 0, "windows": 0, "last_error": None,
+                           "polls_ok": 0, "polls_failed": 0, "filings_seen": 0})
+
+
+def test_a_filing_poll_that_fails_is_reported_rather_than_discarded(monkeypatch):
+    """`poll_once` returns its errors instead of raising, and the loop threw
+    them away — so SEC answering 403 to every call looked like a quiet day."""
+    _reset_watch_state()
+    from dashboard import watchers
+    monkeypatch.setattr(
+        watchers, "poll_once",
+        lambda **kw: {"new": [], "errors": ["HTTP Error 403: Forbidden"]})
+
+    mw._sleep_in_pieces(mw.FILING_POLL, lambda _s: None)
+
+    assert mw.WATCH_STATE["polls_failed"] == 1
+    assert mw.WATCH_STATE["polls_ok"] == 0
+    assert "403" in (mw.WATCH_STATE["last_error"] or "")
+    assert "no filing poll has ever succeeded" in mw.status()
+
+
+def test_a_successful_poll_clears_the_error_and_counts_what_it_saw(monkeypatch):
+    _reset_watch_state()
+    from dashboard import watchers
+    monkeypatch.setattr(
+        watchers, "poll_once",
+        lambda **kw: {"new": [{"kind": "filing"}, {"kind": "filing"}], "errors": []})
+
+    mw._sleep_in_pieces(mw.FILING_POLL, lambda _s: None)
+
+    assert mw.WATCH_STATE["polls_ok"] == 1
+    assert mw.WATCH_STATE["filings_seen"] == 2
+    assert mw.WATCH_STATE["last_error"] is None
+    assert "1/1 filing polls succeeded" in mw.status()
+    assert "no filing poll has ever succeeded" not in mw.status()
+
+
+def test_a_recovered_source_stops_being_reported_as_broken(monkeypatch):
+    _reset_watch_state()
+    from dashboard import watchers
+    monkeypatch.setattr(
+        watchers, "poll_once",
+        lambda **kw: {"new": [], "errors": ["HTTP Error 503"]})
+    mw._sleep_in_pieces(mw.FILING_POLL, lambda _s: None)
+    assert mw.WATCH_STATE["last_error"] is not None
+
+    monkeypatch.setattr(watchers, "poll_once", lambda **kw: {"new": [], "errors": []})
+    mw._sleep_in_pieces(mw.FILING_POLL, lambda _s: None)
+    assert mw.WATCH_STATE["last_error"] is None
+    assert "1/2 filing polls succeeded" in mw.status()
