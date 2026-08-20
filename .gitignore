@@ -57,3 +57,6 @@ dashboard/*.json
 # convenience only. Nothing in Finance MCP imports it and nothing in it imports
 # Finance MCP.
 crossfoot/
+# Its successor. Same reason: a separate repository that happens to live in
+# this working tree.
+pgsow/

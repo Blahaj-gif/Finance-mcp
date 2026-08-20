@@ -23,6 +23,28 @@ Every tool declares this to the client rather than only to the reader: **32 of
 resting order). A client that respects MCP annotations can wave through a price
 lookup and stop on the one call that reaches the market.
 
+### What this can and cannot do with your account
+
+Asking an unknown repository for brokerage credentials is the hardest trust ask
+in software, so the answer is here rather than forty paragraphs down.
+
+- **There is no execution path on the tool side.** Not gated, not guarded —
+  absent. `draft_order` writes to a local queue. Sending needs a broker preview
+  and your click in the dashboard, which no prompt can reach.
+- **Twenty-eight of the 38 tools never touch a broker.** SEC filings, macro,
+  indicators, options maths, earnings. With no credentials at all you get those
+  twenty-eight, and that is a working install rather than a degraded one.
+- **Two of the three adapters have never been run.** Saxo and Interactive
+  Brokers are built from published API references and have not been executed
+  against a live or paper account. They say so in every tool output that uses
+  them. Only Webull has been run against a real account.
+- **The dashboard's submit button is Webull-only.** The MCP tools route through
+  the broker protocol; that one button does not, yet.
+- **Use a read-scoped key where your broker offers one.** Nothing outside the
+  dashboard needs write access.
+
+1,408 tests across 34 files, and CI runs them on every push.
+
 ---
 
 ![Charts tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/charts.png)
