@@ -94,13 +94,21 @@ def test_edgar_entries_become_events_keyed_on_the_accession_number():
 
 
 def test_a_filing_seen_twice_across_restarts_notifies_once():
-    """The feed still holds it next minute. The key is what makes that safe."""
+    """The feed still holds it next minute. The key is what makes that safe.
+
+    Seeded first, because a fresh log is silent by design — see
+    `test_the_first_poll_records_everything_and_notifies_for_none_of_it`. What
+    is under test here is the restart, not the install.
+    """
+    fetch = lambda url: ATOM if "browse-edgar" in url else "{}"
+    events.record(events.FILING, "seed", key="seed")   # the log is no longer new
+
     shown = []
     for _ in range(3):
         watchers.poll_once(form_types=("8-K",),
                            notifier=lambda t, m: shown.append(t),
-                           fetch=lambda url: ATOM if "browse-edgar" in url else "{}")
-    assert len(shown) == 2
+                           fetch=fetch)
+    assert len(shown) == 2, f"two filings, each notified once: {shown}"
 
 
 BUYBACK = json.dumps({"data": [{
@@ -182,3 +190,31 @@ def test_a_failing_filing_source_does_not_break_the_wait(monkeypatch):
     macro_watch._sleep_in_pieces(60, lambda s: slept.append(s))
     assert slept == [30, 30]
     assert "SEC 503" in macro_watch.WATCH_STATE["last_error"]
+
+
+def test_the_first_poll_records_everything_and_notifies_for_none_of_it():
+    """Measured, not imagined: eighteen seconds against the live feeds produced
+    fifty-six notifications on a fresh log, every one correct and useless."""
+    shown = []
+    first = watchers.poll_once(
+        form_types=("8-K",),
+        notifier=lambda t, m: shown.append(t),
+        fetch=lambda url: ATOM if "browse-edgar" in url else "{}",
+    )
+    assert len(first["new"]) == 2, "everything in the feed is recorded"
+    assert shown == [], "and none of it is shown, because there was no history"
+
+
+def test_the_second_poll_notifies_for_what_is_actually_new():
+    shown = []
+    fetch = lambda url: ATOM if "browse-edgar" in url else "{}"
+    watchers.poll_once(form_types=("8-K",), notifier=lambda t, m: shown.append(t), fetch=fetch)
+    assert shown == []
+
+    more = ATOM.replace("0007654321-26-000002", "0009999999-26-000009")
+    watchers.poll_once(
+        form_types=("8-K",),
+        notifier=lambda t, m: shown.append(t),
+        fetch=lambda url: more if "browse-edgar" in url else "{}",
+    )
+    assert len(shown) == 1, f"only the genuinely new one: {shown}"

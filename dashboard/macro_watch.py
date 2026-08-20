@@ -146,8 +146,8 @@ def watch_release(entry, now=None, sleeper=time.sleep, clock=None):
 def run_watcher_loop(sleeper=time.sleep, once=False):
     """Sleep until the next release, watch it, repeat."""
     WATCH_STATE["running"] = True
-    print("[macro-watch] started; polls only inside a release window",
-          file=sys.stderr)
+    print(f"[macro-watch] started; release windows polled closely, filings every "
+          f"{FILING_POLL}s", file=sys.stderr)
     while True:
         try:
             entries, _ = ec.upcoming_releases(days_ahead=7, days_back=0)

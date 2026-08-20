@@ -66,6 +66,24 @@ def _seen_keys(limit: int = 5000) -> set:
     return keys
 
 
+def first_run() -> bool:
+    """Whether nothing has ever been recorded here.
+
+    The first poll of a feed sees everything the feed is holding, and every one
+    of those is new because there is no history to compare against. Notifying
+    for all of them means installing this and being handed fifty desktop
+    notifications about filings from before you had it — which is not an alert,
+    it is a reason to uninstall.
+
+    Found by running the loop for real. Eighteen seconds against live feeds
+    produced fifty-six notifications, and every one was correct and useless.
+    """
+    try:
+        return os.path.getsize(path()) == 0
+    except OSError:
+        return True
+
+
 def record(kind: str, title: str, key: str, detail: str = "", symbol: str = "",
            url: str = "", at=None, notifier=None) -> bool:
     """Append an event unless its key has been seen. Returns whether it is new.

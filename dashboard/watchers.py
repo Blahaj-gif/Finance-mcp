@@ -139,6 +139,15 @@ def poll_once(form_types=("8-K", "SC TO-I"), notifier=None, fetch=_fetch) -> dic
     returned a 503 at three in the morning is a watcher that was not running
     when the thing it existed for happened.
     """
+    # The first poll of a feed sees everything the feed holds, and all of it is
+    # new because there is no history yet. Those get recorded — so the next poll
+    # knows them — and deliberately not shown. An install that greets you with
+    # fifty notifications about filings from before you had it is not an alert
+    # system, and this was measured rather than imagined: eighteen seconds
+    # against the live feeds produced fifty-six.
+    if events.first_run():
+        notifier = None
+
     new, errors = [], []
     candidates = []
     for form in form_types:
@@ -160,3 +169,12 @@ def poll_once(form_types=("8-K", "SC TO-I"), notifier=None, fetch=_fetch) -> dic
         ):
             new.append(row)
     return {"new": new, "errors": errors}
+
+
+def seed_quietly(fetch=_fetch) -> int:
+    """Fill an empty log without notifying, and say how many it took in.
+
+    Exposed so a first run can be done on purpose rather than as a side effect
+    of the first poll happening to be first.
+    """
+    return len(poll_once(notifier=None, fetch=fetch)["new"])
