@@ -31,6 +31,7 @@ import csv
 import datetime
 import io
 import json
+import re
 import os
 import urllib.parse
 
@@ -285,6 +286,45 @@ def bea_dataset(table: str = "T10101", frequency: str = "Q", year: str = "LAST5"
 # PUBLIC INTERFACE
 # =====================================================================
 
+def _as_date(label):
+    """A period label as a real date, whatever calendar the source counts in.
+
+    SDMX does not label a monthly observation `2025-12-01`; it labels it
+    `2025-12`, and quarters `2025-Q3`. `date.fromisoformat` rejects both, and
+    it rejects them by raising — so every caller that wrapped it in
+    `except ValueError` silently got "no date" and carried on.
+
+    That mattered: the staleness check below is the only thing standing between
+    a discontinued series and a number presented as current, and it was blind
+    to exactly the series that were discontinued. The euro-area HICP series in
+    this catalogue stopped in December 2025, and because its label is
+    `2025-12` the check computed no age, found no cadence, and reported it as
+    fresh for eight months. Measured, not imagined.
+    """
+    if not label:
+        return None
+    text = str(label).strip()
+    try:
+        return datetime.date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    # 2025-Q3 / 2025-S1 -- the first day of the period, which is how every
+    # other date here is labelled and keeps the gaps between them honest.
+    found = re.match(r"^(\d{4})-([QS])(\d)$", text)
+    if found:
+        year, span, index = int(found.group(1)), found.group(2), int(found.group(3))
+        months = 3 if span == "Q" else 6
+        month = (index - 1) * months + 1
+        return datetime.date(year, month, 1) if 1 <= month <= 12 else None
+    found = re.match(r"^(\d{4})-(\d{1,2})$", text)
+    if found:
+        year, month = int(found.group(1)), int(found.group(2))
+        return datetime.date(year, month, 1) if 1 <= month <= 12 else None
+    if re.match(r"^\d{4}$", text):
+        return datetime.date(int(text), 1, 1)
+    return None
+
+
 def _observed_cadence_days(rows):
     """
     Typical gap between observations, measured from the data itself.
@@ -295,10 +335,8 @@ def _observed_cadence_days(rows):
     """
     gaps = []
     for a, b in zip(rows, rows[1:]):
-        try:
-            d1 = datetime.date.fromisoformat(a["date"][:10])
-            d2 = datetime.date.fromisoformat(b["date"][:10])
-        except ValueError:
+        d1, d2 = _as_date(a["date"]), _as_date(b["date"])
+        if d1 is None or d2 is None:
             continue
         delta = (d1 - d2).days
         if 0 < delta < 400:
@@ -348,24 +386,20 @@ def fetch_series(keys, observations: int = 24):
         age_days = None
         stale = False
         cadence = _observed_cadence_days(rows)
-        if latest:
-            try:
-                seen = datetime.date.fromisoformat(latest["date"][:10])
-                age_days = (today - seen).days
-                # Late by more than three of its own publication intervals.
-                # Weekends and holidays make the floor necessary for daily series.
-                tolerance = max((cadence or 30) * 3, 10)
-                stale = age_days > tolerance
-            except ValueError:
-                pass
+        seen = _as_date(latest["date"]) if latest else None
+        if seen is not None:
+            age_days = (today - seen).days
+            # Late by more than three of its own publication intervals.
+            # Weekends and holidays make the floor necessary for daily series.
+            tolerance = max((cadence or 30) * 3, 10)
+            stale = age_days > tolerance
+        elif latest:
+            # A label no rule here understands. Unknown is not fresh, and
+            # saying so is the whole point of this check.
+            stale = True
 
         prev = rows[1]["value"] if len(rows) > 1 else None
-        year_ago = None
-        if latest:
-            for r in rows:
-                if r["date"][:4] and r["date"] < latest["date"][:4]:
-                    pass
-            year_ago = rows[min(len(rows) - 1, 12)]["value"] if len(rows) > 12 else None
+        year_ago = rows[12]["value"] if len(rows) > 12 else None
 
         out[key] = {
             "label": label, "source": source, "series_id": series_id, "unit": unit,

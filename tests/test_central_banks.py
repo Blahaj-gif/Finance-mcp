@@ -217,3 +217,81 @@ def test_source_status_reports_key_requirements():
     assert set(status) == {"fred", "ecb", "boe", "boj", "bea"}
     assert status["ecb"]["tier"] == "keyless"
     assert "No public API" in status["boj"]["note"]
+
+
+# ---------------------------------------------------------------------------
+# Period labels. SDMX does not count in ISO dates, and the staleness check
+# above is worthless on any series whose label it cannot read.
+
+def test_period_labels_from_every_calendar_a_source_counts_in():
+    assert cb._as_date("2026-08-18") == datetime.date(2026, 8, 18)
+    assert cb._as_date("2025-12") == datetime.date(2025, 12, 1)
+    assert cb._as_date("2025-Q3") == datetime.date(2025, 7, 1)
+    assert cb._as_date("2025-S2") == datetime.date(2025, 7, 1)
+    assert cb._as_date("2025") == datetime.date(2025, 1, 1)
+
+
+def test_a_label_nobody_can_read_is_not_a_date():
+    assert cb._as_date("") is None
+    assert cb._as_date(None) is None
+    assert cb._as_date("last tuesday") is None
+    assert cb._as_date("2025-13") is None
+
+
+def _monthly(latest_year, latest_month, count=24):
+    """Rows newest-first, labelled the way ECB labels them."""
+    rows, year, month = [], latest_year, latest_month
+    for _ in range(count):
+        rows.append({"date": f"{year:04d}-{month:02d}", "value": 2.0})
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return rows
+
+
+def test_a_monthly_series_that_stopped_publishing_is_caught(monkeypatch):
+    """The defect this exists for.
+
+    The euro-area HICP series in the catalogue stopped in December 2025. Its
+    labels are `2025-12`, `date.fromisoformat` refused them, and the check that
+    exists to catch a discontinued series reported it fresh for eight months.
+    """
+    dead = _monthly(2025, 12)
+    monkeypatch.setattr(cb, "_ecb_series", lambda *a, **k: dead)
+
+    class Frozen(datetime.date):
+        @classmethod
+        def today(cls):
+            return datetime.date(2026, 8, 20)
+
+    monkeypatch.setattr(cb.datetime, "date", Frozen)
+    out = cb.fetch_series(["euro_hicp"])["euro_hicp"]
+    assert out["cadence_days"] in (30, 31), out["cadence_days"]
+    assert out["age_days"] == 262, out["age_days"]
+    assert out["stale"] is True
+
+
+def test_a_monthly_series_still_publishing_is_not_called_stale(monkeypatch):
+    """The other half: the check must not cry wolf on an ordinary lag."""
+    live = _monthly(2026, 7)
+    monkeypatch.setattr(cb, "_ecb_series", lambda *a, **k: live)
+
+    class Frozen(datetime.date):
+        @classmethod
+        def today(cls):
+            return datetime.date(2026, 8, 20)
+
+    monkeypatch.setattr(cb.datetime, "date", Frozen)
+    out = cb.fetch_series(["euro_hicp"])["euro_hicp"]
+    assert out["stale"] is False, out
+
+
+def test_an_unreadable_label_is_treated_as_stale_not_as_fresh(monkeypatch):
+    """Unknown is not fresh. Defaulting the other way is how this got missed."""
+    monkeypatch.setattr(
+        cb, "_ecb_series",
+        lambda *a, **k: [{"date": "period 4", "value": 1.0}] * 3,
+    )
+    out = cb.fetch_series(["euro_hicp"])["euro_hicp"]
+    assert out["age_days"] is None
+    assert out["stale"] is True
