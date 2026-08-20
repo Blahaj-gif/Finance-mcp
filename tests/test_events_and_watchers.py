@@ -151,3 +151,34 @@ def test_describe_renders_without_json():
                   detail="3Y to 5Y")
     text = events.describe(events.recent())
     assert "Treasury buyback announced" in text and "3Y to 5Y" in text
+
+
+def test_the_loop_polls_filings_while_it_waits_for_a_release(monkeypatch):
+    """The bug this covers: watchers that were built, tested and never called.
+
+    `poll_once` existed and passed its own tests while nothing in the running
+    server invoked it, so a filing was only ever noticed if a macro release
+    happened to be due. A watcher that only wakes on a calendar is a scheduler.
+    """
+    from dashboard import macro_watch
+
+    polls, slept = [], []
+    monkeypatch.setattr(macro_watch, "FILING_POLL", 60)
+    monkeypatch.setattr(watchers, "poll_once",
+                        lambda **kw: polls.append(kw) or {"new": [], "errors": []})
+    macro_watch._sleep_in_pieces(180, lambda s: slept.append(s))
+
+    assert slept == [60, 60, 60], "should wait in filing-sized pieces"
+    assert len(polls) == 3, "and ask the sources after each one"
+
+
+def test_a_failing_filing_source_does_not_break_the_wait(monkeypatch):
+    from dashboard import macro_watch
+
+    monkeypatch.setattr(macro_watch, "FILING_POLL", 30)
+    monkeypatch.setattr(watchers, "poll_once",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("SEC 503")))
+    slept = []
+    macro_watch._sleep_in_pieces(60, lambda s: slept.append(s))
+    assert slept == [30, 30]
+    assert "SEC 503" in macro_watch.WATCH_STATE["last_error"]

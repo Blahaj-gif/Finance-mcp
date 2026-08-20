@@ -57,6 +57,10 @@ LEAD = datetime.timedelta(seconds=10)
 #: Never wake more than this far ahead; a process that sleeps for a week is a
 #: process that has stopped being restartable in any useful sense.
 MAX_SLEEP = 15 * 60
+# How often the filing and buyback sources are asked. A macro release is on a
+# calendar and can be waited for; a filing is not, so the loop cannot sleep
+# through it. SEC permits ten requests a second and this is one a minute.
+FILING_POLL = int(os.getenv("FINANCE_FILING_POLL_SECONDS", "60"))
 
 WATCH_STATE = {"running": False, "watching": None, "last_landed": None,
                "calls": 0, "windows": 0, "last_error": None}
@@ -149,7 +153,9 @@ def run_watcher_loop(sleeper=time.sleep, once=False):
             entries, _ = ec.upcoming_releases(days_ahead=7, days_back=0)
             moment, entry = next_release(entries)
             if entry is None:
-                sleeper(MAX_SLEEP)
+                # No release in the next week is the normal state. The filings
+                # still have to be watched through it.
+                _sleep_in_pieces(MAX_SLEEP, sleeper)
                 if once:
                     return
                 continue
@@ -157,7 +163,11 @@ def run_watcher_loop(sleeper=time.sleep, once=False):
             wait = (moment - LEAD - datetime.datetime.now(
                 datetime.timezone.utc)).total_seconds()
             if wait > 0:
-                sleeper(min(wait, MAX_SLEEP))
+                # Slept in filing-poll-sized pieces rather than one long block,
+                # so an 8-K at 09:14 is seen at 09:15 instead of whenever the
+                # next macro release happens to be. This is the difference
+                # between a watcher and a scheduler.
+                _sleep_in_pieces(min(wait, MAX_SLEEP), sleeper)
                 if wait > MAX_SLEEP:
                     if once:
                         return
@@ -183,6 +193,26 @@ def run_watcher_loop(sleeper=time.sleep, once=False):
             sleeper(60)
         if once:
             return
+
+
+def _sleep_in_pieces(seconds, sleeper):
+    """Wait `seconds`, asking the filing sources once a minute on the way.
+
+    Failures are swallowed here on purpose: this is the path that keeps the
+    macro half of the loop alive, and a filing source being down must not take
+    the release window with it.
+    """
+    remaining = max(0.0, float(seconds))
+    while remaining > 0:
+        step = min(FILING_POLL, remaining)
+        sleeper(step)
+        remaining -= step
+        try:
+            from . import watchers
+            from .alert_manager import send_notification as notifier
+            watchers.poll_once(notifier=notifier)
+        except Exception as exc:
+            WATCH_STATE["last_error"] = f"filing poll: {str(exc)[:160]}"
 
 
 def _announce(entry, at):
