@@ -64,3 +64,6 @@ pgsow/
 # The watcher log. What it holds is a record of what this machine saw, not
 # something to publish, and it grows.
 dashboard/events.jsonl
+
+# Build 4, its own repository living in this working tree.
+pgplan/
