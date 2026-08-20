@@ -43,7 +43,20 @@ in software, so the answer is here rather than forty paragraphs down.
 - **Use a read-scoped key where your broker offers one.** Nothing outside the
   dashboard needs write access.
 
-1,431 tests across 31 files, and CI runs them on every push.
+1,431 tests across 32 files, and CI runs them on every push.
+
+Those all stub the network, which is correct — a suite that goes red because SEC
+returned a 503 overnight is a suite nobody reads. It is also why two defects
+survived every one of them: a euro-area series that had stopped publishing eight
+months earlier and was reported as current, and a filing watcher that answered
+403 to every request and called itself healthy. Both needed the real internet to
+see. `tests/test_live_sources.py` asks every external source for real and checks
+that this tool's account of the answer is true — in particular that a series
+marked fresh actually is. It is opt-in and skipped by default:
+
+```
+FINANCE_LIVE_SOURCES=1 pytest tests/test_live_sources.py -v -s
+```
 
 ---
 
