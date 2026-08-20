@@ -43,7 +43,7 @@ in software, so the answer is here rather than forty paragraphs down.
 - **Use a read-scoped key where your broker offers one.** Nothing outside the
   dashboard needs write access.
 
-1,428 tests across 31 files, and CI runs them on every push.
+1,431 tests across 31 files, and CI runs them on every push.
 
 ---
 
