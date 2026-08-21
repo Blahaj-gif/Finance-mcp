@@ -58,6 +58,13 @@ marked fresh actually is. It is opt-in and skipped by default:
 FINANCE_LIVE_SOURCES=1 pytest tests/test_live_sources.py -v -s
 ```
 
+It also runs weekly in CI, because a check that depends on somebody remembering
+is a check that eventually stops happening — and discontinued series and broken
+scrapers are exactly the failures that arrive quietly over weeks. That workflow
+is inert until `FRED_API_KEY` and `SEC_USER_AGENT` exist as repository secrets,
+and when they do not it says so in the job summary rather than reporting a green
+tick that verified nothing.
+
 ---
 
 ![Charts tab](https://raw.githubusercontent.com/Blahaj-gif/Finance-mcp/master/docs/img/charts.png)

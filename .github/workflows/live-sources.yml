@@ -1,0 +1,105 @@
+name: live sources
+
+# Every other test in this repository stubs the network, and that is right: a
+# suite that goes red because the SEC returned a 503 at three in the morning is
+# a suite nobody reads. But that is also exactly why two real defects survived
+# 1,431 passing tests — a euro-area series that had stopped publishing eight
+# months earlier and was still being reported as current, and a filing watcher
+# that answered 403 to every poll and called itself healthy. Both were found by
+# asking the real sources, once, by hand.
+#
+# This is that check, on a schedule, so it stops depending on somebody
+# remembering. Weekly rather than daily: these are discontinued series and
+# broken scrapers, which appear over weeks, and a courteous request rate to
+# public agencies matters more than a day of latency.
+
+on:
+  schedule:
+    # Monday, off the hour. Nothing here needs to race the top of the hour and
+    # every scheduler in the world fires at :00.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  ask-every-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Three outcomes, not two — the same rule the code holds itself to.
+      #
+      # Without credentials these tests do not fail, they *mislead*: the SEC
+      # answers 403 to a request with no contact address, which reads as an
+      # outage rather than as a missing setting, and that confusion is the
+      # second of the two bugs this file exists for. So the run says plainly
+      # that it checked nothing, rather than reporting a green tick that means
+      # nothing or a red one that blames the wrong party.
+      #
+      # It warns rather than fails because this workflow is inert until someone
+      # adds the secrets, and a repository that goes red every Monday for a
+      # thing nobody opted into teaches people to ignore red. The job summary
+      # is the honest record; a green tick here is never on its own evidence
+      # that a source was reached.
+      - name: Are the credentials configured?
+        id: configured
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          missing=""
+          [ -n "$FRED_API_KEY" ]   || missing="$missing FRED_API_KEY"
+          [ -n "$SEC_USER_AGENT" ] || missing="$missing SEC_USER_AGENT"
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::live sources NOT CHECKED — missing secrets:$missing"
+            {
+              echo "## Live sources: not checked"
+              echo
+              echo "Missing repository secrets:\`$missing\`"
+              echo
+              echo "This run verified **nothing**. It is not a pass."
+              echo "Add the secrets under Settings → Secrets and variables → Actions."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ask every source for real
+        if: steps.configured.outputs.ready == 'true'
+        env:
+          FINANCE_LIVE_SOURCES: "1"
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+          BEA_API_KEY: ${{ secrets.BEA_API_KEY }}
+          # Not a secret in the usual sense — the SEC asks for a contact
+          # address and refuses traffic without one — but it is an email
+          # address, so it is not committed either.
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          # A source being unreachable is not a defect in this code; the tests
+          # skip on that and say why. What fails here is this code's account of
+          # an answer being untrue — a number presented as current that is not.
+          pytest tests/test_live_sources.py -v -s | tee live.log
+          {
+            echo "## Live sources: checked"
+            echo
+            echo '```'
+            grep -E "correctly flagged stale|releases in a|buyback operations|events on the first poll" live.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The offline suite must still be green on the same commit
+        if: steps.configured.outputs.ready == 'true'
+        # Guards against the one way this job could mislead: a live run that
+        # passes because somebody loosened an assertion rather than because the
+        # sources answered.
+        run: pytest -q -x
