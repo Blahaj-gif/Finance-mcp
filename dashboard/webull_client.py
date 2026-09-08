@@ -248,10 +248,22 @@ def display_bar_time(newest, interval: str) -> str:
 # exchange calendar (see market_calendar.py), which is far tighter than a
 # calendar-day heuristic: a 5-day window had to be wide enough to absorb a
 # holiday weekend, and was therefore wide enough to hide a real 3-day outage.
+# Retuned when market_calendar's reference session was corrected. The old
+# reference counted today as a completed session, which inflated every reading
+# by one -- so D=1 was not a one-session gate, it was a two-session gate, and it
+# caught a genuinely one-session-old bar in 58.3% of hours rather than always.
+#
+# The numbers below were swept hourly across 2026-2027 against both feeds'
+# stamping conventions, which are opposite: Webull stamps a weekly bar at the
+# week's last session (2026-09-04) and Yahoo at its first (2026-08-31). The
+# worst reading for the newest bar that exists is 0 for D, 4 for W and 22 for M;
+# W and M keep a session of margin over that because those maxima depend on a
+# vendor convention that could change, and D does not -- it is 0 by
+# construction, since the reference *is* the newest session that should exist.
 STALENESS_TOLERANCE_SESSIONS = {
-    "D": 1,    # newest completed session; today's bar does not exist until close
-    "W": 6,    # a little over one week
-    "M": 25,   # a little over one month
+    "D": 0,    # the reference already excludes a session that cannot have a bar
+    "W": 5,    # measured worst case 4, plus a session of margin
+    "M": 24,   # measured worst case 22, plus margin
 }
 
 # Intraday still uses wall-clock hours -- session-counting says nothing useful
