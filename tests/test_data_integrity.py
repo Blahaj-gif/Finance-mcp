@@ -13,6 +13,7 @@ descending order the API delivered them in.
 """
 import datetime
 import json
+import re
 import os
 import sys
 
@@ -751,3 +752,95 @@ def test_nothing_the_server_imports_writes_to_stdout():
     assert not offenders, (
         "print() without file=sys.stderr writes to stdout and breaks the "
         f"JSON-RPC stream: {offenders}")
+
+
+# =====================================================================
+# Bars are stored in UTC and shown in exchange time
+# =====================================================================
+
+def _frame_at(stamp):
+    return pd.DataFrame({"time": [stamp], "open": [1.0], "high": [1.0],
+                         "low": [1.0], "close": [1.0], "volume": [1]})
+
+
+def _bar_stamp(line):
+    """The bar timestamp out of a freshness line, without the age or source."""
+    return re.search(r"Latest \w+ bar: (.+?) \(", line).group(1)
+
+
+def test_an_intraday_bar_is_shown_in_exchange_local_time():
+    """
+    Bars are stored naive-UTC. Friday's 15:45 ET closing bar was printed as
+    "19:45" with no timezone marker, which reads as an after-hours print -- from
+    a server that has no extended-hours data at all.
+    """
+    line = wc.freshness_line(_frame_at("2026-09-04 19:45:00"), "Webull OpenAPI", "M15")
+    assert _bar_stamp(line) == "2026-09-04 15:45 EDT"
+
+
+def test_the_display_clock_follows_dst_rather_than_a_fixed_offset():
+    winter = wc.freshness_line(_frame_at("2026-01-15 21:00:00"), "Webull OpenAPI", "M15")
+    assert _bar_stamp(winter) == "2026-01-15 16:00 EST"
+
+
+def test_a_session_bar_is_shown_as_a_date_with_no_clock():
+    """
+    A daily bar is a session, not an instant. It is stamped 04:00 UTC (midnight
+    ET) and printing a clock on it invites reading it as a 4 a.m. print.
+    """
+    for iv in ("D", "W", "M"):
+        line = wc.freshness_line(_frame_at("2026-09-04 04:00:00"), "Webull OpenAPI", iv)
+        assert _bar_stamp(line) == "2026-09-04", f"{iv} should carry no clock"
+
+
+def test_an_unrecognised_interval_is_never_given_a_shifted_date():
+    """
+    whats_changed passes raw interval strings like "60". Converting an unknown
+    interval can move the calendar day backward -- a bar stamped 00:00 UTC
+    becomes the previous day at 20:00 ET -- so anything not known to be intraday
+    renders as the bare stored date.
+    """
+    line = wc.freshness_line(_frame_at("2026-08-07 00:00:00"), "Webull OpenAPI", "60")
+    assert _bar_stamp(line).startswith("2026-08-07"), \
+        "an unknown interval must not shift the calendar day"
+
+
+def test_a_bad_display_timezone_degrades_the_label_and_never_the_import(monkeypatch):
+    """
+    webull_client is imported by finance_mcp, the dashboard, the alert manager
+    and both brokers. A display preference must never be able to take price
+    fetching down with it.
+    """
+    monkeypatch.setenv("MARKET_DISPLAY_TZ", "Not/AZone")
+    tz = wc._resolve_display_tz()
+    assert tz is not None
+    line = wc.freshness_line(_frame_at("2026-09-04 19:45:00"), "Webull OpenAPI", "M15")
+    assert "2026-09-04" in line
+
+
+def test_the_stored_time_column_stays_naive_utc():
+    """
+    The display change must not reach storage: staleness, the disk cache and the
+    indicator maths all compare these strings as UTC.
+    """
+    frame = pd.DataFrame({
+        "time": pd.to_datetime(["2026-09-04 15:30:00-04:00", "2026-09-04 15:45:00-04:00"]),
+        "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+        "close": [1.0, 1.0], "volume": [1, 1]})
+    out = wc._validate_frame(frame, "SPY", "M15", "test")
+    assert str(out["time"].iloc[-1]) == "2026-09-04 19:45:00", \
+        "storage must remain naive UTC"
+
+
+def test_an_intraday_bar_range_is_not_labelled_the_days_range():
+    """
+    The label was "Day's Range" unconditionally, so on an M15 request it
+    reported a fifteen-minute high and low as the day's -- indexing one bar,
+    with no aggregation over the session.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read()
+    block = src[src.index("### Technical Analysis for"):][:600]
+    assert "Day's Range" not in block, (
+        "a single bar's high/low must not be labelled the day's range on an "
+        "interval that is not a day")

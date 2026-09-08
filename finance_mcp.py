@@ -293,7 +293,7 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
         # Format results as a readable markdown block
         summary = f"""### Technical Analysis for {symbol.upper()} ({interval} Interval)
 - **Last Price**: ${close_val:.2f} ({'+' if price_change >= 0 else ''}{price_change:.2f} / {price_pct_change:.2f}%)
-- **Day's Range**: Low: ${latest_bar['low']:.2f} | High: ${latest_bar['high']:.2f}
+- **Latest {interval} Bar Range**: Low: ${latest_bar['low']:.2f} | High: ${latest_bar['high']:.2f}
 - **Volume**: {latest_bar['volume']:,.0f}
 {verdict_block}
 #### Indicator Readings
