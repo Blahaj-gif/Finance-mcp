@@ -1254,6 +1254,27 @@ with tab_execution:
 
                                 st.session_state.pop(preview_key, None)
                                 st.rerun()
+                            except broker.AmbiguousSubmission as e:
+                                # The submit failed without establishing that
+                                # nothing was sent. Saying "the draft remains
+                                # PENDING" here would read as "nothing reached
+                                # the market", which is exactly what this
+                                # process does not know. Do not resend.
+                                draft["status"] = "OUTCOME_UNKNOWN"
+                                draft["unknown_at"] = datetime.datetime.now().strftime(
+                                    "%Y-%m-%d %H:%M:%S")
+                                draft["client_order_id"] = e.client_order_id
+                                with open(drafts_path, "w", encoding="utf-8") as fw:
+                                    json.dump(drafts, fw, indent=2)
+                                st.error(
+                                    f"**Outcome unknown.** {e.cause}\n\n"
+                                    f"This order may or may not have reached the market. "
+                                    f"Check the order book for client order id "
+                                    f"`{e.client_order_id}` before doing anything else — "
+                                    f"submitting again could place it twice. This draft is "
+                                    f"marked OUTCOME_UNKNOWN and will not be offered for "
+                                    f"approval again.")
+                                st.session_state.pop(preview_key, None)
                             except Exception as e:
                                 st.error(f"Failed to submit — the draft remains PENDING: {e}")
                                 text = str(e).upper()

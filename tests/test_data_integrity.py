@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dashboard import webull_client as wc
+from dashboard import broker
 from dashboard.webull_client import DataIntegrityError, StaleDataError
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -844,3 +845,165 @@ def test_an_intraday_bar_range_is_not_labelled_the_days_range():
     assert "Day's Range" not in block, (
         "a single bar's high/low must not be labelled the day's range on an "
         "interval that is not a day")
+
+
+# =====================================================================
+# A submit is sent exactly once
+# =====================================================================
+
+class _Timeout(RuntimeError):
+    """A transport failure whose text happens to carry the throttle token."""
+
+
+def test_a_submit_is_never_retried(monkeypatch):
+    """
+    Webull's own SDK ships RetryableMethods: ["GET"] and its documentation says
+    "Do no retry when it's not a GET request" -- place_order is a POST. The
+    wrapper sat outside the SDK and reinstated retry for the one call the vendor
+    had excluded, re-POSTing a byte-identical payload. Webull documents
+    client_order_id as a client-side uniqueness obligation, never as an
+    idempotency key, so nothing establishes the second POST would be rejected.
+    """
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def place_order(account_id, orders):
+                calls.append(orders)
+                raise FakeRateLimitError()
+
+    with pytest.raises(Exception):
+        broker.place_order(Client(), "ACC1", {"client_order_id": "DRFT_x"})
+
+    assert len(calls) == 1, f"a submit must be sent once, was sent {len(calls)}x"
+
+
+def test_a_cancel_is_never_retried(monkeypatch):
+    """Cancel is a POST too, and a duplicated cancel is a duplicated instruction."""
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def cancel_order(account_id, client_order_id):
+                calls.append(client_order_id)
+                raise FakeRateLimitError()
+
+    with pytest.raises(Exception):
+        broker.cancel_order(Client(), "ACC1", "DRFT_x")
+
+    assert len(calls) == 1
+
+
+def test_a_preview_still_retries(monkeypatch):
+    """
+    Preview is non-binding by design, so throttling it should still be ridden
+    out. Removing retry from reads would be a different and worse change.
+    """
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def preview_order(account_id, orders):
+                calls.append(orders)
+                if len(calls) < 2:
+                    raise FakeRateLimitError()
+                return {"data": {"ok": True}}
+
+    broker.preview_order(Client(), "ACC1", {"client_order_id": "DRFT_x"})
+    assert len(calls) == 2, "a preview should still ride out a throttle"
+
+
+def test_a_transport_error_is_not_read_as_a_rate_limit():
+    """
+    The predicate ended in a substring match on the exception text, so a read
+    timeout whose message merely carried the token retried -- which is exactly
+    the failure where the order may already have reached the matching engine.
+    """
+    assert not wc._is_rate_limited(
+        _Timeout("HTTPSConnectionPool: Read timed out. (TOO_MANY_REQUESTS?)"))
+
+
+def test_structured_rate_limit_evidence_is_still_honoured():
+    """The tightening must not stop reads riding out a real 429."""
+    class ByStatus(RuntimeError):
+        http_status = 429
+
+    class ByCode(RuntimeError):
+        error_code = "TOO_MANY_REQUESTS"
+
+    assert wc._is_rate_limited(ByStatus())
+    assert wc._is_rate_limited(ByCode())
+
+
+# =====================================================================
+# An unknown outcome is reported as unknown
+# =====================================================================
+
+def _submit_raising(exc):
+    class Client:
+        class order_v3:
+            @staticmethod
+            def place_order(account_id, orders):
+                raise exc
+    return Client()
+
+
+@pytest.mark.parametrize("status,label", [(None, "transport failure"),
+                                          (500, "server error"),
+                                          (408, "request timeout")])
+def test_an_unproven_failure_is_reported_as_ambiguous(monkeypatch, status, label):
+    """
+    A timeout, a reset and a 500 all leave the outcome unknown: the order may
+    have reached the matching engine. Re-raising them bare let the dashboard
+    print "the draft remains PENDING", which reads as "nothing was sent" -- a
+    claim this process cannot support.
+    """
+    exc = RuntimeError(f"{label} while submitting")
+    if status is not None:
+        exc.http_status = status
+
+    with pytest.raises(broker.AmbiguousSubmission) as caught:
+        broker.place_order(_submit_raising(exc), "ACC1",
+                           {"client_order_id": "DRFT_abc"})
+
+    assert caught.value.client_order_id == "DRFT_abc", \
+        "the id is the only handle for finding out what happened"
+
+
+def test_a_broker_refusal_is_not_dressed_up_as_ambiguous():
+    """
+    A 4xx is the server having received, parsed and refused the order. Calling
+    that ambiguous would be the opposite error -- it would send someone hunting
+    the order book for an order that was never accepted.
+    """
+    exc = RuntimeError("BUYING_POWER_INSUFFICIENT")
+    exc.http_status = 400
+
+    with pytest.raises(RuntimeError) as caught:
+        broker.place_order(_submit_raising(exc), "ACC1",
+                           {"client_order_id": "DRFT_abc"})
+
+    assert not isinstance(caught.value, broker.AmbiguousSubmission)
+
+
+def test_the_dashboard_does_not_claim_nothing_was_sent_when_it_cannot_know():
+    """
+    The guard above is only worth having if the approval page reads it. The
+    error text after an ambiguous submit must not assert the order was not
+    placed, and must point at the order book.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    assert "AmbiguousSubmission" in app, \
+        "the approval page must distinguish an unknown outcome from a refusal"
+    start = app.index("except broker.AmbiguousSubmission")
+    block = app[start:app.index("except Exception", start)]
+    assert "order book" in block.lower()
+    assert "remains PENDING" not in block, \
+        "an unknown outcome must not be reported as a draft that was never sent"

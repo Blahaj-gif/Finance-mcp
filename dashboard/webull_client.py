@@ -596,11 +596,45 @@ _RATE_LIMITER = _RateLimiter(WEBULL_MIN_REQUEST_INTERVAL)
 
 
 def _is_rate_limited(exc) -> bool:
+    """
+    Structured evidence only. A transport error is not a rate limit.
+
+    This used to fall through to a substring match on the exception text, which
+    reached exactly the wrong cases: a read timeout reading "Read timed out.
+    (TOO_MANY_REQUESTS?)" matched, and a read timeout is precisely the failure
+    where the request may already have been applied. Nothing the SDK raises
+    needs the branch -- it puts the body's error_code and the HTTP status onto
+    every ServerException -- so its only reach was over exceptions from outside
+    the SDK, matching on prose.
+    """
     if getattr(exc, "http_status", None) == 429:
         return True
-    if str(getattr(exc, "error_code", "")).upper() == "TOO_MANY_REQUESTS":
-        return True
-    return "TOO_MANY_REQUESTS" in str(exc).upper()
+    return str(getattr(exc, "error_code", "")).upper() == "TOO_MANY_REQUESTS"
+
+
+def call_webull_once(fn, *args, **kwargs):
+    """
+    Pace, but never repeat. The entry point for a binding write.
+
+    RFC 9110 section 9.2.2 permits an automatic retry of a non-idempotent
+    request only when the client can detect that the original was never
+    applied. At a failed submit this process cannot: a timeout, a reset and a
+    500 all leave the outcome unknown, and no broker here promises to
+    deduplicate. Webull documents client_order_id as a uniqueness obligation on
+    the *client*, never as an idempotency key; Saxo states outright that its
+    equivalent is not checked for uniqueness.
+
+    Webull says the same thing in its own words -- "No retry by default ... Do
+    no retry when it's not a GET request" -- and ships it as configuration:
+    core/data/retry_config.json carries RetryableMethods: ["GET"], and
+    place_order is a POST. call_webull sits outside the SDK and was reinstating
+    a retry for the one call the vendor had deliberately excluded.
+
+    A throttled submit now surfaces, and a human decides whether to send it
+    again. That is the correct actor for that decision.
+    """
+    _RATE_LIMITER.acquire()
+    return fn(*args, **kwargs)
 
 
 def call_webull(fn, *args, **kwargs):
