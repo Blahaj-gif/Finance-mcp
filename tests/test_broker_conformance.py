@@ -1294,14 +1294,35 @@ def test_a_draft_records_the_broker_it_was_raised_against(monkeypatch, tmp_path)
     assert written[-1]["environment"] in ("LIVE", "PAPER")
 
 
-def test_the_dashboard_refuses_a_draft_raised_against_another_broker():
-    """The guard above is only useful if the approval page reads it."""
+def test_the_dashboard_refuses_a_draft_raised_against_another_desk():
+    """
+    The two fields above are only useful if the approval page reads them back.
+    It checks the wiring rather than the wording: the refusals themselves live
+    in broker_protocol.draft_refusal and are tested against its behaviour, but
+    a guard the page never calls is not a guard.
+    """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
-    assert 'draft.get("broker", "webull")' in app, (
-        "the execution page must check which broker a draft was raised against")
-    assert "can only submit to Webull" in app
-    assert "Nothing has been sent" in app
+    assert "broker_protocol.draft_refusal(" in app, (
+        "the execution page must check which desk a draft was raised against")
+    assert "environment_label=" in app, (
+        "the environment has to be passed, or only half the check runs")
+    assert "st.error(refusal)" in app and "continue" in app, (
+        "a refused draft must stop before the preview and submit buttons")
+
+
+def test_a_draft_from_the_other_environment_is_refused():
+    """
+    The behavioural half of the test above, so the wiring check cannot pass
+    against a guard that returns None for everything.
+    """
+    from dashboard import broker_protocol
+
+    draft = {"draft_id": "D1", "broker": "webull", "environment": "PAPER"}
+    assert broker_protocol.draft_refusal(
+        draft, broker_name="webull", environment_label="LIVE") is not None
+    assert broker_protocol.draft_refusal(
+        draft, broker_name="webull", environment_label="PAPER") is None
 
 
 def test_the_disk_cache_is_not_shared_across_brokers(monkeypatch):

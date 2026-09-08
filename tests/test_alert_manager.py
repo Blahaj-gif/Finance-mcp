@@ -572,3 +572,24 @@ def test_a_nonzero_exit_from_the_notifier_is_not_treated_as_delivered():
 def test_the_old_windows_name_still_resolves():
     """Anything that imported send_windows_notification keeps working."""
     assert am.send_windows_notification is am.send_notification
+
+
+def test_the_notifier_does_not_inherit_broker_credentials(monkeypatch):
+    """
+    The notifier is handed an environment so the alert text travels as data
+    rather than as shell syntax -- but it used to be handed a copy of the whole
+    of os.environ, and envfile.load puts every key from .env there. So every
+    desktop alert exported WEBULL_APP_SECRET to a spawned powershell. SECURITY.md
+    names this exact shape ("a credential reaching ... a subprocess") as the
+    thing to look for.
+    """
+    monkeypatch.setattr(am.sys, "platform", "win32")
+    monkeypatch.setenv("WEBULL_APP_SECRET", "super-secret-value")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+
+    argv, env = am._notifier_command("A title", "A body")
+
+    assert "super-secret-value" not in "\n".join(f"{k}={v}" for k, v in env.items()), \
+        "a notification must not carry the broker secret into a child process"
+    assert env.get("FINMCP_ALERT_TITLE") == "A title", "the alert text still travels"
+    assert env.get("FINMCP_ALERT_BODY") == "A body"

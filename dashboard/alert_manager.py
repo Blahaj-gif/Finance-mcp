@@ -53,6 +53,24 @@ _MACOS_OSA = (
 )
 
 
+# What a notifier process needs to start, and nothing else. This is an
+# allowlist rather than a list of secrets to strip, because the interesting
+# failure is the credential nobody thought to add to the strip list --
+# `envfile.load` puts every key from `.env` into `os.environ`, so handing a
+# notifier `dict(os.environ)` exported the broker app secret, and every other
+# key in that file, to a spawned powershell on every desktop alert.
+_NOTIFIER_ENV_KEYS = (
+    "PATH", "PATHEXT", "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC",
+    "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL", "DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+)
+
+
+def _minimal_env() -> dict:
+    """OS plumbing only. Never a credential, whatever ends up in `.env`."""
+    return {k: os.environ[k] for k in _NOTIFIER_ENV_KEYS if k in os.environ}
+
+
 def _notifier_command(title: str, message: str):
     """
     (argv, env) for this platform's notifier, or None if there is not one.
@@ -61,7 +79,7 @@ def _notifier_command(title: str, message: str):
     variables and on macOS as osascript arguments, because a note containing
     `$(...)` or a backtick would otherwise be executed rather than displayed.
     """
-    env = dict(os.environ)
+    env = _minimal_env()
     if sys.platform == "win32":
         env["FINMCP_ALERT_TITLE"] = str(title)
         env["FINMCP_ALERT_BODY"] = str(message)

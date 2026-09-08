@@ -16,6 +16,20 @@ textColor = "#D6D6D6"
 font = "sans serif"
 
 [server]
+# Loopback, not every interface. Streamlit leaves `address` unset by default,
+# and unset does not mean localhost -- it binds 0.0.0.0 *and* [::], prints a
+# Network URL on the LAN address, and because this app is headless it prints an
+# External URL as well. What is on the other end of that port is a live
+# brokerage account, the positions in it, and a button that submits orders,
+# with no authentication anywhere in front of it. On a coworking or hotel
+# network that is an open door.
+#
+# This file covers the two launch paths that run from the repo root -- a git
+# checkout and the desktop shortcut the installer writes. dashboard/cli.py
+# passes the same flag for an installed copy, which may not have this file
+# alongside it. Either way it is a default, not a lock: pass
+# --server.address explicitly if you genuinely mean to serve it elsewhere.
+address = "127.0.0.1"
 headless = true
 fileWatcherType = "auto"
 

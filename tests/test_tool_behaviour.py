@@ -335,6 +335,181 @@ def test_draft_order_blocks_when_price_cannot_be_determined(monkeypatch, tmp_pat
         "an unpriceable order must not be persisted"
 
 
+def _priced_desk(monkeypatch, tmp_path, last_price=2.00):
+    """
+    A drafting desk wired to the $333.83 USD buying power of BALANCE_PAYLOAD.
+
+    Every test below needs the same five seams, and repeating them obscures the
+    one line that actually differs between them.
+    """
+    import webull.trade.trade_client as tc
+
+    class FakeAccount:
+        def get_account_list(self):
+            return [{"account_id": "ACC1"}]
+
+        def get_account_balance(self, account_id):
+            return BALANCE_PAYLOAD
+
+        def get_account_position(self, account_id):
+            return POSITION_PAYLOAD
+
+    class FakeTradeClient:
+        def __init__(self, api_client):
+            self.account_v2 = FakeAccount()
+
+    class FixedTicker:
+        def __init__(self, sym): pass
+        @property
+        def fast_info(self):
+            return type("FI", (), {"last_price": last_price})()
+
+    import yfinance as yf
+    monkeypatch.setattr(wc, "get_api_client", lambda: object())
+    monkeypatch.setattr(srv.webull_client, "get_api_client", lambda: object())
+    monkeypatch.setattr(tc, "TradeClient", FakeTradeClient)
+    monkeypatch.setattr(yf, "Ticker", FixedTicker)
+    monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
+    os.makedirs(tmp_path / "dashboard", exist_ok=True)
+
+
+@pytest.mark.parametrize("order_type", ["MKT", "STP"])
+def test_a_limit_price_on_a_non_limit_order_cannot_buy_past_buying_power(
+        monkeypatch, tmp_path, order_type):
+    """
+    The buying-power check is the only quantitative bound in the system, and a
+    nominal limit_price on an order type that will not carry one used to switch
+    it off: `est_price = limit_price` was taken before anything established the
+    order would be sent at that price, while `build_order` attaches the price
+    only for LIMIT. So a $0.0001 "limit" priced a million shares at $100, passed
+    the check, and submitted as a bare market order.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=1_000_000,
+                          order_type=order_type, limit_price=0.0001)
+
+    assert "SAFETY BLOCK" in out, (
+        f"a {order_type} order carries no limit price to the broker, so 0.0001 "
+        "must not be usable as its notional")
+    assert "ORDER DRAFTED" not in out
+    assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json"), \
+        "a refused order must not reach the approval queue"
+
+
+def test_a_limit_order_still_prices_off_its_own_limit(monkeypatch, tmp_path):
+    """
+    The guard above must not break the case it is named for: a real LIMIT order
+    is genuinely bounded by its limit price, and 10 shares at $2 is affordable.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=10, order_type="LMT",
+                          limit_price=2.00)
+
+    assert "ORDER DRAFTED" in out
+    assert "SAFETY BLOCK" not in out
+
+
+def test_pending_drafts_count_against_buying_power(monkeypatch, tmp_path):
+    """
+    Every guard ran against one draft in isolation, so N drafts that were each
+    individually affordable could sit in the queue together costing more than
+    the account holds -- and each was one click from submission.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    first = srv.draft_order("AAA", "BUY", quantity=100, order_type="LMT",
+                            limit_price=2.00)
+    assert "ORDER DRAFTED" in first, "the first $200 order fits in $333.83"
+
+    second = srv.draft_order("BBB", "BUY", quantity=100, order_type="LMT",
+                             limit_price=2.00)
+
+    assert "SAFETY BLOCK" in second, (
+        "$200 already committed plus $200 more exceeds $333.83 buying power")
+    assert "pending" in second.lower()
+
+
+def test_pending_sell_drafts_count_against_inventory(monkeypatch, tmp_path):
+    """
+    The same isolation bug on the other side: two pending SELLs of the whole
+    position are each individually covered, and together they are a naked short.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    first = srv.draft_order("RKLB", "SELL", quantity=2, order_type="LMT",
+                            limit_price=2.00)
+    assert "ORDER DRAFTED" in first, "the position holds 2 RKLB"
+
+    second = srv.draft_order("RKLB", "SELL", quantity=1, order_type="LMT",
+                             limit_price=2.00)
+
+    assert "SAFETY BLOCK" in second, (
+        "2 shares are already spoken for by a pending draft, so a third is naked")
+    assert "pending" in second.lower()
+
+
+def test_a_stop_order_is_refused_rather_than_sent_without_a_stop_price(monkeypatch, tmp_path):
+    """
+    The tool documents LMT and MKT. STP was reaching build_order, which attaches
+    a price only to a LIMIT order -- so a stop order was constructed with no
+    stop price at all, which is not an order. Worse, the refusal message for a
+    limit price on a non-limit type recommended "drop limit_price", and doing
+    exactly that on a STP draft was accepted.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=10, order_type="STP")
+
+    assert "SAFETY BLOCK" in out, "a STOP order with no stop price must not be drafted"
+    assert "LMT" in out and "MKT" in out, "the refusal should name what is supported"
+    assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json")
+
+
+def _seed(tmp_path, drafts):
+    import json
+    os.makedirs(tmp_path / "dashboard", exist_ok=True)
+    with open(tmp_path / "dashboard" / "order_drafts.json", "w", encoding="utf-8") as f:
+        json.dump(drafts, f)
+
+
+LEGACY_MKT_BUY = {
+    "draft_id": "DRFT_old", "symbol": "AAA", "action": "BUY", "quantity": 150,
+    "order_type": "MKT", "limit_price": None, "status": "PENDING_APPROVAL",
+}
+
+
+def test_a_legacy_unpriced_draft_is_priced_rather_than_deadlocking(monkeypatch, tmp_path):
+    """
+    A draft written before est_notional existed carries neither it nor a limit
+    price. Refusing every subsequent draft until it is cleared would be a
+    lockout with no way out -- the dashboard has no cancel control -- so an
+    unpriced pending draft is priced from the market like any market order.
+    """
+    _priced_desk(monkeypatch, tmp_path)          # last_price 2.00
+    _seed(tmp_path, [LEGACY_MKT_BUY])            # 150 x $2.00 = $300 committed
+
+    out = srv.draft_order("BBB", "BUY", quantity=100, order_type="LMT",
+                          limit_price=2.00)      # $200 more, against $333.83
+
+    assert "SAFETY BLOCK" in out, "$300 committed plus $200 exceeds $333.83"
+    assert "committed" in out.lower(), (
+        "it must total the queue, not refuse because it could not price it")
+    assert "cannot be determined" not in out
+
+
+def test_a_legacy_draft_does_not_block_an_affordable_order(monkeypatch, tmp_path):
+    """The other half: pricing the legacy draft must not become a blanket refusal."""
+    _priced_desk(monkeypatch, tmp_path)
+    _seed(tmp_path, [LEGACY_MKT_BUY])            # $300 committed
+
+    out = srv.draft_order("BBB", "BUY", quantity=10, order_type="LMT",
+                          limit_price=2.00)      # $20 more -> $320 < $333.83
+
+    assert "ORDER DRAFTED" in out, out
+
+
 # =====================================================================
 # Freshness: a reader must be able to tell a live number from a stale one
 # =====================================================================

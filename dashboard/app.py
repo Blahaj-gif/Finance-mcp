@@ -80,6 +80,7 @@ import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import broker
+from dashboard import broker_protocol
 from dashboard import live_consent
 from webull.trade.trade_client import TradeClient
 from dashboard import portfolio_history
@@ -1121,17 +1122,17 @@ with tab_execution:
 
                 # A draft carries symbol/quantity, not a broker-native order,
                 # and this page rebuilds the order against Webull at approval
-                # time. A draft raised while FINANCE_BROKER pointed elsewhere
-                # would therefore be submitted to the wrong broker, and nothing
-                # in the confirmation would say so. Drafts predating this field
-                # are Webull's, because Webull was the only option then.
-                drafted_for = str(draft.get("broker", "webull")).lower()
-                if drafted_for != "webull":
-                    st.error(
-                        f"This draft was raised against **{drafted_for}**, and this "
-                        "page can only submit to Webull. Cancel it and re-draft "
-                        "with FINANCE_BROKER=webull, or submit it on "
-                        f"{drafted_for}'s own platform. Nothing has been sent.")
+                # time -- so both things the draft records about where it came
+                # from have to be checked back rather than trusted. The broker,
+                # because a draft raised while FINANCE_BROKER pointed elsewhere
+                # would be submitted to the wrong one; and the environment,
+                # because a draft rehearsed against the sandbox was cleared by
+                # guards measured against sandbox money.
+                refusal = broker_protocol.draft_refusal(
+                    draft, broker_name="webull",
+                    environment_label=webull_client.environment_label())
+                if refusal:
+                    st.error(refusal)
                     continue
 
                 col_prev, col_exec = st.columns([1, 1])

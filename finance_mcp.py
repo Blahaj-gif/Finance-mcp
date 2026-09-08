@@ -1334,6 +1334,67 @@ def get_short_interest(symbol: str) -> str:
 # HUMAN-IN-THE-LOOP (HITL) ORDER EXECUTION DESK
 # =====================================================================
 
+# The order types that actually carry a limit price to the broker. Every
+# adapter normalises order types with its own alias table, and this guard
+# deliberately does not reuse one: it exists to catch the case where the price
+# the caller supplied is *not* the price the broker will receive, so trusting
+# the builder to tell us would be asking the suspect for an alibi.
+_LIMIT_ORDER_TYPES = frozenset({"LMT", "LIMIT"})
+
+# What this tool will draft, which is narrower than what the adapters can
+# build. Every adapter's alias table also accepts STP, but none of them attaches
+# a price to a stop order -- `build_order` attaches one only to a LIMIT -- so a
+# STP draft became a stop order carrying no stop price, which is not an order.
+# The docstring has always said LMT or MKT; this makes that true.
+_SUPPORTED_ORDER_TYPES = frozenset({"LMT", "LIMIT", "MKT", "MARKET"})
+
+
+def _pending_commitments(drafts, price_of):
+    """
+    What the approval queue has already promised, per side.
+
+    Every pre-trade check used to run against one draft as though the queue were
+    empty, so N drafts that were each individually affordable could sit there
+    together costing more than the account holds -- and each was one click from
+    submission. Returns (buy_cost, sells_by_symbol, unpriced_draft_ids).
+
+    A draft written before `est_notional` existed carries neither it nor a limit
+    price, so it is priced through `price_of(symbol)` like any market order.
+    Refusing every new draft until such a draft cleared would be a lockout with
+    no way out of it, because the dashboard has no cancel control. Only a draft
+    that cannot be priced at all is named and refused, and a draft that cannot
+    be priced is never silently treated as costing nothing.
+    """
+    buy_cost = 0.0
+    sells = {}
+    unpriced = []
+    for d in drafts:
+        if not isinstance(d, dict) or d.get("status") != "PENDING_APPROVAL":
+            continue
+        side = str(d.get("action", "")).upper()
+        try:
+            qty = float(d.get("quantity") or 0)
+        except (TypeError, ValueError):
+            unpriced.append(str(d.get("draft_id", "?")))
+            continue
+        if side == "SELL":
+            sells[str(d.get("symbol", "")).upper()] = (
+                sells.get(str(d.get("symbol", "")).upper(), 0.0) + qty)
+        elif side == "BUY":
+            cost = d.get("est_notional")
+            if cost is None and d.get("limit_price"):
+                cost = qty * float(d["limit_price"])
+            if cost is None:
+                market = price_of(str(d.get("symbol", "")).upper())
+                if market:
+                    cost = qty * float(market)
+            if cost is None:
+                unpriced.append(str(d.get("draft_id", "?")))
+            else:
+                buy_cost += float(cost)
+    return buy_cost, sells, unpriced
+
+
 @needs(capabilities.BUYING_POWER)
 def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LMT", limit_price: float = None) -> str:
     """
@@ -1363,6 +1424,24 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         fingerprint = f"{symbol.upper()}_{action.upper()}_{quantity}_{limit_price}_{datetime.datetime.now().timestamp()}"
         draft_id = "DRFT_" + hashlib.md5(fingerprint.encode()).hexdigest()[:8]
         
+        if str(order_type).upper() not in _SUPPORTED_ORDER_TYPES:
+            return (f"SAFETY BLOCK: {order_type.upper()} is not a supported order type "
+                    "here — use LMT with a limit_price, or MKT to accept the market. "
+                    "A stop order needs a stop price this desk has no way to send, so "
+                    "it would reach the broker with no price on it at all.")
+
+        # A limit price on an order type that will not carry one is refused
+        # rather than dropped. `build_order` attaches it only to a LIMIT order,
+        # so on a MKT or STP draft it vanished on the way to the broker while
+        # the confirmation, the approval card and the buying-power check all
+        # still read as though it bounded the order -- which is worse than a
+        # naked market order, not better, because it looks safe.
+        if limit_price is not None and str(order_type).upper() not in _LIMIT_ORDER_TYPES:
+            return (f"SAFETY BLOCK: A {order_type.upper()} order does not carry a limit "
+                    f"price to the broker, so {limit_price} would be dropped on the way "
+                    "out and this order would fill at whatever the market asks. Send it "
+                    "as LMT to cap the price, or drop limit_price to accept the market.")
+
         # Cheap, offline checks first. Constructing the order and testing it
         # against the broker's published rules needs no network and no
         # credentials, so a malformed order should never cost an account round
@@ -1388,13 +1467,41 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
                     "submission — " + " ".join(violations))
 
         # --- PRE-TRADE RISK CHECKS ---
+        # Recorded on the draft so the next draft can total the queue without
+        # re-pricing everything already in it.
+        est_notional = None
         try:
             account_id = adapter.primary_account_id()
 
+            # What the queue has already promised. Checking this order against
+            # the account alone is only correct when it is the only draft.
+            def _market_price(sym):
+                """Last price for totalling a draft that carries none. None if unknown."""
+                if not sym:
+                    return None
+                try:
+                    return float(webull_client.yahoo_ticker(sym).fast_info.last_price)
+                except Exception:
+                    return None
+
+            committed_cost, committed_sells, unpriced = _pending_commitments(
+                drafts, _market_price)
+            if unpriced:
+                return ("SAFETY BLOCK: The approval queue holds draft(s) whose cost "
+                        f"cannot be determined ({', '.join(unpriced)}), so what this "
+                        "account has already promised cannot be totalled. Remove them "
+                        f"from {drafts_path} and draft again.")
+
             if action.upper() == "SELL":
                 inventory = adapter.position_quantity(symbol)
+                spoken_for = committed_sells.get(symbol.upper(), 0.0)
 
-                if quantity > inventory:
+                if quantity + spoken_for > inventory:
+                    if spoken_for:
+                        return (f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, "
+                                f"and {spoken_for:g} share(s) are already spoken for by "
+                                f"pending draft(s), against inventory of {inventory}. "
+                                "Naked short-selling is blocked.")
                     return f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, but account inventory only shows {inventory} shares. Naked short-selling is blocked."
 
             elif action.upper() == "BUY":
@@ -1419,7 +1526,12 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
                             "cannot verify buying power.")
 
                 notional = float(quantity) * est_price
-                if notional > bp:
+                est_notional = notional
+                if notional + committed_cost > bp:
+                    if committed_cost:
+                        return (f"SAFETY BLOCK: Order requires ~${notional:,.2f} and "
+                                f"~${committed_cost:,.2f} is already committed by pending "
+                                f"draft(s), against buying power of ${bp:,.2f}.")
                     return f"SAFETY BLOCK: Order requires ~${notional:,.2f} but account buying power is only ${bp:,.2f}."
                     
         except Exception as e:
@@ -1448,6 +1560,8 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             # by reading the confirmation.
             "broker": adapter.name,
             "environment": adapter.environment_label(),
+            # What this order was judged to cost, so the queue can be totalled.
+            "est_notional": est_notional,
         }
 
         drafts.append(new_draft)

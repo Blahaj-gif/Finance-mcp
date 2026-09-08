@@ -239,6 +239,44 @@ class Broker(Protocol):
         ...
 
 
+def draft_refusal(draft: dict, broker_name: str, environment_label: str):
+    """
+    Why this draft must not be submitted through this desk, or None if it may.
+
+    A draft carries symbol and quantity, not a broker-native order, so the
+    dashboard rebuilds it at approval time and nothing in the file itself would
+    catch a mismatch. Two things therefore have to be checked back rather than
+    trusted: which broker it was raised against, and which environment. The
+    second was recorded on every draft from the start and never read, so an
+    order rehearsed against the sandbox -- and cleared by pre-trade guards
+    measured against sandbox money -- could be approved into the real account.
+
+    An unlabelled draft is refused rather than assumed to match. A check that
+    could not run is not a check that passed, and the remedy is cheap: cancel
+    it and ask again.
+    """
+    drafted_for = str(draft.get("broker") or "").lower()
+    if not drafted_for:
+        return ("This draft does not record which broker it was raised against, so "
+                "it cannot be shown to belong on this desk. Cancel it and re-draft.")
+    if drafted_for != str(broker_name).lower():
+        return (f"This draft was raised against {drafted_for}, and this page submits "
+                f"to {broker_name}. Cancel it and re-draft, or submit it on "
+                f"{drafted_for}'s own platform. Nothing has been sent.")
+
+    drafted_in = str(draft.get("environment") or "").lower()
+    if not drafted_in:
+        return ("This draft does not record which environment it was raised in, so "
+                f"it cannot be shown to belong to the {environment_label} account "
+                "it would reach. Cancel it and re-draft.")
+    if drafted_in != str(environment_label).lower():
+        return (f"This draft was raised against the {drafted_in} surface and this "
+                f"desk is {environment_label}. The buying-power and inventory checks "
+                f"it passed were measured against the {drafted_in} account, so they "
+                "say nothing about this one. Cancel it and re-draft.")
+    return None
+
+
 def describe(broker) -> str:
     """
     One line naming the broker and how much of it has been proven, for anywhere

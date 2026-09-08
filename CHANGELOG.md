@@ -3,6 +3,55 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
+## Unreleased
+
+Five guardrail defects, found by auditing three outside reviews of this
+repository against the source. The reviews named two of these five; the other
+three were found while checking their claims, and are the more serious.
+
+- **The buying-power check could be switched off from a tool call.** A
+  `limit_price` on a `MKT` or `STP` draft was used as the order's price for the
+  notional check, but `build_order` attaches a limit price only to a `LIMIT`
+  order — so `draft_order("AAPL", "BUY", 1000000, "MKT", 0.0001)` priced a
+  million shares at $100, cleared a $333 account, and would have submitted as a
+  bare market order. The confirmation, the approval card and the check all read
+  as though the price bounded it. A limit price on an order type that will not
+  carry one is now refused rather than dropped.
+- **A stop order reached the broker with no stop price.** Every adapter's alias
+  table accepts `STP`, none of them attaches a price to anything but a `LIMIT`,
+  and the tool's own docstring has always said `LMT` or `MKT` — so a `STP` draft
+  was built as a stop order carrying no price at all. `draft_order` now accepts
+  only the two types it documents. Found by the review of the fix above: its
+  refusal message recommended "drop limit_price", and doing exactly that on a
+  `STP` order was accepted.
+- **A paper draft could be approved into the live account.** Every draft has
+  always recorded the `environment` it was raised in, directly beneath the
+  `broker` field whose whole purpose is that the dashboard rebuilds the order at
+  approval time. Nothing ever read it back, so an order rehearsed against the
+  sandbox — and cleared by guards measured against sandbox money — could be
+  approved against the real account after a `WEBULL_ENVIRONMENT` change. Both
+  fields are now checked at approval by `broker_protocol.draft_refusal`, and a
+  draft that names neither is refused rather than assumed to match.
+- **Pre-trade guards ran against one draft as though the queue were empty.** N
+  drafts that were each individually affordable could sit in the queue together
+  costing more than the account holds, or sum to a naked short, with each one
+  click from submission. Buying power and inventory now count what the queue has
+  already promised.
+- **The dashboard bound every interface.** Streamlit leaves `server.address`
+  unset, and unset is not localhost: measured, it listens on `0.0.0.0` *and*
+  `[::]`, prints a Network URL on the LAN address and — because this app runs
+  headless — an External URL too. A live brokerage account, its positions and a
+  working submit button, with no authentication in front of them. Now pinned to
+  `127.0.0.1` in `.streamlit/config.toml` for the two launch paths that run from
+  the repo root, and in `dashboard/cli.py` for an installed copy. Still a
+  default, not a lock — pass `--server.address` to override it deliberately.
+- **Desktop notifications exported the broker secret.** The notifier is handed an
+  environment so alert text travels as data rather than shell syntax, but it was
+  handed a copy of the whole of `os.environ` — and `envfile.load` puts every key
+  from `.env` there. Every alert exported `WEBULL_APP_SECRET` to a spawned
+  PowerShell. It now gets an allowlist of OS plumbing, chosen that way because
+  the credential nobody thinks to strip is the one that leaks.
+
 ## 0.3.1 — 2026-08-12
 
 **Security: earlier releases contained the author's account state. Upgrade, and
