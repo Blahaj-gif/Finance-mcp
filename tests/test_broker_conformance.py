@@ -1403,3 +1403,67 @@ def test_the_verification_scripts_cannot_place_an_order(script):
     assert "cancel_order" not in src
     assert "confirm_order" not in src
     assert "READ ONLY" in src
+
+
+@pytest.mark.parametrize("base", [
+    "https://localhost:5000/v1/api",
+    "https://127.0.0.1:5000/v1/api",
+    "https://[::1]:5000/v1/api",
+    "https://[::ffff:127.0.0.1]:5000/v1/api",   # unmaps to loopback
+])
+def test_tls_may_be_disabled_for_the_local_gateway(monkeypatch, base):
+    """
+    The Client Portal Gateway is self-signed by design and runs on loopback,
+    where nothing can sit between this process and it. That is the case the
+    opt-in exists for.
+    """
+    import ssl
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.setenv("IBKR_TLS_INSECURE", "1")
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    ctx = IbkrBroker(base_url=base, account_id=IBKR_ACCOUNT)._ssl_context()
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+@pytest.mark.parametrize("base", [
+    "https://api.ibkr.com/v1/api",
+    "https://10.0.0.4:5000/v1/api",
+])
+def test_tls_cannot_be_disabled_against_anything_but_loopback(monkeypatch, base):
+    """
+    SECURITY.md always said this was a localhost trade-off. It was not enforced:
+    _ssl_context never looked at the base URL, so the flag disabled verification
+    against IBKR's hosted API too -- an endpoint reached over the open internet
+    carrying a bearer token.
+
+    It refuses rather than silently verifying, because someone who set the flag
+    believing it applied would otherwise get an unexplained TLS failure instead
+    of being told what changed.
+    """
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.setenv("IBKR_TLS_INSECURE", "1")
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    broker = IbkrBroker(base_url=base, account_id=IBKR_ACCOUNT)
+
+    with pytest.raises(Exception) as caught:
+        broker._ssl_context()
+
+    message = str(caught.value)
+    assert "IBKR_TLS_INSECURE" in message
+    assert "loopback" in message.lower() or "localhost" in message.lower()
+    assert "tunnel" in message.lower(), \
+        "it must name a remedy that actually works for a remote gateway"
+
+
+def test_a_remote_gateway_without_the_flag_is_untouched(monkeypatch):
+    """The scoping must only constrain the opt-in, not ordinary verification."""
+    import ssl
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.delenv("IBKR_TLS_INSECURE", raising=False)
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    ctx = IbkrBroker(base_url="https://api.ibkr.com/v1/api",
+                     account_id=IBKR_ACCOUNT)._ssl_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname

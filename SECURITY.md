@@ -33,13 +33,12 @@ Expect a slow reply. This is one person's project.
 
 - **`IBKR_TLS_INSECURE=1` disables certificate verification** for the local
   Client Portal Gateway, which is self-signed by design. It is opt-in, never a
-  default, and the error message says what you are choosing. Over localhost
-  this is a considered trade; over anything else it is not — and the flag does
-  not currently enforce that distinction. It is global: `_ssl_context()` never
-  inspects the base URL, so setting it while `IBKR_BASE_URL` points at IBKR's
-  hosted API turns verification off against a remote host that carries a bearer
-  token. Do not set it unless you are talking to the local gateway. Scoping it
-  to loopback is the fix, and it is not written yet.
+  default, and it is scoped to loopback: pointed at anything else — IBKR's
+  hosted API, a gateway on another host — it refuses with a named error rather
+  than either disabling verification or quietly re-enabling it. `localhost`,
+  `127.0.0.0/8`, `::1` and IPv4-mapped forms of those count; a DNS name does
+  not. For a gateway on another machine, forward it to loopback (an SSH tunnel)
+  rather than reaching across the network.
 - **The Saxo and IBKR adapters are unverified.** They have never been run
   against their APIs. That is a correctness risk rather than a vulnerability,
   and it is stated on the class, in tool output, and in the README.
