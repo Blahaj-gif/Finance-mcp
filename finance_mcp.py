@@ -2718,8 +2718,22 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
         if not reports:
             scope = f" matching '{person}'" if person else ""
             scope += f" since {since}" if since else ""
+            # Name the registrant searched. A ticker can point at a successor
+            # entity that has never filed a Form 4 while the history sits on the
+            # predecessor CIK, and "no filings found" read as "no insider
+            # activity" is exactly the wrong conclusion to hand a model.
+            looked = res.get("searched") or {}
+            where = ""
+            if looked.get("cik"):
+                where = (f"\n\n*Searched CIK `{looked['cik']}` "
+                         f"({looked.get('company', res['company'])}), which lists "
+                         f"{looked.get('listed_filings', 0)} filing(s) of "
+                         f"form {'/'.join(looked.get('forms') or ['4'])}. "
+                         "If this company was recently reorganised, its earlier "
+                         "filings are under the predecessor registrant and this "
+                         "is not evidence that nobody traded.*")
             return (f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
-                    f"*No Form 4 filings found{scope}.*")
+                    f"*No Form 4 filings found{scope}.*{where}")
 
         out = f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
 

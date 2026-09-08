@@ -324,7 +324,15 @@ def insider_transactions(symbol: str, limit: int = 10, person: str = None,
         parsed.append(report)
 
     return {"symbol": symbol.upper(), "company": info["title"],
-            "filings": parsed, "errors": errors}
+            "filings": parsed, "errors": errors,
+            # Where we looked, so an empty list is never mistaken for an
+            # absence of insider activity. A ticker can move to a new registrant
+            # -- XOM's did in July 2026 -- leaving the successor CIK with no
+            # Form 4s at all while hundreds sit on the predecessor. Without this
+            # the caller cannot tell "nobody traded" from "I asked an entity
+            # that has never filed one".
+            "searched": {"cik": info["cik"], "company": info["title"],
+                         "forms": forms, "listed_filings": len(filings)}}
 
 
 def summarise_insider_flow(reports: list) -> dict:
@@ -815,6 +823,19 @@ def reconcile_form144(parsed: dict) -> dict:
                          "factor"]}
 
 
+def _shares(n) -> str:
+    """
+    A share count at full magnitude, with any fraction, never in scientific
+    notation.
+
+    Four significant figures turned a real 57-share discrepancy into two
+    identical numbers: "should be 4.587e+05, filing says 4.587e+05", printed
+    under an instruction to open an issue about it. A share count is not a
+    measurement and does not have significant figures.
+    """
+    return f"{float(n):,.4f}".rstrip("0").rstrip(".")
+
+
 def reconcile_form4(parsed: dict) -> dict:
     """
     Form 4 states the holding remaining after each transaction. Running the
@@ -843,9 +864,10 @@ def reconcile_form4(parsed: dict) -> dict:
         # Fractional holdings exist; a share and a half of drift does not.
         if abs(expected - actual) > 1.5:
             problems.append(
-                f"running total: {earlier['shares_after']:,.4g} "
-                f"{'-' if signed < 0 else '+'} {abs(signed):,.4g} should be "
-                f"{expected:,.4g}, filing says {actual:,.4g}")
+                f"running total: {_shares(earlier['shares_after'])} "
+                f"{'-' if signed < 0 else '+'} {_shares(abs(signed))} should be "
+                f"{_shares(expected)}, filing says {_shares(actual)} "
+                f"(off by {_shares(actual - expected)})")
     return {
         "reconciled": not problems,
         "checks": [f"{len(transactions)} transactions chained"] if not problems else [],

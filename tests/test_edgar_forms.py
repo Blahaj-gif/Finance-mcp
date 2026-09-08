@@ -759,3 +759,37 @@ def test_item_codes_survive_the_separators_edgar_actually_uses(items):
     the generic "Material event".
     """
     assert "Results of operations" in ef.describe_form("8-K", items)
+
+
+def test_an_empty_form4_result_records_the_cik_it_searched(monkeypatch):
+    """
+    Exxon reorganised into a holding company in July 2026: the XOM ticker now
+    resolves to CIK 0002115436, which has filed no Form 4s, while 301 of them
+    sit on the predecessor 0000034088. The tool returned filings:[] errors:[],
+    which reads as "no insider selling" rather than "I looked somewhere that has
+    never had any". An empty result has to say where it looked.
+    """
+    from dashboard import econ_calendar as ec
+    monkeypatch.setattr(ec, "company_filings", lambda *a, **k: [])
+    monkeypatch.setattr(ec, "ticker_to_cik",
+                        lambda s: {"cik": "0002115436", "title": "ExxonMobil Holdings Corp"})
+
+    out = ef.insider_transactions("XOM")
+
+    assert out["filings"] == []
+    assert "searched" in out, "an empty result must record what it searched"
+    assert out["searched"]["cik"] == "0002115436"
+    assert out["searched"]["forms"] == ["4"]
+
+
+def test_a_result_with_filings_also_records_what_was_searched(monkeypatch):
+    """The record is not an error path -- it is provenance, present either way."""
+    from dashboard import econ_calendar as ec
+    monkeypatch.setattr(ec, "company_filings", lambda *a, **k: [])
+    monkeypatch.setattr(ec, "ticker_to_cik",
+                        lambda s: {"cik": "0000320193", "title": "Apple Inc."})
+
+    out = ef.insider_transactions("AAPL", forms=("4", "3"))
+
+    assert out["searched"]["cik"] == "0000320193"
+    assert out["searched"]["forms"] == ["4", "3"]
