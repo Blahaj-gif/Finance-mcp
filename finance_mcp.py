@@ -2035,6 +2035,28 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
 # RISK & POSITION SIZING
 # =====================================================================
 
+def _price_currency(symbol: str):
+    """
+    The currency the price feed quotes this symbol in, or None if it will not say.
+
+    Deliberately the FEED's currency and not the broker's: entry, stop and ATR
+    all come from webull_client.fetch_data, so the unit that matters is that
+    feed's, and the broker may not carry the instrument at all. None means "do
+    not assert", never "same as the account".
+    """
+    try:
+        return (webull_client.yahoo_feed_delay(symbol.upper()).get("currency")
+                or "").upper() or None
+    except Exception:
+        return None
+
+
+def _money(amount, currency: str) -> str:
+    """Money with its unit attached. A THB figure must never wear a dollar sign."""
+    return (f"${amount:,.2f}" if str(currency).upper() == "USD"
+            else f"{amount:,.2f} {str(currency).upper()}")
+
+
 @needs(capabilities.BUYING_POWER)
 def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: float = 1.0,
                             entry_price: float = None, account_currency: str = "USD") -> str:
@@ -2068,6 +2090,24 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             raise ToolError("Entry and stop-loss are identical — risk per share would be zero.")
 
         direction = "LONG" if stop < entry else "SHORT"
+
+        # A share count is a ratio of two money amounts, so both have to be in
+        # the same currency. This account is THB-denominated with a USD line;
+        # dividing a THB risk budget by a USD risk-per-share gives a size wrong
+        # by the exchange rate, and there is no FX source here that could
+        # correct it. Refuse rather than invent one.
+        quote_ccy = _price_currency(symbol)
+        acct_ccy = account_currency.upper()
+        price_ccy = quote_ccy or acct_ccy
+        if quote_ccy and quote_ccy != acct_ccy:
+            raise ToolError(
+                f"{symbol.upper()} is quoted in {quote_ccy}, but the risk budget was "
+                f"asked for against this account's {acct_ccy} line. Dividing a "
+                f"{acct_ccy} budget by a {quote_ccy} risk-per-share gives a share "
+                f"count wrong by the exchange rate, and this server has no FX source "
+                f"it is willing to invent one from. Re-run with "
+                f"account_currency='{quote_ccy}' if that line exists on the account; "
+                f"get_account_info lists the ones that do.")
 
         adapter = brokers.get()
         account_id = adapter.primary_account_id()
@@ -2109,17 +2149,25 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             # next to it, not implied by the absence of a warning.
             f"{webull_client.freshness_line(df, source, 'D')}"
             f"{fallback_warning(source)}"
-            f"* **Entry**: `${entry:,.2f}`{'' if entry_price is not None else ' (latest close)'}\n"
-            f"* **Stop loss**: `${stop:,.2f}`  →  risk/share `${risk_per_share:,.2f}` ({stop_pct:.2f}%)\n"
-            f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` (ATR = ${atr:,.2f})\n\n"
-            f"* **{account_currency} equity**: `${equity:,.2f}`\n"
-            f"* **Risk budget @ {risk_percent:g}%**: `${risk_budget:,.2f}`\n"
+            f"* **Entry**: `{_money(entry, price_ccy)}`"
+            f"{'' if entry_price is not None else ' (latest close)'}\n"
+            f"* **Stop loss**: `{_money(stop, price_ccy)}`  →  risk/share "
+            f"`{_money(risk_per_share, price_ccy)}` ({stop_pct:.2f}%)\n"
+            f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` "
+            f"(ATR = {_money(atr, price_ccy)})\n\n"
+            f"* **{acct_ccy} equity**: `{_money(equity, acct_ccy)}`\n"
+            f"* **Risk budget @ {risk_percent:g}%**: `{_money(risk_budget, acct_ccy)}`\n"
             f"* **Suggested size**: **{shares:,.4f} shares** "
-            f"(notional `${shares * entry:,.2f}`)\n"
+            f"(notional `{_money(shares * entry, price_ccy)}`)\n"
         )
+        if quote_ccy is None:
+            out += (f"\n*The price feed would not say which currency {symbol.upper()} "
+                    f"is quoted in, so this size assumes it matches the account's "
+                    f"{acct_ccy} line. If it does not, the share count is wrong by "
+                    f"the exchange rate.*\n")
         if capped_by:
-            out += (f"\n**Warning:** Risk-based size was **{raw_shares:,.4f} shares** (`${notional:,.2f}`) "
-                    f"but that exceeds {capped_by} of `${buying_power:,.2f}`. Size shown is capped.\n")
+            out += (f"\n**Warning:** Risk-based size was **{raw_shares:,.4f} shares** (`{_money(notional, price_ccy)}`) "
+                    f"but that exceeds {capped_by} of `{_money(buying_power, acct_ccy)}`. Size shown is capped.\n")
         if atr > 0 and atr_multiple < 1:
             out += ("\n**Warning:** The stop is inside one ATR of daily noise — a routine day's range "
                     "would likely take you out.\n")

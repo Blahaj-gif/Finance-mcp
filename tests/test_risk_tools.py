@@ -496,3 +496,69 @@ def test_the_dashboard_imports_tradeclient_at_module_level():
     src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
     header = src[:src.index("# ---")]
     assert "from webull.trade.trade_client import TradeClient" in header
+
+
+# =====================================================================
+# A share count is a ratio of two money amounts, so they must be one currency
+# =====================================================================
+
+def test_sizing_refuses_to_divide_one_currency_by_another(monkeypatch, fake_account):
+    """
+    The account is THB-denominated with a USD buying-power line. Dividing a THB
+    risk budget by a USD risk-per-share gives a share count wrong by the
+    exchange rate -- about 35x too many shares -- and the output rendered it as
+    "**THB equity**: `$320,000.00`", a THB amount with a dollar sign on it.
+    """
+    import sys as _sys
+    # A real THB line, so the refusal under test is the currency mismatch and
+    # not "no THB buying power" -- which mentions both codes and would let this
+    # test pass without the fix existing.
+    monkeypatch.setattr(_sys.modules[__name__], "BALANCE", {
+        "total_asset_currency": "THB",
+        "account_currency_assets": [
+            {"currency": "THB", "cash_balance": "320000.00",
+             "buying_power": "320000.00", "market_value": "0.00"},
+        ],
+    })
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: {"currency": "USD", "exchange": "NasdaqGS"})
+
+    with pytest.raises(ToolError) as caught:
+        srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                    entry_price=100.0, account_currency="THB")
+
+    message = str(caught.value)
+    assert "USD" in message and "THB" in message, \
+        "the refusal must name both currencies so the caller can fix it"
+
+
+def test_sizing_proceeds_when_the_currencies_agree(monkeypatch, fake_account):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: {"currency": "USD", "exchange": "NasdaqGS"})
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                      entry_price=100.0, account_currency="USD")
+    assert "10.0000 shares" in out
+
+
+def test_an_unreadable_quote_currency_is_said_out_loud_not_assumed(monkeypatch, fake_account):
+    """
+    Silence is what made this invisible. An unknown must be visible rather than
+    assumed away -- but it must not refuse either, or an upstream hiccup would
+    stop sizing working at all.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("no metadata")))
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                      entry_price=100.0, account_currency="USD")
+    assert "10.0000 shares" in out
+    low = out.lower()
+    assert "currency" in low and "exchange rate" in low, (
+        "an unreadable quote currency must be stated, not assumed away")
