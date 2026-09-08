@@ -136,8 +136,10 @@ def test_portfolio_risk_computes_weights_and_pnl(monkeypatch, fake_account):
                         lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
     out = srv.get_portfolio_risk()
 
-    # AAA 10 x 110 = 1100; BBB 5 x 45 = 225; gross 1325.
-    assert "$1,325.00" in out
+    # AAA 10 x 110 = 1100; BBB 5 x 45 = 225; gross 1325. The fixture reports no
+    # currency per position, so the total is shown bare rather than as dollars.
+    assert "1,325.00" in out
+    assert "$1,325.00" not in out
     assert "83.0%" in out or "83.02%" in out    # AAA weight
     assert "+10.00%" in out                      # AAA P&L
     assert "-10.00%" in out                      # BBB P&L
@@ -562,3 +564,39 @@ def test_an_unreadable_quote_currency_is_said_out_loud_not_assumed(monkeypatch, 
     low = out.lower()
     assert "currency" in low and "exchange rate" in low, (
         "an unreadable quote currency must be stated, not assumed away")
+
+
+def test_portfolio_risk_never_adds_two_currencies_together(monkeypatch, fake_account):
+    """
+    Gross exposure summed every position's value regardless of denomination, and
+    then divided each position by that total to get a weight. A THB holding
+    beside a USD one produced a gross that is not money in any currency, and
+    weights that are wrong for both.
+    """
+    class Mixed:
+        def get_account_list(self):
+            return [{"account_id": "ACC1"}]
+
+        def get_account_balance(self, account_id):
+            return BALANCE
+
+        def get_account_position(self, account_id):
+            return [
+                {"symbol": "AAA", "quantity": "10", "cost_price": "100.00",
+                 "last_price": "110.00", "currency": "USD"},
+                {"symbol": "KKK", "quantity": "100", "cost_price": "150.00",
+                 "last_price": "160.00", "currency": "THB"},
+            ]
+
+    import webull.trade.trade_client as tc
+    monkeypatch.setattr(tc, "TradeClient",
+                        lambda api: type("T", (), {"account_v2": Mixed()})())
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+
+    out = srv.get_portfolio_risk()
+
+    assert "$1,100.00" in out, "the USD book is 10 x 110"
+    assert "16,000.00 THB" in out, "the THB book is 100 x 160, and is not dollars"
+    assert "$17,100.00" not in out, "the two must never be added together"
+    assert "100.0%" in out, "each position is the whole of its own currency book"

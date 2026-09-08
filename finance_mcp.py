@@ -2052,9 +2052,19 @@ def _price_currency(symbol: str):
 
 
 def _money(amount, currency: str) -> str:
-    """Money with its unit attached. A THB figure must never wear a dollar sign."""
-    return (f"${amount:,.2f}" if str(currency).upper() == "USD"
-            else f"{amount:,.2f} {str(currency).upper()}")
+    """
+    Money with its unit attached. A THB figure must never wear a dollar sign.
+
+    An unknown currency renders bare rather than borrowing one: a number with no
+    denomination is at least honest about what it is, where a "$" put there by
+    default is the mistake this exists to prevent.
+    """
+    code = str(currency or "").upper()
+    if code == "USD":
+        return f"${amount:,.2f}"
+    if not code or code == "?":
+        return f"{amount:,.2f}"
+    return f"{amount:,.2f} {code}"
 
 
 @needs(capabilities.BUYING_POWER)
@@ -2283,7 +2293,22 @@ def get_portfolio_risk() -> str:
             return f"### Portfolio Risk\n\nNo open positions in account {account_id}."
 
         rows, returns, warnings, ages = [], {}, [], []
-        gross = 0.0
+        # Gross exposure is per currency, never across. Adding a THB holding to
+        # a USD one produces a number that is not money in any denomination, and
+        # dividing by it gives weights that are wrong for both. There is no FX
+        # source here, so this groups rather than converting.
+        from collections import defaultdict
+        gross_by_ccy = defaultdict(float)
+        # A position whose payload omits the key is denominated in the account's
+        # own currency rather than unknown -- the alternative relabels a
+        # perfectly good single-currency book as "?".
+        account_ccy = ""
+        try:
+            account_ccy = next(
+                (str(a.get("currency", "")).upper() for a in adapter.accounts()
+                 if a.get("id") == account_id), "")
+        except Exception:
+            pass
         for p in positions:
             # Protocol shape, not Webull's: cost/last rather than
             # cost_price/last_price, so every adapter reads the same here.
@@ -2292,7 +2317,8 @@ def get_portfolio_risk() -> str:
             cost = float(p.get("cost") or 0)
             last = float(p.get("last") or 0)
             value = qty * last
-            gross += value
+            ccy = (str(p.get("currency", "")).upper() or account_ccy or "?")
+            gross_by_ccy[ccy] += value
             pnl_pct = ((last - cost) / cost * 100) if cost else 0.0
 
             vol = None
@@ -2313,6 +2339,7 @@ def get_portfolio_risk() -> str:
                 "Cost": round(cost, 2),
                 "Last": round(last, 2),
                 "Value": round(value, 2),
+                "Ccy": ccy,
                 "P&L %": f"{pnl_pct:+.2f}%",
                 # The broker supplies the mark; the volatility comes from our
                 # own history, and those can be different ages.
@@ -2321,13 +2348,15 @@ def get_portfolio_risk() -> str:
             })
 
         for r in rows:
-            r["Weight %"] = f"{(r['Value'] / gross * 100):.1f}%" if gross else "n/a"
-            if gross and r["Value"] / gross > 0.40:
-                warnings.append(f"{r['Symbol']} is {r['Value'] / gross * 100:.0f}% of the portfolio "
-                                "— single-name concentration above 40%.")
+            book = gross_by_ccy[r["Ccy"]]
+            r["Weight %"] = f"{(r['Value'] / book * 100):.1f}%" if book else "n/a"
+            if book and r["Value"] / book > 0.40:
+                warnings.append(
+                    f"{r['Symbol']} is {r['Value'] / book * 100:.0f}% of the "
+                    f"{r['Ccy']} book — single-name concentration above 40%.")
 
         table = pd.DataFrame(rows)[
-            ["Symbol", "Qty", "Cost", "Last", "Value", "Weight %", "P&L %", "Ann. Vol %"]]
+            ["Symbol", "Qty", "Cost", "Last", "Value", "Ccy", "Weight %", "P&L %", "Ann. Vol %"]]
         try:
             table_str = table.to_markdown(index=False)
         except Exception:
@@ -2335,10 +2364,30 @@ def get_portfolio_risk() -> str:
 
         out = (f"### Portfolio Risk — account {account_id}\n\n"
                + webull_client.freshness_summary(ages, "D", "position histories")
-               + f"**Gross exposure**: `${gross:,.2f}` across {len(rows)} position(s)\n\n"
+               + "**Gross exposure**: "
+               + " · ".join(f"`{_money(v, c)}`"
+                            for c, v in sorted(gross_by_ccy.items()))
+               + f" across {len(rows)} position(s)\n\n"
                + table_str + "\n")
 
-        # Portfolio-level volatility and beta, weighted by position value.
+        if "?" in gross_by_ccy:
+            out += ("\n*The broker did not report a currency for every position, so "
+                    "those values are shown without a denomination rather than "
+                    "assumed to be dollars.*\n")
+        if len(gross_by_ccy) > 1:
+            out += ("\n*This account holds more than one currency, so exposures and "
+                    "weights are reported within each and never summed across them. "
+                    "There is no exchange rate here to convert with.*\n")
+
+        # Portfolio-level volatility and beta, weighted by position value. Only
+        # meaningful inside one currency: value-weighting across unconverted
+        # denominations would weight by the size of the number rather than by
+        # the size of the holding.
+        gross = next(iter(gross_by_ccy.values())) if len(gross_by_ccy) == 1 else 0.0
+        if len(gross_by_ccy) > 1:
+            out += ("\n*Portfolio volatility and beta are suppressed: they weight "
+                    "positions by value, which cannot be done across currencies "
+                    "without an exchange rate.*\n")
         if len(returns) >= 1 and gross:
             try:
                 bench, _ = webull_client.fetch_data("SPY", "D", 90)
