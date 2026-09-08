@@ -1007,3 +1007,27 @@ def test_the_dashboard_does_not_claim_nothing_was_sent_when_it_cannot_know():
     assert "order book" in block.lower()
     assert "remains PENDING" not in block, \
         "an unknown outcome must not be reported as a draft that was never sent"
+
+
+def test_a_pending_draft_can_be_cancelled_from_the_dashboard():
+    """
+    There was no way to clear a draft except by editing the JSON by hand. That
+    absence is the missing remedy behind several refusals -- an unpriceable
+    pending draft, a draft raised against the wrong desk, one whose outcome is
+    unknown -- each of which tells the operator to deal with the draft and gave
+    them nothing to deal with it with.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    execution = app[app.index("PENDING_APPROVAL"):]
+    assert "CANCELLED" in execution, "the execution page needs a cancel control"
+    assert "cancel_draft" in execution
+
+
+def test_a_cancelled_draft_stops_counting_against_buying_power():
+    """A cancelled draft has to actually free the commitment it was holding."""
+    import finance_mcp as srv
+    queue = [{"draft_id": "D1", "symbol": "AAA", "action": "BUY", "quantity": 100,
+              "limit_price": 2.0, "est_notional": 200.0, "status": "CANCELLED"}]
+    cost, sells, unpriced = srv._pending_commitments(queue, lambda s: None)
+    assert cost == 0.0 and not sells and not unpriced

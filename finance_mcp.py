@@ -3276,9 +3276,28 @@ def get_institutional_holdings(institution: str, limit: int = 25, source: str = 
                           + ".*")
 
         shown = sum(h["value"] or 0 for h in data["holdings"])
+
+        # A 13F is a photograph of the quarter end, due 45 days after it and
+        # superseded only by the next one -- so the newest figure available is
+        # routinely three months old and can be four and a half. The header
+        # named the quarter and the filing date and left the reader to do the
+        # subtraction; "latest 13F" reads as "current" to anything that does
+        # not do it.
+        age_note = ""
+        try:
+            import datetime as _d
+            period = _d.date.fromisoformat(str(data["period"]))
+            age = (market_calendar.eastern_now().date() - period).days
+            age_note = (f" · positions as at that date, **{age} days old** "
+                        f"(13F is due 45 days after quarter end and stands until "
+                        f"the next one, so the manager may have traded out since)")
+        except Exception:
+            pass
+
         return (f"### 13F Holdings — {data['institution']}\n"
                 f"*Quarter ending {data['period']} · filed {data['filed']} · "
-                f"{data['positions']} positions · **${data['total_value']:,.0f}** total*\n\n"
+                f"{data['positions']} positions · **${data['total_value']:,.0f}** total"
+                f"{age_note}*\n\n"
                 + table_str
                 + f"\n\n*Top {len(rows)} shown = {shown / total * 100:.1f}% of reported value. "
                   "13F covers US-listed long equity and options only — it excludes cash, bonds, "

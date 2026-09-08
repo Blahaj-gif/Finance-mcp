@@ -1207,3 +1207,28 @@ def test_unusual_options_reports_both_ends_of_a_mixed_age_chain(monkeypatch):
 
     assert "2026-08-28" in out and "2026-09-04" in out, \
         "a chain whose rows disagree on age must show both ends"
+
+
+def test_13f_holdings_state_how_old_the_snapshot_is(monkeypatch):
+    """
+    A 13F is a photograph of the quarter end, filed up to 45 days later and
+    superseded only by the next one — so the newest available figure is
+    routinely three months old and can be four and a half. The output named the
+    quarter and the filing date and left the reader to do that subtraction, and
+    a model reading "latest 13F" hears "current".
+    """
+    monkeypatch.setattr(srv.edgar_forms, "institutional_holdings", lambda *a, **k: {
+        "institution": "BERKSHIRE HATHAWAY INC", "cik": "0001067983",
+        "filed": "2026-08-14", "period": "2026-06-30", "positions": 2,
+        "total_value": 1000, "reconciliation": {},
+        "holdings": [
+            {"issuer": "APPLE INC", "value": 700, "shares": 10, "cusip": "037833100"},
+            {"issuer": "COCA COLA CO", "value": 300, "shares": 5, "cusip": "191216100"}],
+    })
+
+    out = srv.get_institutional_holdings("BRK-B")
+
+    low = out.lower()
+    assert "days old" in low or "months old" in low, \
+        "the age of the snapshot has to be stated, not left as a subtraction"
+    assert "45" in out, "the statutory reporting lag belongs next to the age"

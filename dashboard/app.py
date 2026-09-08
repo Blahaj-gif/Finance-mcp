@@ -1135,7 +1135,26 @@ with tab_execution:
                     st.error(refusal)
                     continue
 
-                col_prev, col_exec = st.columns([1, 1])
+                col_prev, col_exec, col_drop = st.columns([1, 1, 0.5])
+
+                # The way out. Until this existed a draft could only be cleared
+                # by editing the JSON by hand, which made every refusal that
+                # says "deal with this draft" -- wrong desk, unpriceable, outcome
+                # unknown -- a dead end. Cancelling is local only: it marks our
+                # own record and sends nothing, because a draft has never
+                # reached the broker.
+                with col_drop:
+                    if st.button("Cancel", key=f"cancel_draft_{draft['draft_id']}",
+                                 width="stretch",
+                                 help="Discard this draft. It was never sent, so "
+                                      "nothing is withdrawn from the broker."):
+                        draft["status"] = "CANCELLED"
+                        draft["cancelled_at"] = datetime.datetime.now().strftime(
+                            "%Y-%m-%d %H:%M:%S")
+                        with open(drafts_path, "w", encoding="utf-8") as fw:
+                            json.dump(drafts, fw, indent=2)
+                        st.session_state.pop(preview_key, None)
+                        st.rerun()
 
                 # --- Step 1: price the order with the broker (non-binding) ---
                 with col_prev:
