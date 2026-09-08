@@ -243,3 +243,18 @@ def test_no_tool_reads_yahoos_iv_column_outside_the_fallback():
     assert len(hits) <= 4, (
         f"{len(hits)} raw uses of Yahoo's impliedVolatility remain at lines {hits}; "
         "solve from the mid via options_math instead")
+
+
+def test_days_to_expiry_is_counted_from_the_exchange_date(monkeypatch):
+    """
+    Options expire on an exchange calendar, not on the machine's. This host runs
+    at UTC+7, so from 11:00 local until midnight the machine's date is already
+    tomorrow in New York's terms -- and every DTE, and therefore every theta and
+    every annualised IV, was a day short for a third of the clock.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read()
+    assert "_dt.date.fromisoformat(near_date) - _dt.date.today()" not in src
+    assert "_dt.date.fromisoformat(expiry) - _dt.date.today()" not in src
+    assert src.count("market_calendar.eastern_now().date()") >= 2, \
+        "both expiry calculations must count from the exchange date"

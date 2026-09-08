@@ -110,15 +110,23 @@ def run_backtest(df: pd.DataFrame, consensus_col: str = "consensus_score",
             entry_price = close[i - 1] if i > 0 else close[i]
         elif exec_pos[i] == 0 and entry_price is not None:
             exit_price = close[i - 1] if i > 0 else close[i]
+            gross = (exit_price - entry_price) / entry_price if entry_price else 0.0
+            # Net of the round trip. The equity curve has always charged
+            # transaction_costs, but the per-trade returns did not, so win rate,
+            # average win/loss and profit factor were computed gross -- a
+            # strategy losing money after costs could show a healthy win rate
+            # beside a losing curve, and the two disagreed by construction.
             trades.append({"entry": entry_price, "exit": exit_price, "open": False,
-                           "ret": (exit_price - entry_price) / entry_price if entry_price else 0.0})
+                           "gross_ret": gross, "ret": gross - 2 * transaction_fee})
             entry_price = None
 
     open_trade = None
     if entry_price is not None:
         exit_price = close[-1]
+        gross = (exit_price - entry_price) / entry_price if entry_price else 0.0
+        # Still open, so only the entry leg has been paid.
         open_trade = {"entry": entry_price, "exit": exit_price, "open": True,
-                      "ret": (exit_price - entry_price) / entry_price if entry_price else 0.0}
+                      "gross_ret": gross, "ret": gross - transaction_fee}
         trades.append(open_trade)
 
     closed = [t for t in trades if not t["open"]]

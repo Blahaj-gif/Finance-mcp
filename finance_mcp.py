@@ -575,7 +575,8 @@ def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> 
         # Spot from the validated price feed, not from the chain's own quotes.
         df, source = webull_client.fetch_data(symbol, "D", 260)
         spot = float(df["close"].iloc[-1])
-        days = max((_dt.date.fromisoformat(near_date) - _dt.date.today()).days, 0)
+        days = max((_dt.date.fromisoformat(near_date)
+                    - market_calendar.eastern_now().date()).days, 0)
 
         header = (f"### Options Chain — {symbol.upper()} @ {near_date} ({days}d)\n"
                   + webull_client.freshness_line(df, source, "D")
@@ -2490,7 +2491,8 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         if calls.empty or puts.empty:
             raise ToolError(f"Empty option chain for {symbol.upper()} at {expiry}.")
 
-        days = max((_dt.date.fromisoformat(expiry) - _dt.date.today()).days, 0)
+        days = max((_dt.date.fromisoformat(expiry)
+                    - market_calendar.eastern_now().date()).days, 0)
         t = max(days, 1) / 365.0
 
         # ATM strike and the straddle's implied move.

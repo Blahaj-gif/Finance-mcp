@@ -162,3 +162,33 @@ def test_hysteresis_holds_between_thresholds():
     r = bt.run_backtest(series(scores))
     held = r["df"]["position"].iloc[10:88]
     assert (held == 1).all(), "position should persist while the score sits between triggers"
+
+
+def test_trade_returns_carry_the_cost_of_the_round_trip():
+    """
+    The equity curve charged transaction_costs but the per-trade returns did
+    not, so win rate, average win, average loss and profit factor were all
+    computed gross of the fee. A strategy that loses money after costs could
+    report a healthy win rate beside a losing curve, and the two numbers
+    disagreed by construction.
+
+    The close rises exactly 1% per bar and this holding spans three of them, so
+    it grosses +3.03%. Charge 2% each way and the 4% round trip turns that
+    winner into a loser.
+    """
+    scores = [5.0] * 3 + [-5.0] * (N - 3)
+    r = bt.run_backtest(series(scores), transaction_fee=0.02)
+    trade = r["trades"][0]
+
+    assert trade["gross_ret"] > 0, "the move itself was up"
+    assert trade["ret"] < 0, "after paying both legs it is a loss"
+    assert r["metrics"]["win_rate"] == 0.0, \
+        "a trade that lost money after costs is not a win"
+
+
+def test_a_zero_fee_leaves_trade_returns_untouched():
+    """The costing must not quietly change the no-fee baseline."""
+    scores = [5.0] * 3 + [-5.0] * (N - 3)
+    r = bt.run_backtest(series(scores), transaction_fee=0.0)
+    trade = r["trades"][0]
+    assert trade["ret"] == pytest.approx(trade["gross_ret"])
