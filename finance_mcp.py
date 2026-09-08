@@ -1242,6 +1242,7 @@ def get_unusual_options(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
+    import datetime
     try:
         ticker = webull_client.yahoo_ticker(symbol.upper())
         opts = ticker.options
@@ -1265,6 +1266,11 @@ def get_unusual_options(symbol: str) -> str:
                 
                 if (vol > oi and vol >= 100) or iv >= 0.60:
                     unusual.append({
+                        # Carried so the printed rows can date themselves, then
+                        # dropped before rendering. An option's "Last Price" is
+                        # its last *trade*, which on a thin strike can be days
+                        # old while the expiry beside it reads as today.
+                        "_last_trade": row.get("lastTradeDate"),
                         "Type": opt_type,
                         "Strike": strike,
                         "Last Price": round(row.get("lastPrice", 0), 2),
@@ -1279,12 +1285,32 @@ def get_unusual_options(symbol: str) -> str:
             return f"No unusual options activity flagged for {symbol.upper()} on expiration {near_date}."
             
         df_u = pd.DataFrame(unusual).sort_values(by="Volume", ascending=False).head(10)
+
+        # Date the rows actually shown, not the whole chain: the stalest
+        # contract in the chain is often one that got dropped by head(10), and
+        # a timestamp covering rows nobody sees is its own kind of wrong. When
+        # the printed rows disagree, say both ends rather than picking one.
+        stamped = pd.to_datetime(df_u["_last_trade"], utc=True, errors="coerce").dropna()
+        if len(stamped):
+            first, last = stamped.min(), stamped.max()
+            if first.date() == last.date():
+                traded = f"last traded {last:%Y-%m-%d %H:%M} UTC"
+            else:
+                traded = (f"last traded between {first:%Y-%m-%d} and "
+                          f"{last:%Y-%m-%d %H:%M} UTC")
+        else:
+            traded = "last-trade time not published"
+        df_u = df_u.drop(columns=["_last_trade"])
+
         try:
             table_str = df_u.to_markdown(index=False)
         except Exception:
             table_str = df_u.to_string(index=False)
-            
-        return f"### Unusual Options Activity: {symbol.upper()} (Expiration: {near_date})\n\n" + table_str
+
+        return (f"### Unusual Options Activity: {symbol.upper()} "
+                f"(Expiration: {near_date})\n"
+                f"`Quotes {traded} · source: Yahoo Finance · "
+                f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n" + table_str)
     except Exception as e:
         raise ToolError(f"Error scanning unusual options for {symbol}: {e}") from e
 
@@ -1296,6 +1322,7 @@ def get_short_interest(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. GME, TSLA, NVDA).
     """
+    import datetime
     try:
         ticker = webull_client.yahoo_ticker(symbol.upper())
         info = ticker.info
@@ -1312,8 +1339,22 @@ def get_short_interest(symbol: str) -> str:
         
         squeeze_risk = "HIGH SQUEEZE POTENTIAL" if (short_pct and short_pct > 0.15) else "LOW / MODERATE SQUEEZE RISK"
 
+        # FINRA settles short interest twice a month and publishes it days
+        # later, so this figure is routinely two to three weeks old. It was
+        # rendered with nothing to date it, which reads as current.
+        settled = info.get("dateShortInterest")
+        if settled:
+            as_of = datetime.datetime.utcfromtimestamp(int(settled))
+            age = (datetime.datetime.utcnow() - as_of).days
+            asof_line = (f"`Settlement date {as_of:%Y-%m-%d} ({age} days ago) · "
+                         "source: FINRA via Yahoo Finance`\n")
+        else:
+            asof_line = ("`Settlement date not published by the upstream — the age "
+                         "of these figures is unknown`\n")
+
         out = (
             f"### Short Interest & Float Analysis: {symbol.upper()}\n"
+            f"{asof_line}"
             f"* **Short % of Float**: `{short_pct_str}`\n"
             f"* **Days to Cover (Short Ratio)**: `{days_to_cover}`\n"
             f"* **Total Shares Short**: `{shares_str}`\n"

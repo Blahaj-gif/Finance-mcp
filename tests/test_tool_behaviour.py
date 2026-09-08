@@ -1115,3 +1115,95 @@ def test_the_readme_states_the_server_is_client_agnostic():
     assert "Works with any MCP client" in text
     for client in ("Claude Code", "Cursor", "Windsurf", "VS Code"):
         assert client in text, f"{client} missing from the client table"
+
+
+# =====================================================================
+# Provenance: a number handed to a model has to carry its own as-of date
+# =====================================================================
+
+class _FakeQuoteTicker:
+    def __init__(self, info=None, options=None, chain=None):
+        self.info = info or {}
+        self.options = options or []
+        self._chain = chain
+
+    def option_chain(self, date):
+        return self._chain
+
+
+def test_short_interest_states_the_settlement_date_before_the_numbers(monkeypatch):
+    """
+    FINRA short interest settles twice a month and is published days later, so
+    the figure is routinely three weeks old. yfinance publishes the settlement
+    date as `dateShortInterest`; this tool never read it, and rendered a
+    three-week-old squeeze assessment with nothing to date it.
+    """
+    info = {"shortPercentOfFloat": 0.132, "shortRatio": 2.19,
+            "sharesShort": 116327753, "heldPercentInstitutions": 0.61,
+            "sharesOutstanding": 1000000000,
+            "dateShortInterest": 1786665600}          # 2026-08-14 UTC
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(info=info))
+    monkeypatch.setattr(srv, "_fundamentals_check_note", lambda *a, **k: "")
+
+    out = srv.get_short_interest("GME")
+
+    assert "2026-08-14" in out, "the settlement date the figure refers to must be stated"
+    assert out.index("2026-08-14") < out.index("Short % of Float"), \
+        "the as-of date belongs before the numbers it qualifies, not after"
+
+
+def test_short_interest_without_a_published_date_says_so(monkeypatch):
+    """Absent is not the same as current, and must not render as current."""
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(info={"shortPercentOfFloat": 0.1}))
+    monkeypatch.setattr(srv, "_fundamentals_check_note", lambda *a, **k: "")
+
+    out = srv.get_short_interest("AAA")
+
+    assert "not published" in out.lower()
+
+
+def _chain(rows):
+    import pandas as pd
+    cols = ["strike", "lastPrice", "volume", "openInterest",
+            "impliedVolatility", "lastTradeDate"]
+    calls = pd.DataFrame([r for r in rows], columns=cols)
+    puts = pd.DataFrame([], columns=cols)
+    return type("C", (), {"calls": calls, "puts": puts})()
+
+
+def test_unusual_options_dates_the_quotes_it_reports(monkeypatch):
+    """
+    The only date this tool printed was the contract expiry, which a model reads
+    as today. The quotes themselves are last-trade prints that can be days old.
+    """
+    import pandas as pd
+    rows = [[770.0, 1.76, 87921, 100, 0.103, pd.Timestamp("2026-09-04 19:59", tz="UTC")]]
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(options=["2026-09-11"], chain=_chain(rows)))
+
+    out = srv.get_unusual_options("SPY")
+
+    assert "2026-09-04" in out, "the last-trade date of the quotes must be stated"
+    assert "Expiration" in out
+
+
+def test_unusual_options_reports_both_ends_of_a_mixed_age_chain(monkeypatch):
+    """
+    A chain can hold a contract that traded seconds ago next to one that last
+    traded a week ago. A single chain-level timestamp would be its own lie, so
+    the span is reported when the rows shown disagree.
+    """
+    import pandas as pd
+    rows = [
+        [770.0, 1.76, 87921, 100, 0.103, pd.Timestamp("2026-09-04 19:59", tz="UTC")],
+        [800.0, 0.12, 50000, 100, 0.900, pd.Timestamp("2026-08-28 14:02", tz="UTC")],
+    ]
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(options=["2026-09-11"], chain=_chain(rows)))
+
+    out = srv.get_unusual_options("SPY")
+
+    assert "2026-08-28" in out and "2026-09-04" in out, \
+        "a chain whose rows disagree on age must show both ends"
