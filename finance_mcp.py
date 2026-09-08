@@ -2036,6 +2036,34 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
 # RISK & POSITION SIZING
 # =====================================================================
 
+def _align_on_sessions(price_series: dict, bench_series):
+    """
+    Daily returns for a set of holdings and a benchmark, on one shared calendar.
+
+    Two things have to be true before a covariance means anything, and only the
+    first is obvious. The series must be paired by DATE -- these used to be
+    reset_index(drop=True) and lined up by position, so one holding missing a
+    session put every later return of every other holding against the wrong
+    day. And the bar immediately after a gap has to go: after an inner join it
+    is a multi-day return for the leg that skipped and a one-day return for the
+    rest, which is a different quantity wearing the same column.
+
+    Returns (returns_frame, benchmark_returns) on the surviving sessions.
+    """
+    import pandas as pd
+
+    panel = pd.concat(price_series, axis=1, join="inner").sort_index()
+    panel, bench = panel.align(bench_series.sort_index(), axis=0, join="inner")
+
+    keep = pd.Series(True, index=panel.index)
+    for source in list(price_series.values()) + [bench_series]:
+        position = pd.Series(range(len(source)), index=source.index)
+        keep &= (position.reindex(panel.index).diff() == 1)
+
+    rets = panel.pct_change()[keep].dropna()
+    return rets, bench.pct_change()[keep].dropna().reindex(rets.index)
+
+
 def _price_currency(symbol: str):
     """
     The currency the price feed quotes this symbol in, or None if it will not say.
@@ -2329,7 +2357,11 @@ def get_portfolio_risk() -> str:
                 age = webull_client.bar_age(df, "D")
                 ages.append(age)
                 r = df["close"].pct_change().dropna()
-                returns[sym] = r.reset_index(drop=True)
+                # Keep the DATE. These used to be reset_index(drop=True) and
+                # paired by position, so one holding missing a session lined
+                # every later return up against the wrong day for all of them.
+                closes = df.set_index(pd.to_datetime(df["time"]).dt.normalize())["close"]
+                returns[sym] = closes[~closes.index.duplicated(keep="last")]
                 vol = float(r.std() * (252 ** 0.5) * 100)
             except Exception as e:
                 warnings.append(f"{sym}: no price history ({str(e)[:60]})")
@@ -2392,34 +2424,45 @@ def get_portfolio_risk() -> str:
         if len(returns) >= 1 and gross:
             try:
                 bench, _ = webull_client.fetch_data("SPY", "D", 90)
-                bench_r = bench["close"].pct_change().dropna().reset_index(drop=True)
+                bench_px = bench.set_index(
+                    pd.to_datetime(bench["time"]).dt.normalize())["close"]
+                bench_px = bench_px[~bench_px.index.duplicated(keep="last")]
 
-                weights, series = [], []
+                weights, wanted = [], []
                 for r in rows:
                     s = returns.get(r["Symbol"])
                     if s is not None and len(s) > 5:
                         weights.append(r["Value"] / gross)
-                        series.append(s)
+                        wanted.append(r["Symbol"])
 
-                if series:
-                    n = min(min(len(s) for s in series), len(bench_r))
-                    mat = np.column_stack([s.tail(n).to_numpy() for s in series])
+                rets = None
+                if wanted:
+                    rets, b_ret = _align_on_sessions(
+                        {sym: returns[sym] for sym in wanted}, bench_px)
+                    mat = rets.to_numpy()
+                    b = b_ret.to_numpy()
+
+                if rets is not None and len(rets) < 20:
+                    out += (f"\n*Portfolio beta and correlation suppressed: only "
+                            f"{len(rets)} clean consecutive sessions are shared by "
+                            f"every holding and SPY.*\n")
+                elif rets is not None:
                     w = np.array(weights) / sum(weights)
                     port = mat @ w
-                    b = bench_r.tail(n).to_numpy()
 
                     port_vol = float(port.std() * (252 ** 0.5) * 100)
                     var = b.var()
                     beta = float(np.cov(port, b)[0][1] / var) if var else float("nan")
 
                     out += (f"\n**Portfolio annualised volatility**: `{port_vol:.1f}%`\n"
-                            f"**Beta vs SPY**: `{beta:.2f}`\n")
+                            f"**Beta vs SPY**: `{beta:.2f}` "
+                            f"<br>*over {len(rets)} sessions shared by all legs*\n")
 
-                    if len(series) > 1:
+                    if len(wanted) > 1:
                         corr = np.corrcoef(mat, rowvar=False)
                         pairs = [
-                            f"{rows[i]['Symbol']}/{rows[j]['Symbol']} `{corr[i][j]:.2f}`"
-                            for i in range(len(series)) for j in range(i + 1, len(series))
+                            f"{wanted[i]}/{wanted[j]} `{corr[i][j]:.2f}`"
+                            for i in range(len(wanted)) for j in range(i + 1, len(wanted))
                             if corr[i][j] > 0.7
                         ]
                         if pairs:
