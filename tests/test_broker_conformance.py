@@ -1467,3 +1467,67 @@ def test_a_remote_gateway_without_the_flag_is_untouched(monkeypatch):
     ctx = IbkrBroker(base_url="https://api.ibkr.com/v1/api",
                      account_id=IBKR_ACCOUNT)._ssl_context()
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+
+# =====================================================================
+# The order submitted is the order that was previewed
+# =====================================================================
+
+def test_an_edited_draft_no_longer_matches_what_the_broker_priced():
+    """
+    The queue is a local file and the approval page rebuilds nothing at submit
+    time -- it sends the payload built at preview. So a draft edited between
+    preview and approve was harmless to the payload but made the card a lie: the
+    human read one quantity and a different one was already priced. Comparing
+    the rebuilt order against the previewed one catches either direction.
+    """
+    from dashboard import broker, broker_protocol
+
+    previewed = broker.build_order(symbol="AAPL", action="BUY", quantity=10,
+                                   order_type="LMT", limit_price=100.0,
+                                   client_order_id="DRFT_1")
+    tampered = broker.build_order(symbol="AAPL", action="BUY", quantity=10000,
+                                  order_type="LMT", limit_price=100.0,
+                                  client_order_id="DRFT_1")
+
+    why = broker_protocol.rebuilt_differs(previewed, tampered)
+    assert why and "quantity" in why
+
+
+def test_an_untouched_draft_rebuilds_identically():
+    from dashboard import broker, broker_protocol
+
+    order = dict(symbol="AAPL", action="BUY", quantity=10, order_type="LMT",
+                 limit_price=100.0, client_order_id="DRFT_1")
+    assert broker_protocol.rebuilt_differs(broker.build_order(**order),
+                                           broker.build_order(**order)) is None
+
+
+def test_the_comparison_covers_derived_fields_not_a_hand_listed_few():
+    """
+    build_order derives time_in_force, entrust_type and a formatted limit price.
+    A hand-listed five-field snapshot would miss all of them, so the comparison
+    is over the whole payload.
+    """
+    from dashboard import broker, broker_protocol
+
+    previewed = broker.build_order(symbol="AAPL", action="BUY", quantity=10,
+                                   order_type="LMT", limit_price=100.0,
+                                   client_order_id="DRFT_1")
+    other = dict(previewed)
+    other["time_in_force"] = "GTC"
+    assert broker_protocol.rebuilt_differs(previewed, other)
+
+
+def test_the_approval_page_checks_the_draft_before_it_submits():
+    """The comparison above is only worth having if the submit path runs it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    submit = app[app.index("2 — APPROVE AND SUBMIT"):]
+    assert "rebuilt_differs" in submit, "the draft must be re-checked before sending"
+    assert submit.index("rebuilt_differs") < submit.index("broker.place_order("), \
+        "the check has to happen before the order goes"
+    assert "PENDING_APPROVAL" in submit, \
+        "a draft acted on elsewhere must not be submitted again"
+    assert "preview[\"order\"]" in submit.split("broker.place_order(")[1][:120], \
+        "what is SENT must still be the payload the broker actually priced"

@@ -824,13 +824,24 @@ def test_the_stored_time_column_stays_naive_utc():
     The display change must not reach storage: staleness, the disk cache and the
     indicator maths all compare these strings as UTC.
     """
+    # Built relative to the clock. A fixed date here passes on the day it is
+    # written and then fails forever after, because the intraday staleness gate
+    # measures in wall-clock hours -- the frame ages out and the test starts
+    # reporting a storage bug that is really a calendar.
+    newest = datetime.datetime.utcnow().replace(second=0, microsecond=0)
+    earlier = newest - datetime.timedelta(minutes=15)
+    eastern = datetime.timezone(datetime.timedelta(hours=-4))
     frame = pd.DataFrame({
-        "time": pd.to_datetime(["2026-09-04 15:30:00-04:00", "2026-09-04 15:45:00-04:00"]),
+        "time": pd.to_datetime([
+            earlier.replace(tzinfo=datetime.timezone.utc).astimezone(eastern),
+            newest.replace(tzinfo=datetime.timezone.utc).astimezone(eastern)]),
         "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
         "close": [1.0, 1.0], "volume": [1, 1]})
+
     out = wc._validate_frame(frame, "SPY", "M15", "test")
-    assert str(out["time"].iloc[-1]) == "2026-09-04 19:45:00", \
-        "storage must remain naive UTC"
+
+    assert str(out["time"].iloc[-1]) == newest.strftime("%Y-%m-%d %H:%M:%S"), \
+        "storage must remain naive UTC even when the input carries a zone"
 
 
 def test_an_intraday_bar_range_is_not_labelled_the_days_range():

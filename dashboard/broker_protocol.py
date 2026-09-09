@@ -277,6 +277,32 @@ def draft_refusal(draft: dict, broker_name: str, environment_label: str):
     return None
 
 
+def rebuilt_differs(previewed: dict, rebuilt: dict):
+    """
+    How the draft on disk now differs from the order the broker actually priced,
+    or None if they are the same order.
+
+    The submit path deliberately sends the payload built at preview time -- the
+    page's own invariant is that it never submits an order the broker has not
+    validated, and rebuilding at approval would defeat it. But that leaves a
+    gap: the queue is a local file, and a draft edited between the preview and
+    the click makes the approval card describe one order while a different one
+    is already priced and ready to send. Rebuilding the draft *only to compare*
+    closes it without touching what is sent.
+
+    The comparison is over the whole payload rather than a hand-listed few
+    fields, because `build_order` derives several -- time in force, the entrust
+    type, the two-decimal limit normalisation -- and a snapshot of the obvious
+    ones would miss exactly the changes nobody thought of.
+    """
+    if previewed == rebuilt:
+        return None
+    keys = sorted(set(previewed) | set(rebuilt))
+    changed = [f"{k}: previewed {previewed.get(k)!r}, draft now says {rebuilt.get(k)!r}"
+               for k in keys if previewed.get(k) != rebuilt.get(k)]
+    return "; ".join(changed) if changed else None
+
+
 def describe(broker) -> str:
     """
     One line naming the broker and how much of it has been proven, for anywhere

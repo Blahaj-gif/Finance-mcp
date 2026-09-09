@@ -22,6 +22,7 @@ import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
+import dashboard.order_queue as order_queue
 import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
@@ -1456,12 +1457,7 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
     
     drafts_path = BASE_DIR + "/dashboard/order_drafts.json"
     try:
-        drafts = []
-        if os.path.exists(drafts_path):
-            with open(drafts_path, "r", encoding="utf-8") as f:
-                c = f.read().strip()
-                if c:
-                    drafts = json.loads(c)
+        drafts = order_queue.load(drafts_path)
         # Generate unique order draft ID
         fingerprint = f"{symbol.upper()}_{action.upper()}_{quantity}_{limit_price}_{datetime.datetime.now().timestamp()}"
         draft_id = "DRFT_" + hashlib.md5(fingerprint.encode()).hexdigest()[:8]
@@ -1606,8 +1602,9 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             "est_notional": est_notional,
         }
 
-        drafts.append(new_draft)
-        atomic_write_json(drafts_path, drafts)
+        # Re-reads before writing, so a draft the dashboard cancelled or executed
+        # between our read and our write is not resurrected by our stale copy.
+        order_queue.append(new_draft, drafts_path)
 
         # State the surface on the draft itself. A model reading this back later
         # should never have to infer whether approving it spends real money.

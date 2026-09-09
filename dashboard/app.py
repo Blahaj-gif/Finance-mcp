@@ -81,6 +81,7 @@ from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import broker
 from dashboard import broker_protocol
+from dashboard import order_queue
 from dashboard import live_consent
 from webull.trade.trade_client import TradeClient
 from dashboard import portfolio_history
@@ -1148,11 +1149,10 @@ with tab_execution:
                                  width="stretch",
                                  help="Discard this draft. It was never sent, so "
                                       "nothing is withdrawn from the broker."):
-                        draft["status"] = "CANCELLED"
-                        draft["cancelled_at"] = datetime.datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S")
-                        with open(drafts_path, "w", encoding="utf-8") as fw:
-                            json.dump(drafts, fw, indent=2)
+                        order_queue.update(
+                            draft["draft_id"], _path=drafts_path, status="CANCELLED",
+                            cancelled_at=datetime.datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"))
                         st.session_state.pop(preview_key, None)
                         st.rerun()
 
@@ -1255,6 +1255,46 @@ with tab_execution:
                                 from webull.trade.trade_client import TradeClient
                                 import webull_client
 
+                                # Re-read the draft and check it is still the
+                                # order the broker priced. What gets SENT is
+                                # always preview["order"] -- rebuilding at
+                                # submit would send something the broker never
+                                # validated -- so this rebuild exists only to
+                                # compare. It catches a draft edited, cancelled
+                                # or already submitted between the preview and
+                                # this click.
+                                fresh = next(
+                                    (d for d in order_queue.load(drafts_path)
+                                     if d.get("draft_id") == draft["draft_id"]), None)
+                                if fresh is None:
+                                    st.error("This draft is no longer in the queue. "
+                                             "Nothing was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+                                if fresh.get("status") != "PENDING_APPROVAL":
+                                    st.error(
+                                        f"This draft is now {fresh.get('status')}, not "
+                                        "pending. It was acted on elsewhere. Nothing "
+                                        "was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+                                drift = broker_protocol.rebuilt_differs(
+                                    preview["order"],
+                                    broker.build_order(
+                                        symbol=fresh["symbol"], action=fresh["action"],
+                                        quantity=fresh["quantity"],
+                                        order_type=fresh["order_type"],
+                                        limit_price=fresh.get("limit_price"),
+                                        client_order_id=fresh["draft_id"]))
+                                if drift:
+                                    st.error(
+                                        "**This draft changed after it was priced.** "
+                                        f"{drift}\n\nNothing was sent. Preview it again "
+                                        "so the broker prices what the card actually "
+                                        "shows.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+
                                 trade_client = TradeClient(webull_client.get_api_client())
                                 res = broker.place_order(
                                     trade_client, preview["account_id"], preview["order"])
@@ -1264,12 +1304,13 @@ with tab_execution:
                                 # to the draft and reporting a fill that never happened.
                                 st.success(f"Order submitted. Broker response: {res}")
 
-                                draft["status"] = "EXECUTED"
-                                draft["executed_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                draft["client_order_id"] = preview["order"]["client_order_id"]
-                                draft["broker_response"] = str(res)
-                                with open(drafts_path, "w", encoding="utf-8") as fw:
-                                    json.dump(drafts, fw, indent=2)
+                                order_queue.update(
+                                    draft["draft_id"], _path=drafts_path,
+                                    status="EXECUTED",
+                                    executed_at=datetime.datetime.now().strftime(
+                                        "%Y-%m-%d %H:%M:%S"),
+                                    client_order_id=preview["order"]["client_order_id"],
+                                    broker_response=str(res))
 
                                 st.session_state.pop(preview_key, None)
                                 st.rerun()
@@ -1279,12 +1320,12 @@ with tab_execution:
                                 # PENDING" here would read as "nothing reached
                                 # the market", which is exactly what this
                                 # process does not know. Do not resend.
-                                draft["status"] = "OUTCOME_UNKNOWN"
-                                draft["unknown_at"] = datetime.datetime.now().strftime(
-                                    "%Y-%m-%d %H:%M:%S")
-                                draft["client_order_id"] = e.client_order_id
-                                with open(drafts_path, "w", encoding="utf-8") as fw:
-                                    json.dump(drafts, fw, indent=2)
+                                order_queue.update(
+                                    draft["draft_id"], _path=drafts_path,
+                                    status="OUTCOME_UNKNOWN",
+                                    unknown_at=datetime.datetime.now().strftime(
+                                        "%Y-%m-%d %H:%M:%S"),
+                                    client_order_id=e.client_order_id)
                                 st.error(
                                     f"**Outcome unknown.** {e.cause}\n\n"
                                     f"This order may or may not have reached the market. "
