@@ -857,7 +857,8 @@ with tab_backtest:
                       f"{metrics['total_trades']} trades"
                       + (" (1 still open)" if metrics["open_trade"] else ""))
             st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}",
-                      help="Gross wins / gross losses. Above 1.0 is profitable before slippage.")
+                      help="Wins / losses, net of the modelled transaction fee. "
+                           "Slippage is not modelled.")
             st.metric("Time in Market", f"{metrics['exposure_pct']:.0f}%",
                       help="Share of bars holding a position. A high return on low exposure "
                            "is a different claim from the same return held throughout.")

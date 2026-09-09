@@ -1227,19 +1227,20 @@ def bar_age(df: pd.DataFrame, interval: str = "D") -> dict:
         newest = pd.to_datetime(df["time"].iloc[-1])
     except Exception:
         return {"bar": None, "as_of": "unknown", "age": "unknown",
-                "behind": float("inf"), "current": False}
+                "behind": float("inf"), "current": False, "unit": "unknown"}
 
     iv = (interval or "D").upper()
     if iv in STALENESS_TOLERANCE_SESSIONS:
         behind = market_calendar.sessions_stale(newest.date())
         age = "current" if behind == 0 else f"{behind} session{'s' if behind != 1 else ''}"
         return {"bar": newest, "as_of": f"{newest:%Y-%m-%d}", "age": age,
-                "behind": float(behind), "current": behind == 0}
+                "behind": float(behind), "current": behind == 0,
+                "unit": "sessions"}
 
     hours = (datetime.datetime.utcnow() - newest.to_pydatetime()).total_seconds() / 3600
     age = f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
     return {"bar": newest, "as_of": display_bar_time(newest, iv), "age": age,
-            "behind": hours, "current": hours < 24}
+            "behind": hours, "current": hours < 24, "unit": "hours"}
 
 
 def freshness_summary(ages, interval: str = "D", label: str = "series") -> str:
@@ -1254,6 +1255,21 @@ def freshness_summary(ages, interval: str = "D", label: str = "series") -> str:
     usable = [a for a in ages if a and a.get("bar") is not None]
     if not usable:
         return "`As of: no dated bars in this result`\n\n"
+
+    # `behind` is sessions for daily and slower and hours otherwise, so ranking
+    # a mixed sweep by it compares two different quantities -- 2 sessions
+    # against 3 hours, and 3 wins. When both units are present, report each
+    # one's worst rather than picking a winner between them.
+    units = {a.get("unit") for a in usable if a.get("unit")}
+    if len(units) > 1:
+        worst = []
+        for unit in sorted(units):
+            group = [a for a in usable if a.get("unit") == unit]
+            oldest = max(group, key=lambda a: a["behind"])
+            worst.append(f"{oldest['as_of']} ({oldest['age']}) over "
+                         f"{len(group)} {unit}-counted")
+        return (f"`As of {'; '.join(worst)} — {len(usable)} {label} on two "
+                f"different clocks · retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
 
     stalest = max(usable, key=lambda a: a["behind"])
     freshest = min(usable, key=lambda a: a["behind"])

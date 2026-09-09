@@ -258,3 +258,23 @@ def test_days_to_expiry_is_counted_from_the_exchange_date(monkeypatch):
     assert "_dt.date.fromisoformat(expiry) - _dt.date.today()" not in src
     assert src.count("market_calendar.eastern_now().date()") >= 2, \
         "both expiry calculations must count from the exchange date"
+
+
+def test_an_iv_outside_the_realised_range_still_ranks_within_a_hundred():
+    """
+    Two places compute the same realised-volatility proxy rank and only one
+    clamped it. The unclamped one is reached exactly when it matters -- today's
+    implied vol above anything realised in the past year -- and reported a rank
+    like 137/100, which is not a rank.
+    """
+    import finance_mcp as srv
+
+    assert srv._rv_proxy_rank(0.90, lo=0.10, hi=0.50) == 100.0
+    assert srv._rv_proxy_rank(0.01, lo=0.10, hi=0.50) == 0.0
+    assert srv._rv_proxy_rank(0.30, lo=0.10, hi=0.50) == pytest.approx(50.0)
+
+
+def test_a_flat_realised_range_is_unrankable_rather_than_a_guess():
+    """A year of identical vol gives no scale to rank against."""
+    import finance_mcp as srv
+    assert srv._rv_proxy_rank(0.30, lo=0.20, hi=0.20) is None

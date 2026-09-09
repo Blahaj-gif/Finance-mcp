@@ -1042,3 +1042,33 @@ def test_a_cancelled_draft_stops_counting_against_buying_power():
               "limit_price": 2.0, "est_notional": 200.0, "status": "CANCELLED"}]
     cost, sells, unpriced = srv._pending_commitments(queue, lambda s: None)
     assert cost == 0.0 and not sells and not unpriced
+
+
+def test_bar_age_says_what_unit_it_counted_in():
+    """`behind` is sessions for daily and slower, hours otherwise. A number
+    whose unit depends on an argument has to carry it."""
+    daily = wc.bar_age(_frame_at("2026-09-04 04:00:00"), "D")
+    intraday = wc.bar_age(_frame_at("2026-09-04 19:45:00"), "M15")
+    broken = wc.bar_age(pd.DataFrame({"time": []}), "D")
+    assert daily["unit"] == "sessions"
+    assert intraday["unit"] == "hours"
+    assert "unit" in broken, "even the unreadable case needs a unit"
+
+
+def test_a_mixed_unit_sweep_does_not_rank_hours_against_sessions():
+    """
+    freshness_summary picks the worst by `behind`, which is sessions for a daily
+    bar and hours for an intraday one. Mixed, it compared 2 sessions against
+    3 hours and called the 3 worse -- so the header quoted the fresher of the
+    two as the stalest.
+    """
+    daily = {"bar": 1, "as_of": "2026-09-04", "age": "2 sessions",
+             "behind": 2.0, "current": False, "unit": "sessions"}
+    intraday = {"bar": 1, "as_of": "2026-09-08 15:45 EDT", "age": "3.0h",
+                "behind": 3.0, "current": False, "unit": "hours"}
+
+    line = wc.freshness_summary([daily, intraday], "D", "series")
+
+    assert "2 sessions" in line and "3.0h" in line, (
+        "with two units in play both worsts have to be stated, not ranked "
+        f"against each other: {line}")

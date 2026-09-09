@@ -531,7 +531,8 @@ def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
             rv = rv.dropna()
             if len(rv) > 30:
                 lo, hi = float(rv.min()), float(rv.max())
-                proxy = (atm_iv - lo) / (hi - lo) * 100 if hi > lo else 50.0
+                proxy = _rv_proxy_rank(atm_iv, lo, hi)
+                proxy = 50.0 if proxy is None else proxy
                 need = max(0, iv_history.MIN_OBSERVATIONS - iv_history.observation_count(symbol.upper()))
                 block += (f"* **IV rank (proxy)**: `{max(0, min(100, proxy)):.0f}/100` "
                           f"— against realised volatility; {need} more daily observations "
@@ -2061,6 +2062,22 @@ def _align_on_sessions(price_series: dict, bench_series):
     return rets, bench.pct_change()[keep].dropna().reindex(rets.index)
 
 
+def _rv_proxy_rank(atm_iv, lo, hi):
+    """
+    Where today's implied vol sits in the past year of realised vol, 0-100, or
+    None when the range gives nothing to rank against.
+
+    Two call sites computed this and only one clamped the result -- and the
+    unclamped one is reached exactly when it matters, with today's implied vol
+    above anything realised in the past year, where it reported ranks like
+    137/100. A rank is a position within a range; outside the range the honest
+    answer is the end of it.
+    """
+    if hi is None or lo is None or hi <= lo:
+        return None
+    return max(0.0, min(100.0, (float(atm_iv) - float(lo)) / (float(hi) - float(lo)) * 100))
+
+
 def _price_currency(symbol: str):
     """
     The currency the price feed quotes this symbol in, or None if it will not say.
@@ -2588,8 +2605,7 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             iv_rank = iv_pct = None
             if len(rv) > 30:
                 lo, hi = float(rv.min()), float(rv.max())
-                if hi > lo:
-                    iv_rank = (atm_iv - lo) / (hi - lo) * 100
+                iv_rank = _rv_proxy_rank(atm_iv, lo, hi)
                 iv_pct = float((rv < atm_iv).mean() * 100)
             still_needed = max(0, iv_history.MIN_OBSERVATIONS - observations)
             rank_basis = (f"proxy against 1y realised volatility — "
