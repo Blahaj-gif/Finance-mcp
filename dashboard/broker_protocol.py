@@ -277,6 +277,107 @@ def draft_refusal(draft: dict, broker_name: str, environment_label: str):
     return None
 
 
+def _draft_cost(draft: dict, price_of=None):
+    """
+    What a draft would spend, or None if it cannot be priced without guessing.
+
+    A limit order carries its own ceiling, so it costs nothing to price and
+    needs no feed. Anything else has to be asked about, and `price_of` may
+    decline -- an unpriced draft is named by the caller, never treated as free.
+    """
+    try:
+        qty = float(draft.get("quantity") or 0)
+    except (TypeError, ValueError):
+        return None
+    recorded = draft.get("est_notional")
+    if recorded is not None:
+        try:
+            return float(recorded)
+        except (TypeError, ValueError):
+            return None
+    if draft.get("limit_price"):
+        return qty * float(draft["limit_price"])
+    if price_of is None:
+        return None
+    price = price_of(str(draft.get("symbol", "")).upper())
+    return qty * float(price) if price else None
+
+
+def pretrade_refusal(adapter, draft: dict, pending, price_of=None):
+    """
+    Why this draft must not be submitted on risk grounds now, and what is
+    unclear. Returns (refusal_or_None, notes).
+
+    The buying-power and inventory checks used to run when a draft was created
+    and never again, so a draft cleared on Monday could be approved on Friday
+    against money that had since moved. This is that check, at the moment it
+    matters.
+
+    Three things it deliberately does NOT do, each of which would make it worse
+    than no check at all:
+
+      * It takes the adapter as an argument rather than resolving the ambient
+        one. The submit path is pinned to Webull; a check that read IBKR's
+        buying power and then cleared an order bound for Webull would print
+        "verified" against an account the order never touches.
+      * An unpriceable sibling is a note, not a refusal. At draft time that is
+        an inconvenience the model routes around; at approval it would block a
+        previewed, affordable, legitimate order because of an unrelated draft,
+        with hand-editing the live queue as the only way out.
+      * It prices a limit order from its own limit, so approving one reaches no
+        price feed at all. A submit button that depends on a scraped endpoint
+        being up is a submit button that fails when it is not.
+    """
+    notes, side = [], str(draft.get("action", "")).upper()
+    others = [d for d in pending
+              if d.get("draft_id") != draft.get("draft_id")
+              and d.get("status") == "PENDING_APPROVAL"]
+
+    if side == "SELL":
+        held = float(adapter.position_quantity(draft.get("symbol", "")))
+        spoken_for = sum(
+            float(d.get("quantity") or 0) for d in others
+            if str(d.get("action", "")).upper() == "SELL"
+            and str(d.get("symbol", "")).upper() == str(draft.get("symbol", "")).upper())
+        wanted = float(draft.get("quantity") or 0)
+        if wanted + spoken_for > held:
+            return (f"Inventory has moved since this was drafted: selling {wanted:g} "
+                    f"with {spoken_for:g} already spoken for by other pending draft(s) "
+                    f"exceeds the {held:g} share(s) held. That is a naked short.",
+                    notes)
+        return None, notes
+
+    if side != "BUY":
+        return None, notes
+
+    cost = _draft_cost(draft, price_of)
+    if cost is None:
+        notes.append("This order could not be priced, so it was not re-checked "
+                     "against buying power.")
+        return None, notes
+
+    committed = 0.0
+    for other in others:
+        if str(other.get("action", "")).upper() != "BUY":
+            continue
+        other_cost = _draft_cost(other, price_of)
+        if other_cost is None:
+            notes.append(
+                f"Pending draft {other.get('draft_id', '?')} could not be priced, "
+                "so it is not counted in the total below.")
+        else:
+            committed += other_cost
+
+    power = float(adapter.buying_power("USD"))
+    if cost + committed > power:
+        detail = (f" and ~{committed:,.2f} is already committed by other pending "
+                  f"draft(s)") if committed else ""
+        return (f"Buying power has moved since this was drafted: this order needs "
+                f"~{cost:,.2f}{detail}, against buying power of {power:,.2f}.",
+                notes)
+    return None, notes
+
+
 def rebuilt_differs(previewed: dict, rebuilt: dict):
     """
     How the draft on disk now differs from the order the broker actually priced,

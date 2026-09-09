@@ -1295,6 +1295,23 @@ with tab_execution:
                                     st.session_state.pop(preview_key, None)
                                     st.rerun()
 
+                                # The risk checks ran when this was drafted and
+                                # never since. Buying power and inventory move.
+                                # Pinned to the desk that actually submits --
+                                # checking whichever broker FINANCE_BROKER
+                                # happens to name would clear an order against
+                                # an account it will never touch.
+                                risk, risk_notes = broker_protocol.pretrade_refusal(
+                                    brokers.get("webull"), fresh,
+                                    order_queue.load(drafts_path))
+                                for note in risk_notes:
+                                    st.warning(note)
+                                if risk:
+                                    st.error(f"**Refused at approval.** {risk}\n\n"
+                                             "Nothing was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+
                                 trade_client = TradeClient(webull_client.get_api_client())
                                 res = broker.place_order(
                                     trade_client, preview["account_id"], preview["order"])

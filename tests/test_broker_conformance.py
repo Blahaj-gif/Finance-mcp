@@ -1531,3 +1531,98 @@ def test_the_approval_page_checks_the_draft_before_it_submits():
         "a draft acted on elsewhere must not be submitted again"
     assert "preview[\"order\"]" in submit.split("broker.place_order(")[1][:120], \
         "what is SENT must still be the payload the broker actually priced"
+
+
+# =====================================================================
+# The risk checks run again at approval, not only at draft time
+# =====================================================================
+
+class _Desk:
+    """A pinned adapter with known money. Never the ambient FINANCE_BROKER one."""
+    name = "webull"
+
+    def __init__(self, buying=1000.0, held=5.0):
+        self._buying, self._held = buying, held
+
+    def buying_power(self, currency="USD"):
+        return self._buying
+
+    def position_quantity(self, symbol):
+        return self._held
+
+
+def _d(**over):
+    d = {"draft_id": "D1", "symbol": "AAA", "action": "BUY", "quantity": 10,
+         "order_type": "LMT", "limit_price": 20.0, "status": "PENDING_APPROVAL"}
+    d.update(over)
+    return d
+
+
+def test_an_affordable_draft_passes_the_approval_recheck():
+    from dashboard import broker_protocol as bp
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=[])
+    assert why is None, why
+
+
+def test_a_draft_that_became_unaffordable_is_refused_at_approval():
+    """
+    The risk checks ran when the draft was created and never again. Buying power
+    moves -- another order fills, a position is sold, the account is swept -- so
+    a draft cleared on Monday could be approved on Friday against money that is
+    no longer there.
+    """
+    from dashboard import broker_protocol as bp
+    why, notes = bp.pretrade_refusal(_Desk(buying=50.0), _d(), pending=[])
+    assert why and "buying power" in why.lower()
+
+
+def test_the_recheck_counts_the_rest_of_the_queue():
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", est_notional=900.0)]
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=others)
+    assert why and "pending" in why.lower()
+
+
+def test_an_unpriceable_sibling_warns_but_does_not_block_a_previewed_order():
+    """
+    At draft time an unpriceable sibling is an inconvenience the model routes
+    around. At approval it would block a previewed, affordable, legitimate order
+    on account of an unrelated draft -- and the only remedy would be editing the
+    live queue by hand, which is the deadlock the Cancel button exists to
+    dissolve.
+    """
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", order_type="MKT", limit_price=None)]
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=others)
+    assert why is None, "an unpriceable sibling must not block this order"
+    assert any("D2" in n for n in notes), "but it must be named"
+
+
+def test_a_sell_is_rechecked_against_inventory_including_the_queue():
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", action="SELL", quantity=4)]
+    why, notes = bp.pretrade_refusal(
+        _Desk(held=5.0), _d(action="SELL", quantity=3), pending=others)
+    assert why and "naked" in why.lower()
+
+
+def test_the_recheck_needs_no_network_for_a_limit_order(monkeypatch):
+    """A LMT draft carries its own price, so approval must not depend on a feed."""
+    from dashboard import broker_protocol as bp
+
+    def explode(symbol):
+        raise AssertionError("approval must not reach a price feed for a LMT draft")
+
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=[],
+                                     price_of=explode)
+    assert why is None
+
+
+def test_the_approval_page_runs_the_risk_recheck_against_the_pinned_desk():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    submit = app[app.index("2 — APPROVE AND SUBMIT"):]
+    assert "pretrade_refusal" in submit
+    assert 'brokers.get("webull")' in submit, \
+        "the re-check must read the desk that submits, not the ambient one"
+    assert submit.index("pretrade_refusal") < submit.index("broker.place_order(")
