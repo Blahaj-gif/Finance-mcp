@@ -166,16 +166,23 @@ def test_no_tool_declares_the_boilerplate_output_schema():
 
 
 def test_a_response_is_not_sent_twice():
+    """
+    Every tool here returns text. Emitting the same payload again as
+    `structuredContent` would double what the client pays to read one answer.
+
+    Driven through the public `call_tool` rather than a private method: this
+    test used to reach `_call_tool_mcp`, which a FastMCP release then renamed,
+    so it failed in CI against an unpinned dependency while passing locally
+    against an older one. A test that breaks on someone else's refactor of a
+    private name is testing the wrong surface.
+    """
     import asyncio as _asyncio
 
-    async def call():
-        return await srv.mcp._call_tool_mcp(
-            "get_journal_summary", {})          # local-only: no network
+    result = _asyncio.run(srv.mcp.call_tool("get_journal_summary", {}))
 
-    result = _asyncio.run(call())
-    structured = getattr(result, "structuredContent", None)
-    assert structured is None, (
+    assert result.structured_content is None, (
         "structuredContent duplicates the text content verbatim")
+    assert result.content, "the text content is the payload"
 
 
 def test_the_tool_list_stays_within_a_reasonable_context_budget():
