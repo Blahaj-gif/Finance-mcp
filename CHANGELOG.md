@@ -5,9 +5,13 @@ the bug that caused it — the commit log is the fuller record.
 
 ## Unreleased
 
-Five guardrail defects, found by auditing three outside reviews of this
-repository against the source. The reviews named two of these five; the other
-three were found while checking their claims, and are the more serious.
+This began as an audit of three outside reviews of this repository against the
+source. They named two real defects between them; checking their claims found
+the rest, and the rest are the more serious — the reviews were written from the
+README, so everything that needed a file opened to see was still there.
+
+Several entries below were then found by reviewing the fixes for the entries
+above them, which is its own argument for the practice.
 
 - **The buying-power check could be switched off from a tool call.** A
   `limit_price` on a `MKT` or `STP` draft was used as the order's price for the
@@ -51,6 +55,100 @@ three were found while checking their claims, and are the more serious.
   from `.env` there. Every alert exported `WEBULL_APP_SECRET` to a spawned
   PowerShell. It now gets an allowlist of OS plumbing, chosen that way because
   the credential nobody thinks to strip is the one that leaks.
+- **The submit path retried an order the vendor's own SDK refuses to retry.**
+  `place_order` went through the retrying wrapper, re-sending a byte-identical
+  payload up to three times. Webull ships `RetryableMethods: ["GET"]` and
+  documents it in words — *"Do no retry when it's not a GET request"* — and
+  place is a POST. Nothing establishes a second POST would be rejected:
+  `client_order_id` is documented as a uniqueness obligation on the *client*,
+  never as an idempotency key, and Saxo states outright that its equivalent is
+  not checked for uniqueness. Binding writes are paced and never repeated now;
+  reads and preview still retry. The trigger was wrong in both directions too —
+  a substring match meant a read timeout carrying the throttle token retried,
+  which is the one failure where the order may already be at the engine.
+- **An unknown submit outcome was reported as "nothing was sent".** A failure
+  that does not *prove* the order was not placed now raises
+  `AmbiguousSubmission`, decided by an allowlist that defaults to uncertainty: a
+  4xx is the server having received and refused; a 5xx, a 408 and a bare
+  transport failure are not. The dashboard names the client order id to look for
+  in the order book, warns that resubmitting could place it twice, and marks the
+  draft `OUTCOME_UNKNOWN` so it is never offered for approval again.
+- **A working stop-loss was rendered blank and offered for cancellation.**
+  `open_orders` looked for the instrument leg under `items`; Webull returns a
+  combo envelope and puts it under `orders`, so every field fell back to the
+  envelope and a real `STOP_LOSS` on a live account rendered with blank symbol,
+  side and status. `cancel_order` establishes what it is cancelling now: an
+  entry order cancels unobstructed — that is the kill-switch case and must stay
+  fast — while a protective stop refuses with the instrument, side, quantity and
+  stop price named, and takes `acknowledge_protective=true`. An id that is not
+  among the working orders refuses too, because assuming "ordinary entry" is
+  exactly the assumption that would silently remove a stop.
+- **The staleness gate counted a session whose bar cannot exist yet.**
+  `sessions_stale` measured against `previous_trading_day(now + 1 day)`, which
+  collapses to *today* on any trading day — so the newest bar in existence read
+  "1 trading session old" and `check_connection` reported REACHABLE BUT 1
+  SESSION BEHIND on a healthy feed. The reference is the exchange clock now, and
+  a session counts once its close has passed and a vendor has had time to
+  publish: four hours, measured as the smallest grace that never refuses a fresh
+  bar. Tolerances retuned against both feeds, whose weekly stamping conventions
+  turn out to be opposite.
+- **A regular-session bar was printed as an after-hours print.** Bars are stored
+  naive-UTC, correctly, but were printed that way too — so Friday's 15:45 ET
+  close rendered as `19:45` with no marker, from a server that has no
+  extended-hours data at all. Converted at the render boundary only: intraday
+  bars carry their zone, session bars render as a bare date. The table was fixed
+  in a second pass after the header, which had been left disagreeing with it.
+- **A share count was a ratio of two currencies.** `calculate_position_size`
+  divided the account's risk budget by the instrument's risk-per-share without
+  checking they were denominated the same way — on a THB-denominated account
+  sizing a USD stock, a share count wrong by the exchange rate. The rendering
+  said so and nobody read it: `**THB equity**: $320,000.00`. Refused now with
+  both codes named. `get_portfolio_risk` likewise grouped rather than summing
+  across currencies, and suppresses portfolio beta when the book spans more than
+  one.
+- **Return series were paired by position, not date.** A holding that missed a
+  session had every later return compared against a different day's return for
+  every other holding, and the portfolio beta and correlations were computed on
+  that. Aligned on dates now, and the bar after a gap is dropped as well — it is
+  a multi-day return for the leg that skipped and a one-day return for the rest.
+- **Two histories were keyed on the machine's calendar.** IV and portfolio
+  snapshots took their default date from a UTC+7 host, so real observations were
+  filed on Saturdays and Sundays. They are keyed on the *session* observed now,
+  and the eight existing misdated rows were repaired onto it.
+- **`IBKR_TLS_INSECURE` was a global kill switch wearing a localhost label.**
+  Scoped to loopback, refusing clearly when pointed elsewhere rather than
+  silently verifying — and naming a remedy that works, since `IBKR_CACERT` alone
+  cannot help a remote gateway whose certificate is issued for `localhost`.
+- **The order queue was a file two processes guessed at.** Both did
+  read-all/modify/write-all, so a draft added between one process's read and its
+  write disappeared. `dashboard/order_queue.py` owns it: every write re-reads,
+  patches one draft by id, and replaces atomically. The file is restricted to
+  its owner — on Windows through a DACL, because `os.chmod`'s mode is very
+  nearly a no-op there. The order submitted is also checked against the order
+  previewed, by rebuilding the re-read draft *only to compare*.
+- **Pre-trade risk ran once, at draft time.** Buying power and inventory are
+  re-checked at approval, against the desk that actually submits rather than
+  whichever broker `FINANCE_BROKER` names, with an unpriceable sibling treated
+  as a note rather than a refusal.
+- **Drafts could not be cancelled.** The execution page has a Cancel button;
+  clearing a draft previously meant editing the JSON by hand, which made every
+  refusal that says "deal with this draft" a dead end.
+- **Parsers reported what they found badly.** A Form 4 mismatch printed both
+  sides of the discrepancy identically at four significant figures; an empty
+  insider result read as "no insider activity" when a ticker's registrant had
+  been succeeded; and a chain the filer explained in a footnote was called a
+  mismatch rather than unverified — decided on the `footnoteId` attached to the
+  failing balance, so it rests on structure rather than prose.
+- **Numbers that meant something other than what they said.** Days-to-expiry
+  counted from the machine's calendar rather than the exchange's; backtest win
+  rate and profit factor were gross of the fee while the equity curve was
+  charged for it; a mixed sweep ranked trading sessions against wall-clock
+  hours; an IV rank could read 137/100; and a 13F gave its quarter and filing
+  date without saying the positions were months old.
+- **The cheap path existed and nothing told the model to take it.**
+  `get_company_profile` spans 555 tokens for one section to 6,015 for all of
+  them, but its description said *"Everything worth knowing… Start here"* and
+  never mentioned narrowing. It now names the levers and what they cost.
 
 ## 0.3.1 — 2026-08-12
 
