@@ -26,6 +26,11 @@ def _tools():
     return asyncio.run(srv.mcp._list_tools())
 
 
+def _tool_description(name):
+    """The description the model actually receives for one tool."""
+    return next(t.description or "" for t in _tools() if t.name == name)
+
+
 def test_every_registered_tool_is_annotated():
     tools = _tools()
     missing = [t.name for t in tools if not t.annotations]
@@ -209,3 +214,41 @@ def test_the_readme_states_the_real_read_only_count():
     assert (int(match.group(1)), int(match.group(2))) == (read_only, len(tools)), (
         f"README says {match.group(1)} of {match.group(2)}; "
         f"the server registers {read_only} of {len(tools)}")
+
+
+# =====================================================================
+# A cheap path nobody is told about is not a cheap path
+# =====================================================================
+
+def test_the_profile_tells_the_model_how_to_ask_for_less():
+    """
+    get_company_profile spans 555 tokens for one section to 6,015 for all of
+    them -- the field filtering that MCP guidance calls the highest-leverage
+    saving, already built. But the summary line read "Everything worth knowing
+    about a company, in one call. Start here", which steers every caller into
+    the widest default. A model asked which sector Apple is in spent 3,161
+    tokens on a question answerable in 555.
+
+    The lever has to be named where the model reads, not only in the parameter
+    list it may skim.
+    """
+    body = _tool_description("get_company_profile")
+
+    assert "sections" in body, "the narrowing parameter must be named in the description"
+    assert "detail" in body
+    assert "brief" in body, "the cheap preset has to be named to be reachable"
+
+
+def test_the_profile_presets_are_actually_cheaper_in_that_order():
+    """
+    The description now makes a cost claim. If brief were not materially
+    cheaper than standard, that claim would be a lie the model acts on.
+    """
+    import finance_mcp as srv
+    sizes = {}
+    for level in ("brief", "standard", "full"):
+        sizes[level] = len(srv.get_company_profile("AAPL", detail=level))
+
+    assert sizes["brief"] < sizes["standard"] < sizes["full"]
+    assert sizes["brief"] * 2 < sizes["standard"], \
+        "brief has to be worth choosing, not a rounding error"

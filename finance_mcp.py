@@ -2020,7 +2020,8 @@ def _run_sections(keys, symbol, timeout=45):
 def get_company_profile(symbol: str, sections: str | list[str] = None,
                         detail: str = "standard") -> str:
     """
-    Everything worth knowing about a company, in one call. Start here.
+    Everything worth knowing about a company, in one call. Start here for an
+    open-ended question — and narrow it for a specific one.
 
     Answers "tell me about X" without the caller needing to know which of the other
     tools to reach for: what the business is, what it filed with the SEC, what
@@ -2028,6 +2029,14 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
     fetched concurrently, and each is labelled with how much weight its numbers
     carry — a figure taken from a filing is not the same kind of fact as one
     scraped from a third-party feed.
+
+    **Ask for what you need.** The default fetches eight sections; a narrow
+    question does not need them. `detail="brief"` is roughly a third the size,
+    and `sections="business"` (or any single one) is about a sixth — so "what
+    sector is this?" costs a sixth of what "tell me about this company" does.
+    Widen on a second call if the answer is not there; that is cheaper than
+    fetching insider transactions and EDGAR filings for a question about a
+    business summary.
 
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
