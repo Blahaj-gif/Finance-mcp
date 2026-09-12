@@ -192,6 +192,28 @@ INTRADAY_DISPLAY_INTERVALS = frozenset({
 })
 
 
+def display_frame(df, interval: str):
+    """
+    A copy of `df` with its time column rendered the way the header renders it.
+
+    The freshness line already showed a daily bar as a bare date; the table
+    beside it still printed "2026-09-11 04:00:00" for the same bar, so one
+    response carried two renderings of one timestamp -- and the one left behind
+    was the midnight-ET-as-UTC form, removed from the header precisely because
+    it reads as a 4 a.m. print on a server with no extended-hours data.
+
+    A copy, deliberately: storage stays naive UTC because the staleness gate,
+    the disk cache and the indicator maths all compare these strings.
+    """
+    shown = df.copy()
+    if "time" in shown.columns:
+        stamps = pd.to_datetime(shown["time"], errors="coerce")
+        shown["time"] = [
+            display_bar_time(t, interval) if pd.notna(t) else original
+            for t, original in zip(stamps, shown["time"])]
+    return shown
+
+
 def _resolve_display_tz():
     """
     The timezone bar timestamps are *shown* in. Never raises.

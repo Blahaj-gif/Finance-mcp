@@ -1517,7 +1517,10 @@ with tab_portfolio:
             portfolio_history.record_snapshot(
                 net_liquidation=net_liq, gross_exposure=sum(b["last"] * b["quantity"] for b in book),
                 unrealised_pnl=day_pnl, currency=currency,
-                positions=[{k: b[k] for k in ("symbol", "quantity", "cost")} for b in book])
+                positions=[{k: b[k] for k in ("symbol", "quantity", "cost")} for b in book],
+                # The session observed, not this machine's date. A snapshot taken
+                # on a Bangkok Saturday morning restates Friday's New York close.
+                today=market_calendar.reference_session())
         except Exception:
             pass          # a history write must never take the live panel down
 

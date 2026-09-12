@@ -80,8 +80,13 @@ def test_ohlcv_last_row_is_the_newest_bar(monkeypatch):
 
     # The newest bar's timestamp belongs on the final data row, and the oldest
     # on the first. Reversed ordering would swap them.
-    assert frame["time"].iloc[-1] in lines[-1]
-    assert frame["time"].iloc[0] not in lines[-1]
+    #
+    # Compared on the rendered form: a session bar is shown as a date now, the
+    # same way the freshness line above the table shows it. What is being
+    # asserted here is the ordering, which that does not change.
+    newest, oldest = frame["time"].iloc[-1][:10], frame["time"].iloc[0][:10]
+    assert newest in lines[-1]
+    assert oldest not in lines[-1]
 
 
 # =====================================================================

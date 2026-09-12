@@ -1072,3 +1072,41 @@ def test_a_mixed_unit_sweep_does_not_rank_hours_against_sessions():
     assert "2 sessions" in line and "3.0h" in line, (
         "with two units in play both worsts have to be stated, not ranked "
         f"against each other: {line}")
+
+
+def test_the_bar_table_dates_a_session_the_same_way_the_header_does():
+    """
+    The header was fixed to render a daily bar as a bare date; the table beside
+    it still printed "2026-09-11 04:00:00" for the same bar. One response, two
+    renderings, and the one left behind is the midnight-ET-as-UTC form that was
+    removed from the header precisely because it reads as a 4 a.m. print.
+    """
+    frame = pd.DataFrame({
+        "time": ["2026-09-10 04:00:00", "2026-09-11 04:00:00"],
+        "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+        "close": [1.0, 1.0], "volume": [1, 1]})
+
+    shown = wc.display_frame(frame, "D")
+
+    assert list(shown["time"]) == ["2026-09-10", "2026-09-11"]
+
+
+def test_an_intraday_table_keeps_its_clock_and_says_the_zone():
+    frame = pd.DataFrame({
+        "time": ["2026-09-11 19:45:00"],
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]})
+
+    shown = wc.display_frame(frame, "M15")
+
+    assert shown["time"].iloc[0] == "2026-09-11 15:45 EDT"
+
+
+def test_displaying_a_frame_does_not_mutate_the_stored_one():
+    """Storage stays naive UTC; this is a view, not a conversion."""
+    frame = pd.DataFrame({
+        "time": ["2026-09-11 04:00:00"],
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]})
+
+    wc.display_frame(frame, "D")
+
+    assert frame["time"].iloc[0] == "2026-09-11 04:00:00"

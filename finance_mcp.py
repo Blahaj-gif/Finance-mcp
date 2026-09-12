@@ -360,6 +360,7 @@ def get_technical_indicators(symbol: str, interval: str = "D", count: int = 5) -
         for col in display_df.select_dtypes(include=['float64', 'float32']).columns:
             display_df[col] = display_df[col].round(2)
             
+        display_df = webull_client.display_frame(display_df, interval)
         try:
             table_str = display_df.to_markdown(index=False)
         except Exception:
@@ -479,6 +480,9 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
             if col in latest.columns:
                 latest[col] = latest[col].round(2)
                 
+        # Rendered the way the freshness line above renders it: a session bar
+        # as a date, an intraday bar with its exchange clock and zone.
+        latest = webull_client.display_frame(latest, interval)
         try:
             table_str = latest.to_markdown(index=False)
         except Exception:
@@ -517,8 +521,14 @@ def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
         move_pct = straddle / spot * 100 if spot else 0.0
 
         try:
-            iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
-            real = iv_history.iv_rank(symbol.upper(), atm_iv)
+            # Keyed on the SESSION observed, not the machine's calendar day.
+            # A snapshot taken while the market is shut observes a stale chain
+            # from the last session; on a UTC+7 box the local date had already
+            # rolled over and filed real observations on Saturdays.
+            session = market_calendar.reference_session()
+            iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot,
+                                       dte=days, today=session)
+            real = iv_history.iv_rank(symbol.upper(), atm_iv, today=session)
         except Exception:
             real = None
 
@@ -2590,8 +2600,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         # history; realised volatility is a different quantity and only ever a
         # stand-in until the real series exists.
         try:
-            observations = iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
-            real_rank = iv_history.iv_rank(symbol.upper(), atm_iv)
+            session = market_calendar.reference_session()
+            observations = iv_history.record_snapshot(
+                symbol.upper(), atm_iv, spot=spot, dte=days, today=session)
+            real_rank = iv_history.iv_rank(symbol.upper(), atm_iv, today=session)
         except Exception:
             observations, real_rank = 0, None
 
