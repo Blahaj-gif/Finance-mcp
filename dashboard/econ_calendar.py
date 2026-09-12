@@ -56,6 +56,29 @@ try:
 except ImportError:  # imported as a top-level module from dashboard/
     import normalization as nz
 
+try:
+    from dashboard import market_calendar as _mc
+except ImportError:  # imported as a top-level module from dashboard/
+    import market_calendar as _mc
+
+
+def _today() -> datetime.date:
+    """
+    The day this calendar reckons from: New York's, not this machine's.
+
+    US macro releases are stamped 08:30 Eastern. On a UTC+7 host the local date
+    runs a day ahead of New York's for eleven hours out of twenty-four, so a
+    release happening today in ET was placed against tomorrow -- classifying
+    something that has not happened yet as something that already had.
+
+    Deliberately NOT used for the rate limiter's quota reset, the BLS year
+    bounds or the SEC query end-date. A quota window may be offset without
+    harm, and a year bound is wrong only across New Year, where the cost is
+    fetching one extra year of history.
+    """
+    return _mc.eastern_now().date()
+
+
 BLS_API_KEY = os.getenv("BLS_API_KEY", "").strip()
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "").strip()
 
@@ -405,7 +428,7 @@ def fetch_release_schedule(slug):
 
 def upcoming_releases(days_ahead=30, days_back=7, slugs=None):
     """Every scheduled BLS release inside the window, chronologically."""
-    today = datetime.date.today()
+    today = _today()
     lo, hi = today - datetime.timedelta(days=days_back), today + datetime.timedelta(days=days_ahead)
 
     found, failed = [], []
@@ -758,7 +781,7 @@ def attach_release_values(entries, today=None, data=None):
     Never raises: a calendar that loses its numbers is still a calendar, and one
     exhausted BLS quota should not take the schedule down with it.
     """
-    today = today or datetime.date.today()
+    today = today or _today()
     warnings = []
 
     wanted = release_series_for(entries)
@@ -1151,7 +1174,7 @@ def economic_calendar(days_ahead=30, days_back=7, sources=None, with_values=True
     the warning names which source went missing so an empty week is never
     mistaken for a quiet week.
     """
-    today = today or datetime.date.today()
+    today = today or _today()
     lo = today - datetime.timedelta(days=days_back)
     hi = today + datetime.timedelta(days=days_ahead)
     wanted = [s for s in (sources or CALENDAR_SOURCES) if s in CALENDAR_SOURCES]
