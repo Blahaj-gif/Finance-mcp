@@ -226,3 +226,28 @@ def test_a_units_mistake_shows_up_as_an_implausible_price(shares):
                         {"shares_to_sell": None, "aggregate_market_value": 5}]))
 def test_a_missing_pair_is_unchecked_rather_than_failed(parsed):
     assert ef.reconcile_form144(parsed)["reconciled"] is None
+
+
+def test_a_mismatch_shows_two_different_numbers():
+    """
+    The real MSFT case: a filer discloses interstitial acquisitions in a
+    footnote, so the chain is off by 57.16 shares out of 458,716. Formatted at
+    four significant figures both sides printed '4.587e+05' -- the only output a
+    FAIL produces asserted a mismatch while displaying two equal numbers, under
+    an instruction to open an issue about it.
+    """
+    transactions = [
+        {"shares": 1000.0, "shares_after": 475695.1323, "direction": "disposed",
+         "security": "Common Stock", "date": "2026-09-01"},
+        {"shares": 17036.0, "shares_after": 458716.2944, "direction": "disposed",
+         "security": "Common Stock", "date": "2026-09-02"},
+    ]
+    result = ef.reconcile_form4({"transactions": transactions})
+
+    assert result["reconciled"] is False
+    problem = next(p for p in result["problems"] if "running total" in p)
+    should_be = problem.split("should be ")[1].split(",")[0]
+    says = problem.split("filing says ")[1].split()[0]
+    assert should_be != says, (
+        f"a mismatch that prints the same number twice is unreadable: {problem}")
+    assert "e+" not in problem, "share counts must not be shown in scientific notation"

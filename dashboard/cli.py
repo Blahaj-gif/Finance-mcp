@@ -39,11 +39,24 @@ def dashboard() -> int:
               file=sys.stderr)
         return 1
 
+    # Bind loopback unless told otherwise. Streamlit leaves `server.address`
+    # unset and unset means every interface: it prints a Network URL on the LAN
+    # address, and because this app runs headless, an External URL as well. What
+    # is being served is a live brokerage account and a button that submits
+    # orders, with no authentication in front of it, so on any shared network
+    # the default is the wrong one. A config.toml key would not be enough --
+    # Streamlit resolves that against the working directory, so an installed
+    # copy launched from elsewhere would never see it.
+    args = list(sys.argv[1:])
+    if not any(a == "--server.address" or a.startswith("--server.address=")
+               for a in args):
+        args = ["--server.address", "127.0.0.1", *args]
+
     # Run from the app's own directory so it finds .streamlit/config.toml --
     # Streamlit resolves that relative to the working directory, and launching
     # from anywhere else silently drops the theme.
     return subprocess.call(
-        [sys.executable, "-m", "streamlit", "run", app, *sys.argv[1:]],
+        [sys.executable, "-m", "streamlit", "run", app, *args],
         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

@@ -432,6 +432,16 @@ uv run --with streamlit --with plotly --with pandas --with numpy \
 
 It opens on <http://localhost:8501>. Add `--server.port 8899` to move it.
 
+**It binds loopback only.** Streamlit leaves `server.address` unset by default,
+and unset does not mean localhost — it listens on every interface, which for
+this app means a live brokerage account, its positions and a working submit
+button reachable by anyone on the same network. `.streamlit/config.toml` pins
+`127.0.0.1`, and `finance-mcp-dashboard` passes the same flag for an installed
+copy that may not have that file beside it. It is a default rather than a lock:
+pass `--server.address` yourself if you genuinely mean to serve it elsewhere,
+and put something in front of it if you do, because there is no authentication
+here.
+
 **The alert manager** (optional, Windows toast notifications). The dashboard
 starts it automatically in a background thread; to run it standalone:
 

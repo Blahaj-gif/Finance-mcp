@@ -1105,3 +1105,41 @@ def test_an_unknown_metric_is_refused():
     from dashboard import earnings as em
     with pytest.raises(ValueError, match="Unknown metric"):
         em.quarterly_metric("AAPL", "Ebitda")
+
+
+# =====================================================================
+# "Upcoming" is decided on the exchange's calendar
+# =====================================================================
+
+def test_the_calendar_reference_day_is_the_exchange_date(monkeypatch):
+    """
+    BLS releases are stamped 08:30 Eastern. On a UTC+7 host the local date runs
+    a day ahead of New York's for eleven hours out of twenty-four, so a release
+    happening today in ET was being placed against tomorrow -- classifying a
+    release that has not happened yet as one that already has.
+    """
+    from dashboard import market_calendar as mc
+    # 02:00Z = 09:00 in Bangkok, still 22:00 the previous day in New York.
+    moment = datetime.datetime(2026, 9, 15, 2, 0, tzinfo=datetime.timezone.utc)
+    monkeypatch.setattr(mc, "eastern_now", lambda now=None: moment.astimezone(
+        datetime.timezone(datetime.timedelta(hours=-4))))
+
+    assert ec._today() == datetime.date(2026, 9, 14), \
+        "the reference day must be New York's, not this machine's"
+
+
+def test_the_release_windows_all_use_that_reference():
+    """
+    Three functions decide what is past and what is upcoming. The rate limiter's
+    quota reset, the BLS year bounds and the SEC query end-date are deliberately
+    left on the local clock -- a quota window may be offset and a year bound is
+    wrong only across New Year, where the cost is fetching one extra year.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "dashboard", "econ_calendar.py"), encoding="utf-8").read()
+
+    for fn in ("def upcoming_releases(", "def macro_calendar(", "def economic_calendar("):
+        if fn not in src:
+            continue
+        body = src[src.index(fn):][:1400]
+        assert "_today()" in body, f"{fn} must take its reference from _today()"

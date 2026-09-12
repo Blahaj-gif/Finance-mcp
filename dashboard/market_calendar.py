@@ -123,17 +123,73 @@ def trading_days_between(start: datetime.date, end: datetime.date) -> int:
     return count
 
 
-def sessions_stale(bar_date: datetime.date, now: datetime.date = None) -> int:
+try:
+    from zoneinfo import ZoneInfo
+    _EASTERN = ZoneInfo("America/New_York")
+except Exception:                      # no IANA database on this platform
+    _EASTERN = None
+
+# A session closes at 16:00 ET, but the bar for it does not appear the same
+# second: the vendor has to publish it. Counting the session the instant it
+# closes would refuse the newest bar that exists for as long as that takes,
+# turning a staleness check into a daily outage. Four hours was measured, not
+# guessed -- swept hourly across 2026-2027 it is the smallest grace that never
+# refuses a fresh bar under a four-hour publication lag, while still catching a
+# genuinely one-session-old bar in 88.5% of hours (the old clock managed 58.3%).
+SESSION_CLOSE_ET = datetime.time(16, 0)
+PUBLICATION_GRACE_HOURS = 4
+
+
+def eastern_now(now=None) -> datetime.datetime:
+    """
+    The current exchange-local time, as an aware datetime.
+
+    A naive `now` is read as UTC, which is this project's storage contract --
+    `astimezone` on a naive value silently assumes *machine-local* time, so
+    without this the same call answers differently in Bangkok and in London.
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    if _EASTERN is None:
+        return now.astimezone(datetime.timezone(datetime.timedelta(hours=-5)))
+    return now.astimezone(_EASTERN)
+
+
+def reference_session(now=None) -> datetime.date:
+    """
+    The newest session whose bar should exist by now.
+
+    This is the thing staleness is measured against, and it used to be wrong:
+    `previous_trading_day(now + 1 day)` collapses to *today* on any trading day,
+    so today was counted as a completed session and the newest bar in existence
+    read as one session old. On 251 of 365 evenings in 2026 the reported count
+    also disagreed with the exchange date, because the reference came from the
+    UTC date rather than ET.
+    """
+    if isinstance(now, datetime.datetime) or now is None:
+        et = eastern_now(now)
+        today = et.date()
+        published_at = (datetime.datetime.combine(today, SESSION_CLOSE_ET)
+                        + datetime.timedelta(hours=PUBLICATION_GRACE_HOURS))
+        if is_trading_day(today) and et.replace(tzinfo=None) >= published_at:
+            return today
+        return previous_trading_day(today)
+    # A bare date carries no time, so the only safe reading is that today's
+    # session may still be running.
+    return previous_trading_day(now)
+
+
+def sessions_stale(bar_date: datetime.date, now=None) -> int:
     """
     How many completed sessions have passed since `bar_date`.
 
-    Today is excluded because its bar does not exist until the close -- during a
-    live session the newest daily bar is legitimately yesterday's.
+    Today is excluded until its close has passed and a vendor has had time to
+    publish the bar -- during a live session the newest daily bar is
+    legitimately yesterday's.
     """
-    now = now or datetime.datetime.utcnow().date()
-    reference = previous_trading_day(now) if not is_trading_day(now) else previous_trading_day(now + datetime.timedelta(days=1))
-    # `reference` is the newest session that could possibly have a completed bar.
-    return trading_days_between(bar_date, reference)
+    return trading_days_between(bar_date, reference_session(now))
 
 
 # =====================================================================

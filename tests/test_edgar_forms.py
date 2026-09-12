@@ -759,3 +759,116 @@ def test_item_codes_survive_the_separators_edgar_actually_uses(items):
     the generic "Material event".
     """
     assert "Results of operations" in ef.describe_form("8-K", items)
+
+
+def test_an_empty_form4_result_records_the_cik_it_searched(monkeypatch):
+    """
+    Exxon reorganised into a holding company in July 2026: the XOM ticker now
+    resolves to CIK 0002115436, which has filed no Form 4s, while 301 of them
+    sit on the predecessor 0000034088. The tool returned filings:[] errors:[],
+    which reads as "no insider selling" rather than "I looked somewhere that has
+    never had any". An empty result has to say where it looked.
+    """
+    from dashboard import econ_calendar as ec
+    monkeypatch.setattr(ec, "company_filings", lambda *a, **k: [])
+    monkeypatch.setattr(ec, "ticker_to_cik",
+                        lambda s: {"cik": "0002115436", "title": "ExxonMobil Holdings Corp"})
+
+    out = ef.insider_transactions("XOM")
+
+    assert out["filings"] == []
+    assert "searched" in out, "an empty result must record what it searched"
+    assert out["searched"]["cik"] == "0002115436"
+    assert out["searched"]["forms"] == ["4"]
+
+
+def test_a_result_with_filings_also_records_what_was_searched(monkeypatch):
+    """The record is not an error path -- it is provenance, present either way."""
+    from dashboard import econ_calendar as ec
+    monkeypatch.setattr(ec, "company_filings", lambda *a, **k: [])
+    monkeypatch.setattr(ec, "ticker_to_cik",
+                        lambda s: {"cik": "0000320193", "title": "Apple Inc."})
+
+    out = ef.insider_transactions("AAPL", forms=("4", "3"))
+
+    assert out["searched"]["cik"] == "0000320193"
+    assert out["searched"]["forms"] == ["4", "3"]
+
+
+# =====================================================================
+# A chain the filer explained in a footnote is unverified, not wrong
+# =====================================================================
+
+_FOOTNOTED_F4 = """<?xml version="1.0"?>
+<ownershipDocument>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2026-05-01</value></transactionDate>
+      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionPricePerShare><value>10</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>475695.1323</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2026-06-01</value></transactionDate>
+      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>17036</value></transactionShares>
+        <transactionPricePerShare><value>10</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction>
+          <value>458716.2944</value>
+          <footnoteId id="F2"/>
+        </sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+  <footnotes>
+    <footnote id="F2">Includes 37.5206 shares acquired on March 31, 2026, and
+      19.6415 shares acquired on June 30, 2026 under the plan.</footnote>
+  </footnotes>
+</ownershipDocument>"""
+
+
+def test_a_footnote_on_the_failing_balance_is_captured():
+    """
+    Structure, not prose. The filer attaches the footnote to the very
+    sharesOwnedFollowingTransaction that will not chain, and that attachment is
+    a machine-readable attribute -- so the parser can see it without reading a
+    word of English.
+    """
+    report = ef.parse_ownership_form(_FOOTNOTED_F4, "4")
+    rows = report["transactions"]
+    assert rows[0]["shares_after_footnotes"] == []
+    assert rows[1]["shares_after_footnotes"], \
+        "the footnote hanging off the failing balance must be captured separately"
+
+
+def test_a_break_the_filer_footnoted_is_unverified_rather_than_a_mismatch():
+    """
+    The real MSFT case: 57.1621 shares disclosed in a footnote instead of as
+    transaction rows. The arithmetic genuinely does not chain, and the filing is
+    not wrong -- so calling it a mismatch cries wolf, and calling it reconciled
+    would be a check that passed without running. It is neither.
+    """
+    report = ef.parse_ownership_form(_FOOTNOTED_F4, "4")
+    result = ef.reconcile_form4(report)
+
+    assert result["reconciled"] is None, "unverifiable, not false"
+    assert "footnote" in " ".join(result.get("problems", []) + [str(result)]).lower()
+
+
+def test_an_unexplained_break_is_still_a_mismatch():
+    """The exemption is the footnote, not the break."""
+    plain = _FOOTNOTED_F4.replace('<footnoteId id="F2"/>', "")
+    result = ef.reconcile_form4(ef.parse_ownership_form(plain, "4"))
+    assert result["reconciled"] is False

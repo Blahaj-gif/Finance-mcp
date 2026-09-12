@@ -112,8 +112,16 @@ def test_sessions_stale_treats_latest_session_as_fresh():
 
 
 def test_sessions_stale_grows_one_per_session():
-    latest = mc.previous_trading_day(STALE_NOW + datetime.timedelta(days=1))
-    prior = mc.previous_trading_day(latest)
+    """
+    Repinned. This used to build "the latest session" as
+    `previous_trading_day(now + 1 day)` -- the same idiom that was the bug in
+    sessions_stale itself, which collapses to today on a trading day. With a
+    bare date the caller has told us nothing about the time, so today's session
+    may still be running and the newest completed one is the day before.
+    """
+    newest = mc.previous_trading_day(STALE_NOW)
+    prior = mc.previous_trading_day(newest)
+    assert mc.sessions_stale(newest, now=STALE_NOW) == 0
     assert mc.sessions_stale(prior, now=STALE_NOW) == 1
 
 
@@ -125,8 +133,23 @@ def test_sessions_stale_does_not_depend_on_the_caller_timezone():
     """
     friday = datetime.date(2026, 8, 14)
     thursday = datetime.date(2026, 8, 13)
+    # A bare date says nothing about the time, so Friday's session may still be
+    # running and Thursday's bar is the newest completed one.
     assert mc.sessions_stale(thursday, now=thursday) == 0
-    assert mc.sessions_stale(thursday, now=friday) == 1
+    assert mc.sessions_stale(thursday, now=friday) == 0
+
+    # The real timezone question, asked properly: one instant, expressed in
+    # three zones, must give one answer. 2026-08-14 21:00 ET is already the
+    # 15th in UTC and the 15th in Bangkok.
+    instant = datetime.datetime(2026, 8, 15, 1, 0, tzinfo=datetime.timezone.utc)
+    answers = {
+        mc.sessions_stale(thursday, now=instant),
+        mc.sessions_stale(thursday, now=instant.astimezone(
+            datetime.timezone(datetime.timedelta(hours=7)))),
+        mc.sessions_stale(thursday, now=instant.astimezone(
+            datetime.timezone(datetime.timedelta(hours=-8)))),
+    }
+    assert answers == {1}, f"one instant, three zones, {len(answers)} answers"
 
 
 # =====================================================================
@@ -194,3 +217,68 @@ def test_a_datetime_passes_through_and_gains_utc():
     naive = datetime.datetime(2026, 8, 1, 9, 0)
     assert mc.parse_since(naive, now=NOW) == datetime.datetime(
         2026, 8, 1, 9, 0, tzinfo=datetime.timezone.utc)
+
+
+# =====================================================================
+# The reference session: what "stale" is measured against
+# =====================================================================
+# 2026-09-07 was Labor Day, so the sessions here run ... Sep 4 (Fri), Sep 8 (Tue).
+
+def test_the_newest_completed_session_is_not_reported_as_stale():
+    """
+    The headline bug. On a trading day the reference collapsed to *today*
+    through `previous_trading_day(now + 1 day)`, contradicting the docstring one
+    line above it, so the newest bar that exists read "1 trading session old"
+    and check_connection reported REACHABLE BUT 1 SESSION BEHIND on a healthy
+    feed.
+    """
+    now = datetime.datetime(2026, 9, 8, 1, 0, tzinfo=datetime.timezone.utc)  # 21:00 ET Mon
+    assert mc.sessions_stale(datetime.date(2026, 9, 4), now=now) == 0
+
+
+def test_today_does_not_count_while_its_session_is_still_running():
+    """Mid-session on Tuesday, the newest completed bar is Friday's."""
+    now = datetime.datetime(2026, 9, 8, 14, 0, tzinfo=datetime.timezone.utc)  # 10:00 ET Tue
+    assert mc.sessions_stale(datetime.date(2026, 9, 4), now=now) == 0
+
+
+def test_a_session_counts_once_the_close_and_its_publication_grace_have_passed():
+    """
+    After the close plus the grace a vendor needs to publish, today's bar is the
+    one that should exist -- and Friday's is genuinely a session behind.
+    """
+    now = datetime.datetime(2026, 9, 9, 1, 0, tzinfo=datetime.timezone.utc)  # 21:00 ET Tue
+    assert mc.sessions_stale(datetime.date(2026, 9, 8), now=now) == 0
+    assert mc.sessions_stale(datetime.date(2026, 9, 4), now=now) == 1
+
+
+def test_the_close_alone_does_not_count_the_session_before_it_can_be_published():
+    """
+    A feed has not published today's daily bar at 16:05. Counting the session
+    the instant it closes would refuse the newest bar that exists for as long as
+    the vendor takes, which is a daily outage rather than a staleness check.
+    """
+    now = datetime.datetime(2026, 9, 8, 20, 5, tzinfo=datetime.timezone.utc)  # 16:05 ET Tue
+    assert mc.sessions_stale(datetime.date(2026, 9, 4), now=now) == 0
+
+
+def test_the_reference_follows_exchange_time_not_the_utc_date():
+    """
+    At 21:00 ET the UTC date is already tomorrow. Reading the UTC date made the
+    reported session count wrong on 251 of 365 evenings in 2026.
+    """
+    evening = datetime.datetime(2026, 9, 9, 1, 0, tzinfo=datetime.timezone.utc)  # 21:00 ET Tue
+    midday = datetime.datetime(2026, 9, 8, 16, 0, tzinfo=datetime.timezone.utc)  # 12:00 ET Tue
+    assert mc.sessions_stale(datetime.date(2026, 9, 8), now=evening) == 0
+    assert mc.sessions_stale(datetime.date(2026, 9, 4), now=midday) == 0
+
+
+def test_a_naive_now_is_read_as_utc_rather_than_the_machine_clock():
+    """
+    `astimezone` on a naive datetime silently assumes machine-local time, so the
+    same call would answer differently in Bangkok and in London.
+    """
+    naive = datetime.datetime(2026, 9, 9, 1, 0)
+    aware = naive.replace(tzinfo=datetime.timezone.utc)
+    bar = datetime.date(2026, 9, 4)
+    assert mc.sessions_stale(bar, now=naive) == mc.sessions_stale(bar, now=aware) == 1

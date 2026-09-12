@@ -159,6 +159,16 @@ def _text(xml: str, tag: str, default=None):
     return nz.normalize_text(re.sub(r"<[^>]+>", " ", raw)) or default
 
 
+def _balance_footnotes(block: str, footnotes: dict) -> list:
+    """Footnote texts attached to this row's sharesOwnedFollowingTransaction."""
+    m = re.search(rf"<{_NS}sharesOwnedFollowingTransaction[^>]*>(.*?)"
+                  rf"</{_NS}sharesOwnedFollowingTransaction>", block, re.S | re.I)
+    if not m:
+        return []
+    refs = re.findall(r'footnoteId\s+id="([^"]+)"', m.group(1), re.I)
+    return [footnotes[r] for r in refs if footnotes.get(r)]
+
+
 def _blocks(xml: str, tag: str):
     return re.findall(rf"<{_NS}{tag}\b[^>]*>(.*?)</{_NS}{tag}>", xml, re.S | re.I)
 
@@ -258,6 +268,13 @@ def parse_form4(xml: str) -> dict:
                 "price": price,
                 "value": (shares * price) if (shares and price) else None,
                 "shares_after": nz.parse_number(_text(block, "sharesOwnedFollowingTransaction")),
+                # Footnotes attached to the running balance SPECIFICALLY, not
+                # to the row. A filer who discloses interstitial acquisitions in
+                # prose hangs the note off this exact field, and that
+                # attachment is a machine-readable attribute -- so a chain that
+                # will not add up can be told apart from one nobody explained,
+                # without reading a word of the English.
+                "shares_after_footnotes": _balance_footnotes(block, footnotes),
                 "derivative": derivative,
                 "footnotes": [footnotes.get(r, "") for r in refs if footnotes.get(r)],
             })
@@ -324,7 +341,15 @@ def insider_transactions(symbol: str, limit: int = 10, person: str = None,
         parsed.append(report)
 
     return {"symbol": symbol.upper(), "company": info["title"],
-            "filings": parsed, "errors": errors}
+            "filings": parsed, "errors": errors,
+            # Where we looked, so an empty list is never mistaken for an
+            # absence of insider activity. A ticker can move to a new registrant
+            # -- XOM's did in July 2026 -- leaving the successor CIK with no
+            # Form 4s at all while hundreds sit on the predecessor. Without this
+            # the caller cannot tell "nobody traded" from "I asked an entity
+            # that has never filed one".
+            "searched": {"cik": info["cik"], "company": info["title"],
+                         "forms": forms, "listed_filings": len(filings)}}
 
 
 def summarise_insider_flow(reports: list) -> dict:
@@ -815,6 +840,19 @@ def reconcile_form144(parsed: dict) -> dict:
                          "factor"]}
 
 
+def _shares(n) -> str:
+    """
+    A share count at full magnitude, with any fraction, never in scientific
+    notation.
+
+    Four significant figures turned a real 57-share discrepancy into two
+    identical numbers: "should be 4.587e+05, filing says 4.587e+05", printed
+    under an instruction to open an issue about it. A share count is not a
+    measurement and does not have significant figures.
+    """
+    return f"{float(n):,.4f}".rstrip("0").rstrip(".")
+
+
 def reconcile_form4(parsed: dict) -> dict:
     """
     Form 4 states the holding remaining after each transaction. Running the
@@ -833,7 +871,7 @@ def reconcile_form4(parsed: dict) -> dict:
         return {"reconciled": None, "problems": [],
                 "checks": ["needs two or more transactions with running totals"]}
 
-    problems = []
+    problems, unverifiable = [], []
     for earlier, later in zip(transactions, transactions[1:]):
         signed = float(later["shares"] or 0)
         if str(later.get("direction", "")).lower().startswith("dispos"):
@@ -842,14 +880,42 @@ def reconcile_form4(parsed: dict) -> dict:
         actual = float(later["shares_after"] or 0)
         # Fractional holdings exist; a share and a half of drift does not.
         if abs(expected - actual) > 1.5:
-            problems.append(
-                f"running total: {earlier['shares_after']:,.4g} "
-                f"{'-' if signed < 0 else '+'} {abs(signed):,.4g} should be "
-                f"{expected:,.4g}, filing says {actual:,.4g}")
+            complaint = (
+                f"running total: {_shares(earlier['shares_after'])} "
+                f"{'-' if signed < 0 else '+'} {_shares(abs(signed))} should be "
+                f"{_shares(expected)}, filing says {_shares(actual)} "
+                f"(off by {_shares(actual - expected)})")
+            # A filer who discloses interstitial acquisitions in prose hangs the
+            # note off this exact balance. Microsoft's 0000789019-26-000159 does
+            # it with 37.5206 + 19.6415 shares, which is the whole of its 57.16
+            # discrepancy. The arithmetic genuinely does not chain and the
+            # filing is not wrong, so calling it a mismatch cries wolf -- and
+            # calling it reconciled would be a check that passed without
+            # running. It is neither, and this is the third answer.
+            notes = later.get("shares_after_footnotes") or []
+            if notes:
+                unverifiable.append(
+                    complaint + " — the filer footnoted this balance: "
+                    + " ".join(notes)[:300])
+            else:
+                problems.append(complaint)
+
+    if problems:
+        reconciled = False
+    elif unverifiable:
+        reconciled = None
+    else:
+        reconciled = True
+
     return {
-        "reconciled": not problems,
-        "checks": [f"{len(transactions)} transactions chained"] if not problems else [],
+        "reconciled": reconciled,
+        "checks": ([f"{len(transactions)} transactions chained"]
+                   if reconciled is True else []),
         "problems": problems,
+        "unverifiable": unverifiable,
+        "unavailable": ("a footnote on the running balance explains the difference, "
+                        "so the chain cannot be checked by arithmetic alone"
+                        if reconciled is None and unverifiable else None),
     }
 
 

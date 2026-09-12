@@ -9,6 +9,7 @@ import datetime
 import os
 import re
 import sys
+import types
 
 import pandas as pd
 import pytest
@@ -626,3 +627,138 @@ def test_the_server_imports_everything_it_declares():
         path = os.path.join(root, *name.split(".")) 
         assert os.path.isdir(path) or os.path.isfile(path + ".py"), (
             f"finance_mcp imports {name}, which does not exist")
+
+
+# =====================================================================
+# A draft names the surface it was raised against, and approval honours it
+# =====================================================================
+
+def _draft(**over):
+    d = {"draft_id": "DRFT_1", "symbol": "AAA", "action": "BUY", "quantity": 1,
+         "order_type": "LMT", "limit_price": 2.0, "status": "PENDING_APPROVAL",
+         "broker": "webull", "environment": "paper"}
+    d.update(over)
+    return d
+
+
+def test_a_paper_draft_is_refused_by_a_live_desk():
+    """
+    Every draft records the environment it was raised in, directly beneath the
+    `broker` field whose whole justification is that the dashboard rebuilds the
+    order at approval time. Nothing read it back, so an order rehearsed against
+    the sandbox -- and cleared by guards measured against sandbox money -- could
+    be approved into the real account.
+    """
+    from dashboard import broker_protocol
+
+    why = broker_protocol.draft_refusal(_draft(environment="paper"),
+                                        broker_name="webull",
+                                        environment_label="live")
+
+    assert why, "a paper draft must not be submittable to a live account"
+    assert "paper" in why.lower() and "live" in why.lower()
+
+
+def test_a_matching_desk_accepts_the_draft():
+    from dashboard import broker_protocol
+
+    assert broker_protocol.draft_refusal(_draft(environment="live"),
+                                         broker_name="webull",
+                                         environment_label="live") is None
+
+
+def test_a_draft_raised_against_another_broker_is_refused():
+    from dashboard import broker_protocol
+
+    why = broker_protocol.draft_refusal(_draft(broker="ibkr"),
+                                        broker_name="webull",
+                                        environment_label="paper")
+
+    assert why and "ibkr" in why.lower()
+
+
+def test_a_draft_that_names_no_environment_is_refused_rather_than_assumed():
+    """
+    A check that cannot run is not a check that passed -- the same rule the rest
+    of this project applies to a reconciliation it could not perform.
+    """
+    from dashboard import broker_protocol
+
+    stale = _draft()
+    del stale["environment"]
+
+    why = broker_protocol.draft_refusal(stale, broker_name="webull",
+                                        environment_label="live")
+
+    assert why, "an unlabelled draft cannot be proven to match this desk"
+
+
+# =====================================================================
+# The approval dashboard is not a network service
+# =====================================================================
+
+def test_the_dashboard_binds_loopback_by_default(monkeypatch):
+    """
+    Streamlit leaves `server.address` unset, and unset means every interface --
+    it prints a Network URL on the LAN address and, when headless, an External
+    URL too. This dashboard reads a live brokerage account and carries an
+    order-submission button, so the default has to be the other one.
+    """
+    from dashboard import cli
+
+    seen = {}
+    # Streamlit is an optional extra. `dashboard()` returns early with an
+    # install hint when it is absent, so without this the test silently proves
+    # nothing anywhere it is not installed -- which is CI, where it failed.
+    monkeypatch.setitem(sys.modules, "streamlit", types.ModuleType("streamlit"))
+    monkeypatch.setattr(cli.os.path, "isfile", lambda p: True)
+    monkeypatch.setattr(cli.subprocess, "call",
+                        lambda argv, **kw: seen.setdefault("argv", argv) and 0 or 0)
+    monkeypatch.setattr(cli.sys, "argv", ["finance-mcp-dashboard"])
+
+    cli.dashboard()
+
+    argv = seen["argv"]
+    assert "--server.address" in argv, "the bind address must not be left to Streamlit"
+    assert argv[argv.index("--server.address") + 1] == "127.0.0.1"
+
+
+def test_an_explicit_address_still_wins(monkeypatch):
+    """
+    The default is loopback; someone deliberately serving it elsewhere is not
+    overruled, because a guard that cannot be turned off gets worked around.
+    """
+    from dashboard import cli
+
+    seen = {}
+    # Streamlit is an optional extra. `dashboard()` returns early with an
+    # install hint when it is absent, so without this the test silently proves
+    # nothing anywhere it is not installed -- which is CI, where it failed.
+    monkeypatch.setitem(sys.modules, "streamlit", types.ModuleType("streamlit"))
+    monkeypatch.setattr(cli.os.path, "isfile", lambda p: True)
+    monkeypatch.setattr(cli.subprocess, "call",
+                        lambda argv, **kw: seen.setdefault("argv", argv) and 0 or 0)
+    monkeypatch.setattr(cli.sys, "argv",
+                        ["finance-mcp-dashboard", "--server.address", "0.0.0.0"])
+
+    cli.dashboard()
+
+    assert seen["argv"].count("--server.address") == 1
+    assert "127.0.0.1" not in seen["argv"]
+
+
+def test_the_checked_out_config_also_pins_the_bind_address():
+    """
+    dashboard/cli.py only covers the installed console entry point. A git
+    checkout runs `streamlit run dashboard/app.py`, and the desktop shortcut the
+    installer writes does the same after Set-Location to the repo root -- both
+    of which read .streamlit/config.toml and neither of which goes through
+    cli.py. Pinning it in one place and calling the problem fixed would leave
+    the two paths most people actually use still bound to every interface.
+    """
+    cfg = open(os.path.join(ROOT, ".streamlit", "config.toml"),
+               encoding="utf-8").read()
+    server = cfg.split("[server]", 1)[1].split("\n[", 1)[0]
+    assert '127.0.0.1' in server, (
+        "the [server] section must pin address = \"127.0.0.1\"")
+    assert re.search(r'^\s*address\s*=\s*"127\.0\.0\.1"', server, re.M)

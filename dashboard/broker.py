@@ -16,9 +16,9 @@ lives in this module.
 import os
 
 try:
-    from dashboard.webull_client import call_webull, unwrap
+    from dashboard.webull_client import call_webull, call_webull_once, unwrap
 except ImportError:  # imported as a top-level module from dashboard/
-    from webull_client import call_webull, unwrap
+    from webull_client import call_webull, call_webull_once, unwrap
 
 
 # Pin a specific account when the login has more than one. Without this, a
@@ -195,9 +195,46 @@ def preview_order(trade_client, account_id: str, order: dict) -> dict:
     return unwrap(call_webull(trade_client.order_v3.preview_order, account_id, [order]))
 
 
+class AmbiguousSubmission(RuntimeError):
+    """
+    The submit failed without establishing that the order was NOT placed.
+
+    Carries the client order id, because that is the only handle anyone has for
+    finding out what actually happened.
+    """
+
+    def __init__(self, client_order_id, cause):
+        self.client_order_id = client_order_id
+        self.cause = cause
+        super().__init__(
+            f"Submission of {client_order_id} failed in a way that does not "
+            f"establish whether the order reached the market: {cause}")
+
+
+def _proves_not_placed(exc) -> bool:
+    """
+    True only on positive evidence that the order never reached the engine.
+
+    An allowlist, and it defaults to False -- the safe direction is to admit
+    uncertainty. A 4xx is the server having received, parsed and refused the
+    request, which is real evidence. Everything else is not: a 5xx may have been
+    applied before the error, a 408 says the server gave up waiting for a
+    request it may still have read, and a transport failure with no status at
+    all says only that this process stopped hearing.
+    """
+    status = getattr(exc, "http_status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 408
+
+
 def place_order(trade_client, account_id: str, order: dict) -> dict:
-    """Submit an order for execution. Callers must preview first."""
-    return unwrap(call_webull(trade_client.order_v3.place_order, account_id, [order]))
+    """Submit an order for execution, exactly once. Callers must preview first."""
+    try:
+        return unwrap(call_webull_once(
+            trade_client.order_v3.place_order, account_id, [order]))
+    except Exception as exc:
+        if _proves_not_placed(exc):
+            raise
+        raise AmbiguousSubmission(order.get("client_order_id"), exc) from exc
 
 
 def cancel_order(trade_client, account_id: str, client_order_id: str) -> dict:
@@ -213,8 +250,8 @@ def cancel_order(trade_client, account_id: str, client_order_id: str) -> dict:
     Takes the *client* order id (`DRFT_9a32c8d5`), not the broker's `order_id`
     (`037VACVVDO80O0KCJR84000000`); passing the latter also 404s.
     """
-    return unwrap(call_webull(trade_client.order_v3.cancel_order,
-                              account_id, client_order_id))
+    return unwrap(call_webull_once(trade_client.order_v3.cancel_order,
+                                   account_id, client_order_id))
 
 
 # =====================================================================

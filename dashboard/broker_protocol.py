@@ -239,6 +239,171 @@ class Broker(Protocol):
         ...
 
 
+def draft_refusal(draft: dict, broker_name: str, environment_label: str):
+    """
+    Why this draft must not be submitted through this desk, or None if it may.
+
+    A draft carries symbol and quantity, not a broker-native order, so the
+    dashboard rebuilds it at approval time and nothing in the file itself would
+    catch a mismatch. Two things therefore have to be checked back rather than
+    trusted: which broker it was raised against, and which environment. The
+    second was recorded on every draft from the start and never read, so an
+    order rehearsed against the sandbox -- and cleared by pre-trade guards
+    measured against sandbox money -- could be approved into the real account.
+
+    An unlabelled draft is refused rather than assumed to match. A check that
+    could not run is not a check that passed, and the remedy is cheap: cancel
+    it and ask again.
+    """
+    drafted_for = str(draft.get("broker") or "").lower()
+    if not drafted_for:
+        return ("This draft does not record which broker it was raised against, so "
+                "it cannot be shown to belong on this desk. Cancel it and re-draft.")
+    if drafted_for != str(broker_name).lower():
+        return (f"This draft was raised against {drafted_for}, and this page submits "
+                f"to {broker_name}. Cancel it and re-draft, or submit it on "
+                f"{drafted_for}'s own platform. Nothing has been sent.")
+
+    drafted_in = str(draft.get("environment") or "").lower()
+    if not drafted_in:
+        return ("This draft does not record which environment it was raised in, so "
+                f"it cannot be shown to belong to the {environment_label} account "
+                "it would reach. Cancel it and re-draft.")
+    if drafted_in != str(environment_label).lower():
+        return (f"This draft was raised against the {drafted_in} surface and this "
+                f"desk is {environment_label}. The buying-power and inventory checks "
+                f"it passed were measured against the {drafted_in} account, so they "
+                "say nothing about this one. Cancel it and re-draft.")
+    return None
+
+
+def _draft_cost(draft: dict, price_of=None):
+    """
+    What a draft would spend, or None if it cannot be priced without guessing.
+
+    A limit order carries its own ceiling, so it costs nothing to price and
+    needs no feed. Anything else has to be asked about, and `price_of` may
+    decline -- an unpriced draft is named by the caller, never treated as free.
+    """
+    try:
+        qty = float(draft.get("quantity") or 0)
+    except (TypeError, ValueError):
+        return None
+    recorded = draft.get("est_notional")
+    if recorded is not None:
+        try:
+            return float(recorded)
+        except (TypeError, ValueError):
+            return None
+    if draft.get("limit_price"):
+        return qty * float(draft["limit_price"])
+    if price_of is None:
+        return None
+    price = price_of(str(draft.get("symbol", "")).upper())
+    return qty * float(price) if price else None
+
+
+def pretrade_refusal(adapter, draft: dict, pending, price_of=None):
+    """
+    Why this draft must not be submitted on risk grounds now, and what is
+    unclear. Returns (refusal_or_None, notes).
+
+    The buying-power and inventory checks used to run when a draft was created
+    and never again, so a draft cleared on Monday could be approved on Friday
+    against money that had since moved. This is that check, at the moment it
+    matters.
+
+    Three things it deliberately does NOT do, each of which would make it worse
+    than no check at all:
+
+      * It takes the adapter as an argument rather than resolving the ambient
+        one. The submit path is pinned to Webull; a check that read IBKR's
+        buying power and then cleared an order bound for Webull would print
+        "verified" against an account the order never touches.
+      * An unpriceable sibling is a note, not a refusal. At draft time that is
+        an inconvenience the model routes around; at approval it would block a
+        previewed, affordable, legitimate order because of an unrelated draft,
+        with hand-editing the live queue as the only way out.
+      * It prices a limit order from its own limit, so approving one reaches no
+        price feed at all. A submit button that depends on a scraped endpoint
+        being up is a submit button that fails when it is not.
+    """
+    notes, side = [], str(draft.get("action", "")).upper()
+    others = [d for d in pending
+              if d.get("draft_id") != draft.get("draft_id")
+              and d.get("status") == "PENDING_APPROVAL"]
+
+    if side == "SELL":
+        held = float(adapter.position_quantity(draft.get("symbol", "")))
+        spoken_for = sum(
+            float(d.get("quantity") or 0) for d in others
+            if str(d.get("action", "")).upper() == "SELL"
+            and str(d.get("symbol", "")).upper() == str(draft.get("symbol", "")).upper())
+        wanted = float(draft.get("quantity") or 0)
+        if wanted + spoken_for > held:
+            return (f"Inventory has moved since this was drafted: selling {wanted:g} "
+                    f"with {spoken_for:g} already spoken for by other pending draft(s) "
+                    f"exceeds the {held:g} share(s) held. That is a naked short.",
+                    notes)
+        return None, notes
+
+    if side != "BUY":
+        return None, notes
+
+    cost = _draft_cost(draft, price_of)
+    if cost is None:
+        notes.append("This order could not be priced, so it was not re-checked "
+                     "against buying power.")
+        return None, notes
+
+    committed = 0.0
+    for other in others:
+        if str(other.get("action", "")).upper() != "BUY":
+            continue
+        other_cost = _draft_cost(other, price_of)
+        if other_cost is None:
+            notes.append(
+                f"Pending draft {other.get('draft_id', '?')} could not be priced, "
+                "so it is not counted in the total below.")
+        else:
+            committed += other_cost
+
+    power = float(adapter.buying_power("USD"))
+    if cost + committed > power:
+        detail = (f" and ~{committed:,.2f} is already committed by other pending "
+                  f"draft(s)") if committed else ""
+        return (f"Buying power has moved since this was drafted: this order needs "
+                f"~{cost:,.2f}{detail}, against buying power of {power:,.2f}.",
+                notes)
+    return None, notes
+
+
+def rebuilt_differs(previewed: dict, rebuilt: dict):
+    """
+    How the draft on disk now differs from the order the broker actually priced,
+    or None if they are the same order.
+
+    The submit path deliberately sends the payload built at preview time -- the
+    page's own invariant is that it never submits an order the broker has not
+    validated, and rebuilding at approval would defeat it. But that leaves a
+    gap: the queue is a local file, and a draft edited between the preview and
+    the click makes the approval card describe one order while a different one
+    is already priced and ready to send. Rebuilding the draft *only to compare*
+    closes it without touching what is sent.
+
+    The comparison is over the whole payload rather than a hand-listed few
+    fields, because `build_order` derives several -- time in force, the entrust
+    type, the two-decimal limit normalisation -- and a snapshot of the obvious
+    ones would miss exactly the changes nobody thought of.
+    """
+    if previewed == rebuilt:
+        return None
+    keys = sorted(set(previewed) | set(rebuilt))
+    changed = [f"{k}: previewed {previewed.get(k)!r}, draft now says {rebuilt.get(k)!r}"
+               for k in keys if previewed.get(k) != rebuilt.get(k)]
+    return "; ".join(changed) if changed else None
+
+
 def describe(broker) -> str:
     """
     One line naming the broker and how much of it has been proven, for anywhere

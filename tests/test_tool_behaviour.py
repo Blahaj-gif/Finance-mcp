@@ -80,8 +80,13 @@ def test_ohlcv_last_row_is_the_newest_bar(monkeypatch):
 
     # The newest bar's timestamp belongs on the final data row, and the oldest
     # on the first. Reversed ordering would swap them.
-    assert frame["time"].iloc[-1] in lines[-1]
-    assert frame["time"].iloc[0] not in lines[-1]
+    #
+    # Compared on the rendered form: a session bar is shown as a date now, the
+    # same way the freshness line above the table shows it. What is being
+    # asserted here is the ordering, which that does not change.
+    newest, oldest = frame["time"].iloc[-1][:10], frame["time"].iloc[0][:10]
+    assert newest in lines[-1]
+    assert oldest not in lines[-1]
 
 
 # =====================================================================
@@ -333,6 +338,181 @@ def test_draft_order_blocks_when_price_cannot_be_determined(monkeypatch, tmp_pat
     assert "ORDER DRAFTED" not in out
     assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json"), \
         "an unpriceable order must not be persisted"
+
+
+def _priced_desk(monkeypatch, tmp_path, last_price=2.00):
+    """
+    A drafting desk wired to the $333.83 USD buying power of BALANCE_PAYLOAD.
+
+    Every test below needs the same five seams, and repeating them obscures the
+    one line that actually differs between them.
+    """
+    import webull.trade.trade_client as tc
+
+    class FakeAccount:
+        def get_account_list(self):
+            return [{"account_id": "ACC1"}]
+
+        def get_account_balance(self, account_id):
+            return BALANCE_PAYLOAD
+
+        def get_account_position(self, account_id):
+            return POSITION_PAYLOAD
+
+    class FakeTradeClient:
+        def __init__(self, api_client):
+            self.account_v2 = FakeAccount()
+
+    class FixedTicker:
+        def __init__(self, sym): pass
+        @property
+        def fast_info(self):
+            return type("FI", (), {"last_price": last_price})()
+
+    import yfinance as yf
+    monkeypatch.setattr(wc, "get_api_client", lambda: object())
+    monkeypatch.setattr(srv.webull_client, "get_api_client", lambda: object())
+    monkeypatch.setattr(tc, "TradeClient", FakeTradeClient)
+    monkeypatch.setattr(yf, "Ticker", FixedTicker)
+    monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
+    os.makedirs(tmp_path / "dashboard", exist_ok=True)
+
+
+@pytest.mark.parametrize("order_type", ["MKT", "STP"])
+def test_a_limit_price_on_a_non_limit_order_cannot_buy_past_buying_power(
+        monkeypatch, tmp_path, order_type):
+    """
+    The buying-power check is the only quantitative bound in the system, and a
+    nominal limit_price on an order type that will not carry one used to switch
+    it off: `est_price = limit_price` was taken before anything established the
+    order would be sent at that price, while `build_order` attaches the price
+    only for LIMIT. So a $0.0001 "limit" priced a million shares at $100, passed
+    the check, and submitted as a bare market order.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=1_000_000,
+                          order_type=order_type, limit_price=0.0001)
+
+    assert "SAFETY BLOCK" in out, (
+        f"a {order_type} order carries no limit price to the broker, so 0.0001 "
+        "must not be usable as its notional")
+    assert "ORDER DRAFTED" not in out
+    assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json"), \
+        "a refused order must not reach the approval queue"
+
+
+def test_a_limit_order_still_prices_off_its_own_limit(monkeypatch, tmp_path):
+    """
+    The guard above must not break the case it is named for: a real LIMIT order
+    is genuinely bounded by its limit price, and 10 shares at $2 is affordable.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=10, order_type="LMT",
+                          limit_price=2.00)
+
+    assert "ORDER DRAFTED" in out
+    assert "SAFETY BLOCK" not in out
+
+
+def test_pending_drafts_count_against_buying_power(monkeypatch, tmp_path):
+    """
+    Every guard ran against one draft in isolation, so N drafts that were each
+    individually affordable could sit in the queue together costing more than
+    the account holds -- and each was one click from submission.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    first = srv.draft_order("AAA", "BUY", quantity=100, order_type="LMT",
+                            limit_price=2.00)
+    assert "ORDER DRAFTED" in first, "the first $200 order fits in $333.83"
+
+    second = srv.draft_order("BBB", "BUY", quantity=100, order_type="LMT",
+                             limit_price=2.00)
+
+    assert "SAFETY BLOCK" in second, (
+        "$200 already committed plus $200 more exceeds $333.83 buying power")
+    assert "pending" in second.lower()
+
+
+def test_pending_sell_drafts_count_against_inventory(monkeypatch, tmp_path):
+    """
+    The same isolation bug on the other side: two pending SELLs of the whole
+    position are each individually covered, and together they are a naked short.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    first = srv.draft_order("RKLB", "SELL", quantity=2, order_type="LMT",
+                            limit_price=2.00)
+    assert "ORDER DRAFTED" in first, "the position holds 2 RKLB"
+
+    second = srv.draft_order("RKLB", "SELL", quantity=1, order_type="LMT",
+                             limit_price=2.00)
+
+    assert "SAFETY BLOCK" in second, (
+        "2 shares are already spoken for by a pending draft, so a third is naked")
+    assert "pending" in second.lower()
+
+
+def test_a_stop_order_is_refused_rather_than_sent_without_a_stop_price(monkeypatch, tmp_path):
+    """
+    The tool documents LMT and MKT. STP was reaching build_order, which attaches
+    a price only to a LIMIT order -- so a stop order was constructed with no
+    stop price at all, which is not an order. Worse, the refusal message for a
+    limit price on a non-limit type recommended "drop limit_price", and doing
+    exactly that on a STP draft was accepted.
+    """
+    _priced_desk(monkeypatch, tmp_path)
+
+    out = srv.draft_order("AAA", "BUY", quantity=10, order_type="STP")
+
+    assert "SAFETY BLOCK" in out, "a STOP order with no stop price must not be drafted"
+    assert "LMT" in out and "MKT" in out, "the refusal should name what is supported"
+    assert not os.path.exists(tmp_path / "dashboard" / "order_drafts.json")
+
+
+def _seed(tmp_path, drafts):
+    import json
+    os.makedirs(tmp_path / "dashboard", exist_ok=True)
+    with open(tmp_path / "dashboard" / "order_drafts.json", "w", encoding="utf-8") as f:
+        json.dump(drafts, f)
+
+
+LEGACY_MKT_BUY = {
+    "draft_id": "DRFT_old", "symbol": "AAA", "action": "BUY", "quantity": 150,
+    "order_type": "MKT", "limit_price": None, "status": "PENDING_APPROVAL",
+}
+
+
+def test_a_legacy_unpriced_draft_is_priced_rather_than_deadlocking(monkeypatch, tmp_path):
+    """
+    A draft written before est_notional existed carries neither it nor a limit
+    price. Refusing every subsequent draft until it is cleared would be a
+    lockout with no way out -- the dashboard has no cancel control -- so an
+    unpriced pending draft is priced from the market like any market order.
+    """
+    _priced_desk(monkeypatch, tmp_path)          # last_price 2.00
+    _seed(tmp_path, [LEGACY_MKT_BUY])            # 150 x $2.00 = $300 committed
+
+    out = srv.draft_order("BBB", "BUY", quantity=100, order_type="LMT",
+                          limit_price=2.00)      # $200 more, against $333.83
+
+    assert "SAFETY BLOCK" in out, "$300 committed plus $200 exceeds $333.83"
+    assert "committed" in out.lower(), (
+        "it must total the queue, not refuse because it could not price it")
+    assert "cannot be determined" not in out
+
+
+def test_a_legacy_draft_does_not_block_an_affordable_order(monkeypatch, tmp_path):
+    """The other half: pricing the legacy draft must not become a blanket refusal."""
+    _priced_desk(monkeypatch, tmp_path)
+    _seed(tmp_path, [LEGACY_MKT_BUY])            # $300 committed
+
+    out = srv.draft_order("BBB", "BUY", quantity=10, order_type="LMT",
+                          limit_price=2.00)      # $20 more -> $320 < $333.83
+
+    assert "ORDER DRAFTED" in out, out
 
 
 # =====================================================================
@@ -940,3 +1120,120 @@ def test_the_readme_states_the_server_is_client_agnostic():
     assert "Works with any MCP client" in text
     for client in ("Claude Code", "Cursor", "Windsurf", "VS Code"):
         assert client in text, f"{client} missing from the client table"
+
+
+# =====================================================================
+# Provenance: a number handed to a model has to carry its own as-of date
+# =====================================================================
+
+class _FakeQuoteTicker:
+    def __init__(self, info=None, options=None, chain=None):
+        self.info = info or {}
+        self.options = options or []
+        self._chain = chain
+
+    def option_chain(self, date):
+        return self._chain
+
+
+def test_short_interest_states_the_settlement_date_before_the_numbers(monkeypatch):
+    """
+    FINRA short interest settles twice a month and is published days later, so
+    the figure is routinely three weeks old. yfinance publishes the settlement
+    date as `dateShortInterest`; this tool never read it, and rendered a
+    three-week-old squeeze assessment with nothing to date it.
+    """
+    info = {"shortPercentOfFloat": 0.132, "shortRatio": 2.19,
+            "sharesShort": 116327753, "heldPercentInstitutions": 0.61,
+            "sharesOutstanding": 1000000000,
+            "dateShortInterest": 1786665600}          # 2026-08-14 UTC
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(info=info))
+    monkeypatch.setattr(srv, "_fundamentals_check_note", lambda *a, **k: "")
+
+    out = srv.get_short_interest("GME")
+
+    assert "2026-08-14" in out, "the settlement date the figure refers to must be stated"
+    assert out.index("2026-08-14") < out.index("Short % of Float"), \
+        "the as-of date belongs before the numbers it qualifies, not after"
+
+
+def test_short_interest_without_a_published_date_says_so(monkeypatch):
+    """Absent is not the same as current, and must not render as current."""
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(info={"shortPercentOfFloat": 0.1}))
+    monkeypatch.setattr(srv, "_fundamentals_check_note", lambda *a, **k: "")
+
+    out = srv.get_short_interest("AAA")
+
+    assert "not published" in out.lower()
+
+
+def _chain(rows):
+    import pandas as pd
+    cols = ["strike", "lastPrice", "volume", "openInterest",
+            "impliedVolatility", "lastTradeDate"]
+    calls = pd.DataFrame([r for r in rows], columns=cols)
+    puts = pd.DataFrame([], columns=cols)
+    return type("C", (), {"calls": calls, "puts": puts})()
+
+
+def test_unusual_options_dates_the_quotes_it_reports(monkeypatch):
+    """
+    The only date this tool printed was the contract expiry, which a model reads
+    as today. The quotes themselves are last-trade prints that can be days old.
+    """
+    import pandas as pd
+    rows = [[770.0, 1.76, 87921, 100, 0.103, pd.Timestamp("2026-09-04 19:59", tz="UTC")]]
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(options=["2026-09-11"], chain=_chain(rows)))
+
+    out = srv.get_unusual_options("SPY")
+
+    assert "2026-09-04" in out, "the last-trade date of the quotes must be stated"
+    assert "Expiration" in out
+
+
+def test_unusual_options_reports_both_ends_of_a_mixed_age_chain(monkeypatch):
+    """
+    A chain can hold a contract that traded seconds ago next to one that last
+    traded a week ago. A single chain-level timestamp would be its own lie, so
+    the span is reported when the rows shown disagree.
+    """
+    import pandas as pd
+    rows = [
+        [770.0, 1.76, 87921, 100, 0.103, pd.Timestamp("2026-09-04 19:59", tz="UTC")],
+        [800.0, 0.12, 50000, 100, 0.900, pd.Timestamp("2026-08-28 14:02", tz="UTC")],
+    ]
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker",
+                        lambda s: _FakeQuoteTicker(options=["2026-09-11"], chain=_chain(rows)))
+
+    out = srv.get_unusual_options("SPY")
+
+    assert "2026-08-28" in out and "2026-09-04" in out, \
+        "a chain whose rows disagree on age must show both ends"
+
+
+def test_13f_holdings_state_how_old_the_snapshot_is(monkeypatch):
+    """
+    A 13F is a photograph of the quarter end, filed up to 45 days later and
+    superseded only by the next one — so the newest available figure is
+    routinely three months old and can be four and a half. The output named the
+    quarter and the filing date and left the reader to do that subtraction, and
+    a model reading "latest 13F" hears "current".
+    """
+    monkeypatch.setattr(srv.edgar_forms, "institutional_holdings", lambda *a, **k: {
+        "institution": "BERKSHIRE HATHAWAY INC", "cik": "0001067983",
+        "filed": "2026-08-14", "period": "2026-06-30", "positions": 2,
+        "total_value": 1000, "reconciliation": {},
+        "holdings": [
+            {"issuer": "APPLE INC", "value": 700, "shares": 10, "cusip": "037833100"},
+            {"issuer": "COCA COLA CO", "value": 300, "shares": 5, "cusip": "191216100"}],
+    })
+
+    out = srv.get_institutional_holdings("BRK-B")
+
+    low = out.lower()
+    assert "days old" in low or "months old" in low, \
+        "the age of the snapshot has to be stated, not left as a subtraction"
+    assert "45" in out, "the statutory reporting lag belongs next to the age"

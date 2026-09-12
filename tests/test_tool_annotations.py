@@ -26,6 +26,11 @@ def _tools():
     return asyncio.run(srv.mcp._list_tools())
 
 
+def _tool_description(name):
+    """The description the model actually receives for one tool."""
+    return next(t.description or "" for t in _tools() if t.name == name)
+
+
 def test_every_registered_tool_is_annotated():
     tools = _tools()
     missing = [t.name for t in tools if not t.annotations]
@@ -161,16 +166,23 @@ def test_no_tool_declares_the_boilerplate_output_schema():
 
 
 def test_a_response_is_not_sent_twice():
+    """
+    Every tool here returns text. Emitting the same payload again as
+    `structuredContent` would double what the client pays to read one answer.
+
+    Driven through the public `call_tool` rather than a private method: this
+    test used to reach `_call_tool_mcp`, which a FastMCP release then renamed,
+    so it failed in CI against an unpinned dependency while passing locally
+    against an older one. A test that breaks on someone else's refactor of a
+    private name is testing the wrong surface.
+    """
     import asyncio as _asyncio
 
-    async def call():
-        return await srv.mcp._call_tool_mcp(
-            "get_journal_summary", {})          # local-only: no network
+    result = _asyncio.run(srv.mcp.call_tool("get_journal_summary", {}))
 
-    result = _asyncio.run(call())
-    structured = getattr(result, "structuredContent", None)
-    assert structured is None, (
+    assert result.structured_content is None, (
         "structuredContent duplicates the text content verbatim")
+    assert result.content, "the text content is the payload"
 
 
 def test_the_tool_list_stays_within_a_reasonable_context_budget():
@@ -209,3 +221,44 @@ def test_the_readme_states_the_real_read_only_count():
     assert (int(match.group(1)), int(match.group(2))) == (read_only, len(tools)), (
         f"README says {match.group(1)} of {match.group(2)}; "
         f"the server registers {read_only} of {len(tools)}")
+
+
+# =====================================================================
+# A cheap path nobody is told about is not a cheap path
+# =====================================================================
+
+def test_the_profile_tells_the_model_how_to_ask_for_less():
+    """
+    get_company_profile spans 555 tokens for one section to 6,015 for all of
+    them -- the field filtering that MCP guidance calls the highest-leverage
+    saving, already built. But the summary line read "Everything worth knowing
+    about a company, in one call. Start here", which steers every caller into
+    the widest default. A model asked which sector Apple is in spent 3,161
+    tokens on a question answerable in 555.
+
+    The lever has to be named where the model reads, not only in the parameter
+    list it may skim.
+    """
+    body = _tool_description("get_company_profile")
+
+    assert "sections" in body, "the narrowing parameter must be named in the description"
+    assert "detail" in body
+    assert "brief" in body, "the cheap preset has to be named to be reachable"
+
+
+def test_the_profile_presets_are_actually_cheaper_in_that_order():
+    """
+    The description now makes a cost claim. If brief were not materially
+    narrower than standard, that claim would be a lie the model acts on.
+
+    Counted in sections rather than characters: the first version measured real
+    payloads, which passed here and failed in CI, where there is no upstream to
+    fetch. A unit test that needs the internet is not a unit test.
+    """
+    brief = srv.profile_sections(detail="brief")
+    standard = srv.profile_sections(detail="standard")
+    full = srv.profile_sections(detail="full")
+
+    assert len(brief) < len(standard) < len(full)
+    assert len(brief) * 2 <= len(standard),         "brief has to be worth choosing, not a rounding error"
+    assert len(srv.profile_sections(sections="business")) == 1

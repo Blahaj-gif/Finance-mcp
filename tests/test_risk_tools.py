@@ -136,8 +136,10 @@ def test_portfolio_risk_computes_weights_and_pnl(monkeypatch, fake_account):
                         lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
     out = srv.get_portfolio_risk()
 
-    # AAA 10 x 110 = 1100; BBB 5 x 45 = 225; gross 1325.
-    assert "$1,325.00" in out
+    # AAA 10 x 110 = 1100; BBB 5 x 45 = 225; gross 1325. The fixture reports no
+    # currency per position, so the total is shown bare rather than as dollars.
+    assert "1,325.00" in out
+    assert "$1,325.00" not in out
     assert "83.0%" in out or "83.02%" in out    # AAA weight
     assert "+10.00%" in out                      # AAA P&L
     assert "-10.00%" in out                      # BBB P&L
@@ -496,3 +498,146 @@ def test_the_dashboard_imports_tradeclient_at_module_level():
     src = open(_repo("dashboard", "app.py"), encoding="utf-8").read()
     header = src[:src.index("# ---")]
     assert "from webull.trade.trade_client import TradeClient" in header
+
+
+# =====================================================================
+# A share count is a ratio of two money amounts, so they must be one currency
+# =====================================================================
+
+def test_sizing_refuses_to_divide_one_currency_by_another(monkeypatch, fake_account):
+    """
+    The account is THB-denominated with a USD buying-power line. Dividing a THB
+    risk budget by a USD risk-per-share gives a share count wrong by the
+    exchange rate -- about 35x too many shares -- and the output rendered it as
+    "**THB equity**: `$320,000.00`", a THB amount with a dollar sign on it.
+    """
+    import sys as _sys
+    # A real THB line, so the refusal under test is the currency mismatch and
+    # not "no THB buying power" -- which mentions both codes and would let this
+    # test pass without the fix existing.
+    monkeypatch.setattr(_sys.modules[__name__], "BALANCE", {
+        "total_asset_currency": "THB",
+        "account_currency_assets": [
+            {"currency": "THB", "cash_balance": "320000.00",
+             "buying_power": "320000.00", "market_value": "0.00"},
+        ],
+    })
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: {"currency": "USD", "exchange": "NasdaqGS"})
+
+    with pytest.raises(ToolError) as caught:
+        srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                    entry_price=100.0, account_currency="THB")
+
+    message = str(caught.value)
+    assert "USD" in message and "THB" in message, \
+        "the refusal must name both currencies so the caller can fix it"
+
+
+def test_sizing_proceeds_when_the_currencies_agree(monkeypatch, fake_account):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: {"currency": "USD", "exchange": "NasdaqGS"})
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                      entry_price=100.0, account_currency="USD")
+    assert "10.0000 shares" in out
+
+
+def test_an_unreadable_quote_currency_is_said_out_loud_not_assumed(monkeypatch, fake_account):
+    """
+    Silence is what made this invisible. An unknown must be visible rather than
+    assumed away -- but it must not refuse either, or an upstream hiccup would
+    stop sizing working at all.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    monkeypatch.setattr(srv.webull_client, "yahoo_feed_delay",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("no metadata")))
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0, risk_percent=1.0,
+                                      entry_price=100.0, account_currency="USD")
+    assert "10.0000 shares" in out
+    low = out.lower()
+    assert "currency" in low and "exchange rate" in low, (
+        "an unreadable quote currency must be stated, not assumed away")
+
+
+def test_portfolio_risk_never_adds_two_currencies_together(monkeypatch, fake_account):
+    """
+    Gross exposure summed every position's value regardless of denomination, and
+    then divided each position by that total to get a weight. A THB holding
+    beside a USD one produced a gross that is not money in any currency, and
+    weights that are wrong for both.
+    """
+    class Mixed:
+        def get_account_list(self):
+            return [{"account_id": "ACC1"}]
+
+        def get_account_balance(self, account_id):
+            return BALANCE
+
+        def get_account_position(self, account_id):
+            return [
+                {"symbol": "AAA", "quantity": "10", "cost_price": "100.00",
+                 "last_price": "110.00", "currency": "USD"},
+                {"symbol": "KKK", "quantity": "100", "cost_price": "150.00",
+                 "last_price": "160.00", "currency": "THB"},
+            ]
+
+    import webull.trade.trade_client as tc
+    monkeypatch.setattr(tc, "TradeClient",
+                        lambda api: type("T", (), {"account_v2": Mixed()})())
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+
+    out = srv.get_portfolio_risk()
+
+    assert "$1,100.00" in out, "the USD book is 10 x 110"
+    assert "16,000.00 THB" in out, "the THB book is 100 x 160, and is not dollars"
+    assert "$17,100.00" not in out, "the two must never be added together"
+    assert "100.0%" in out, "each position is the whole of its own currency book"
+
+
+def test_returns_are_paired_by_date_and_never_across_a_gap():
+    """
+    Return series were paired by POSITION after reset_index(drop=True), so a
+    holding that missed a session had every later return lined up against a
+    different day's return for its neighbours -- and the beta and correlations
+    were computed on that. Measured on a synthetic book with a true beta of
+    2.023, position-pairing gave 1.897 to 2.031 depending on the gap pattern.
+
+    Aligning on dates is necessary but not sufficient: after an inner join, the
+    bar following a gap is a multi-day return for the leg that skipped and a
+    one-day return for the others. Those rows are dropped too.
+    """
+    import pandas as pd
+    days = pd.to_datetime(["2026-09-01", "2026-09-02", "2026-09-03",
+                           "2026-09-04", "2026-09-08"])
+    a = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0], index=days)
+    b = pd.Series([50.0, 50.5, 51.5, 52.0],
+                  index=days[[0, 1, 3, 4]])          # 2026-09-03 missing
+    bench = pd.Series([10.0, 10.1, 10.2, 10.3, 10.4], index=days)
+
+    rets, bench_ret = srv._align_on_sessions({"A": a, "B": b}, bench)
+
+    assert list(rets.columns) == ["A", "B"]
+    kept = [str(d.date()) for d in rets.index]
+    assert kept == ["2026-09-02", "2026-09-08"], (
+        f"the bar after B's gap must be dropped, kept {kept}")
+    assert len(bench_ret) == len(rets)
+
+
+def test_alignment_keeps_a_clean_book_whole():
+    """The mask must not throw away sessions when nothing is missing."""
+    import pandas as pd
+    days = pd.to_datetime(["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"])
+    a = pd.Series([100.0, 101.0, 102.0, 103.0], index=days)
+    b = pd.Series([50.0, 50.5, 51.0, 51.5], index=days)
+    bench = pd.Series([10.0, 10.1, 10.2, 10.3], index=days)
+
+    rets, bench_ret = srv._align_on_sessions({"A": a, "B": b}, bench)
+    assert len(rets) == 3, "three returns from four clean sessions"

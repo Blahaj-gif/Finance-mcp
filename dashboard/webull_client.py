@@ -181,16 +181,111 @@ WEBULL_TIMESPAN = {
     "D": "D", "W": "W", "M": "M", "Y": "Y",
 }
 
+# Which intervals name an instant rather than a session. Deliberately a
+# positive allowlist: anything this module has never seen -- and whats_changed
+# really does pass raw strings like "60" -- renders as the bare stored date,
+# because converting an unknown interval can move the calendar day backward. A
+# bar stamped 00:00 UTC becomes the previous day at 20:00 ET, and a date that
+# silently walks a day is worse than a clock nobody asked for.
+INTRADAY_DISPLAY_INTERVALS = frozenset({
+    "M1", "M5", "M15", "M30", "M60", "M120", "M240", "H1",
+})
+
+
+def display_frame(df, interval: str):
+    """
+    A copy of `df` with its time column rendered the way the header renders it.
+
+    The freshness line already showed a daily bar as a bare date; the table
+    beside it still printed "2026-09-11 04:00:00" for the same bar, so one
+    response carried two renderings of one timestamp -- and the one left behind
+    was the midnight-ET-as-UTC form, removed from the header precisely because
+    it reads as a 4 a.m. print on a server with no extended-hours data.
+
+    A copy, deliberately: storage stays naive UTC because the staleness gate,
+    the disk cache and the indicator maths all compare these strings.
+    """
+    shown = df.copy()
+    if "time" in shown.columns:
+        stamps = pd.to_datetime(shown["time"], errors="coerce")
+        shown["time"] = [
+            display_bar_time(t, interval) if pd.notna(t) else original
+            for t, original in zip(stamps, shown["time"])]
+    return shown
+
+
+def _resolve_display_tz():
+    """
+    The timezone bar timestamps are *shown* in. Never raises.
+
+    webull_client is imported by finance_mcp, the dashboard, the alert manager
+    and both brokers, so a bad value here would be a full outage caused by a
+    display preference. A timezone that will not resolve degrades the label to
+    UTC and leaves the data untouched.
+    """
+    import zoneinfo
+    for name in (os.getenv("MARKET_DISPLAY_TZ", "America/New_York"),
+                 "America/New_York"):
+        try:
+            return zoneinfo.ZoneInfo(name)
+        except Exception:
+            continue
+    return datetime.timezone.utc
+
+
+MARKET_DISPLAY_TZ = _resolve_display_tz()
+
+
+def display_bar_time(newest, interval: str) -> str:
+    """
+    A bar timestamp as a human should read it. Display only.
+
+    Bars are STORED naive-UTC (see _parse_bar_times) and every comparison in
+    this system -- the staleness gate, session counting, the disk cache, the
+    `since` windows -- is UTC. That storage choice is correct and does not move.
+    But a US equity bar printed as "2026-09-04 19:45" reads as an after-hours
+    print of a bar that actually closed the regular session at 15:45 ET, from a
+    server that has no extended-hours data at all. So convert here, at the
+    render boundary, and only here.
+
+    A session bar (D/W/M/Y) is a period, not an instant: it is stamped 04:00 UTC
+    for a US daily bar, and printing a clock on it invites reading midnight ET
+    as a 4 a.m. trade. Those render as a bare date.
+    """
+    iv = (interval or "").upper()
+    if iv not in INTRADAY_DISPLAY_INTERVALS:
+        return f"{newest:%Y-%m-%d}"
+    try:
+        local = newest.tz_localize("UTC").tz_convert(MARKET_DISPLAY_TZ)
+        return f"{local:%Y-%m-%d %H:%M %Z}"
+    except Exception:
+        # A tz-aware input, or anything else unexpected: show the stored value
+        # rather than losing the timestamp entirely.
+        return f"{newest:%Y-%m-%d %H:%M} UTC"
+
+
 # Staleness thresholds.
 #
 # Daily and slower intervals are measured in *trading sessions* using the
 # exchange calendar (see market_calendar.py), which is far tighter than a
 # calendar-day heuristic: a 5-day window had to be wide enough to absorb a
 # holiday weekend, and was therefore wide enough to hide a real 3-day outage.
+# Retuned when market_calendar's reference session was corrected. The old
+# reference counted today as a completed session, which inflated every reading
+# by one -- so D=1 was not a one-session gate, it was a two-session gate, and it
+# caught a genuinely one-session-old bar in 58.3% of hours rather than always.
+#
+# The numbers below were swept hourly across 2026-2027 against both feeds'
+# stamping conventions, which are opposite: Webull stamps a weekly bar at the
+# week's last session (2026-09-04) and Yahoo at its first (2026-08-31). The
+# worst reading for the newest bar that exists is 0 for D, 4 for W and 22 for M;
+# W and M keep a session of margin over that because those maxima depend on a
+# vendor convention that could change, and D does not -- it is 0 by
+# construction, since the reference *is* the newest session that should exist.
 STALENESS_TOLERANCE_SESSIONS = {
-    "D": 1,    # newest completed session; today's bar does not exist until close
-    "W": 6,    # a little over one week
-    "M": 25,   # a little over one month
+    "D": 0,    # the reference already excludes a session that cannot have a bar
+    "W": 5,    # measured worst case 4, plus a session of margin
+    "M": 24,   # measured worst case 22, plus margin
 }
 
 # Intraday still uses wall-clock hours -- session-counting says nothing useful
@@ -523,11 +618,45 @@ _RATE_LIMITER = _RateLimiter(WEBULL_MIN_REQUEST_INTERVAL)
 
 
 def _is_rate_limited(exc) -> bool:
+    """
+    Structured evidence only. A transport error is not a rate limit.
+
+    This used to fall through to a substring match on the exception text, which
+    reached exactly the wrong cases: a read timeout reading "Read timed out.
+    (TOO_MANY_REQUESTS?)" matched, and a read timeout is precisely the failure
+    where the request may already have been applied. Nothing the SDK raises
+    needs the branch -- it puts the body's error_code and the HTTP status onto
+    every ServerException -- so its only reach was over exceptions from outside
+    the SDK, matching on prose.
+    """
     if getattr(exc, "http_status", None) == 429:
         return True
-    if str(getattr(exc, "error_code", "")).upper() == "TOO_MANY_REQUESTS":
-        return True
-    return "TOO_MANY_REQUESTS" in str(exc).upper()
+    return str(getattr(exc, "error_code", "")).upper() == "TOO_MANY_REQUESTS"
+
+
+def call_webull_once(fn, *args, **kwargs):
+    """
+    Pace, but never repeat. The entry point for a binding write.
+
+    RFC 9110 section 9.2.2 permits an automatic retry of a non-idempotent
+    request only when the client can detect that the original was never
+    applied. At a failed submit this process cannot: a timeout, a reset and a
+    500 all leave the outcome unknown, and no broker here promises to
+    deduplicate. Webull documents client_order_id as a uniqueness obligation on
+    the *client*, never as an idempotency key; Saxo states outright that its
+    equivalent is not checked for uniqueness.
+
+    Webull says the same thing in its own words -- "No retry by default ... Do
+    no retry when it's not a GET request" -- and ships it as configuration:
+    core/data/retry_config.json carries RetryableMethods: ["GET"], and
+    place_order is a POST. call_webull sits outside the SDK and was reinstating
+    a retry for the one call the vendor had deliberately excluded.
+
+    A throttled submit now surfaces, and a human decides whether to send it
+    again. That is the correct actor for that decision.
+    """
+    _RATE_LIMITER.acquire()
+    return fn(*args, **kwargs)
 
 
 def call_webull(fn, *args, **kwargs):
@@ -1099,7 +1228,7 @@ def freshness_line(df: pd.DataFrame, source: str, interval: str = "D") -> str:
         age = f"{hours:.1f}h old" if hours < 48 else f"{hours / 24:.1f} days old"
 
     cached = " · from 60s cache" if "(Cached)" in source else ""
-    return (f"`Latest {iv} bar: {newest:%Y-%m-%d %H:%M} ({age}) · "
+    return (f"`Latest {iv} bar: {display_bar_time(newest, iv)} ({age}) · "
             f"source: {base_source(source)}{cached} · "
             f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
 
@@ -1120,19 +1249,20 @@ def bar_age(df: pd.DataFrame, interval: str = "D") -> dict:
         newest = pd.to_datetime(df["time"].iloc[-1])
     except Exception:
         return {"bar": None, "as_of": "unknown", "age": "unknown",
-                "behind": float("inf"), "current": False}
+                "behind": float("inf"), "current": False, "unit": "unknown"}
 
     iv = (interval or "D").upper()
     if iv in STALENESS_TOLERANCE_SESSIONS:
         behind = market_calendar.sessions_stale(newest.date())
         age = "current" if behind == 0 else f"{behind} session{'s' if behind != 1 else ''}"
         return {"bar": newest, "as_of": f"{newest:%Y-%m-%d}", "age": age,
-                "behind": float(behind), "current": behind == 0}
+                "behind": float(behind), "current": behind == 0,
+                "unit": "sessions"}
 
     hours = (datetime.datetime.utcnow() - newest.to_pydatetime()).total_seconds() / 3600
     age = f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
-    return {"bar": newest, "as_of": f"{newest:%Y-%m-%d %H:%M}", "age": age,
-            "behind": hours, "current": hours < 24}
+    return {"bar": newest, "as_of": display_bar_time(newest, iv), "age": age,
+            "behind": hours, "current": hours < 24, "unit": "hours"}
 
 
 def freshness_summary(ages, interval: str = "D", label: str = "series") -> str:
@@ -1147,6 +1277,21 @@ def freshness_summary(ages, interval: str = "D", label: str = "series") -> str:
     usable = [a for a in ages if a and a.get("bar") is not None]
     if not usable:
         return "`As of: no dated bars in this result`\n\n"
+
+    # `behind` is sessions for daily and slower and hours otherwise, so ranking
+    # a mixed sweep by it compares two different quantities -- 2 sessions
+    # against 3 hours, and 3 wins. When both units are present, report each
+    # one's worst rather than picking a winner between them.
+    units = {a.get("unit") for a in usable if a.get("unit")}
+    if len(units) > 1:
+        worst = []
+        for unit in sorted(units):
+            group = [a for a in usable if a.get("unit") == unit]
+            oldest = max(group, key=lambda a: a["behind"])
+            worst.append(f"{oldest['as_of']} ({oldest['age']}) over "
+                         f"{len(group)} {unit}-counted")
+        return (f"`As of {'; '.join(worst)} — {len(usable)} {label} on two "
+                f"different clocks · retrieved {datetime.datetime.now():%H:%M:%S}`\n\n")
 
     stalest = max(usable, key=lambda a: a["behind"])
     freshest = min(usable, key=lambda a: a["behind"])

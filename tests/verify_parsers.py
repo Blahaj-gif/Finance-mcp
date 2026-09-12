@@ -5,9 +5,14 @@ Reconcile the filing parsers against real filings.
 
 Read-only. Fetches live filings from SEC EDGAR and checks each parse against a
 number the filing states about *itself* — a 13F's cover page declares its own
-entry count and total value, a Form 144 states both a share count and an
-aggregate market value, a Form 4 states the holding remaining after each
-transaction.
+entry count and total value, and a Form 4 states the holding remaining after
+each transaction.
+
+Form 144 is **not** checked here, though it could be: a 144 states both a share
+count and an aggregate market value. `parse_form144` has no live verification at
+all, and its only tests are synthetic — this project marking its own homework,
+which is the thing this script exists to avoid. Saying so is the honest state;
+claiming the check exists was not.
 
 That independence is the point. Every parser here was verified by its author
 reading its output, which is the weakest kind of verification: a parse that

@@ -80,6 +80,8 @@ import dashboard.webull_client as webull_client
 from dashboard import theme as fm_theme
 from dashboard import market_calendar
 from dashboard import broker
+from dashboard import broker_protocol
+from dashboard import order_queue
 from dashboard import live_consent
 from webull.trade.trade_client import TradeClient
 from dashboard import portfolio_history
@@ -855,7 +857,8 @@ with tab_backtest:
                       f"{metrics['total_trades']} trades"
                       + (" (1 still open)" if metrics["open_trade"] else ""))
             st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}",
-                      help="Gross wins / gross losses. Above 1.0 is profitable before slippage.")
+                      help="Wins / losses, net of the modelled transaction fee. "
+                           "Slippage is not modelled.")
             st.metric("Time in Market", f"{metrics['exposure_pct']:.0f}%",
                       help="Share of bars holding a position. A high return on low exposure "
                            "is a different claim from the same return held throughout.")
@@ -1121,20 +1124,38 @@ with tab_execution:
 
                 # A draft carries symbol/quantity, not a broker-native order,
                 # and this page rebuilds the order against Webull at approval
-                # time. A draft raised while FINANCE_BROKER pointed elsewhere
-                # would therefore be submitted to the wrong broker, and nothing
-                # in the confirmation would say so. Drafts predating this field
-                # are Webull's, because Webull was the only option then.
-                drafted_for = str(draft.get("broker", "webull")).lower()
-                if drafted_for != "webull":
-                    st.error(
-                        f"This draft was raised against **{drafted_for}**, and this "
-                        "page can only submit to Webull. Cancel it and re-draft "
-                        "with FINANCE_BROKER=webull, or submit it on "
-                        f"{drafted_for}'s own platform. Nothing has been sent.")
+                # time -- so both things the draft records about where it came
+                # from have to be checked back rather than trusted. The broker,
+                # because a draft raised while FINANCE_BROKER pointed elsewhere
+                # would be submitted to the wrong one; and the environment,
+                # because a draft rehearsed against the sandbox was cleared by
+                # guards measured against sandbox money.
+                refusal = broker_protocol.draft_refusal(
+                    draft, broker_name="webull",
+                    environment_label=webull_client.environment_label())
+                if refusal:
+                    st.error(refusal)
                     continue
 
-                col_prev, col_exec = st.columns([1, 1])
+                col_prev, col_exec, col_drop = st.columns([1, 1, 0.5])
+
+                # The way out. Until this existed a draft could only be cleared
+                # by editing the JSON by hand, which made every refusal that
+                # says "deal with this draft" -- wrong desk, unpriceable, outcome
+                # unknown -- a dead end. Cancelling is local only: it marks our
+                # own record and sends nothing, because a draft has never
+                # reached the broker.
+                with col_drop:
+                    if st.button("Cancel", key=f"cancel_draft_{draft['draft_id']}",
+                                 width="stretch",
+                                 help="Discard this draft. It was never sent, so "
+                                      "nothing is withdrawn from the broker."):
+                        order_queue.update(
+                            draft["draft_id"], _path=drafts_path, status="CANCELLED",
+                            cancelled_at=datetime.datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"))
+                        st.session_state.pop(preview_key, None)
+                        st.rerun()
 
                 # --- Step 1: price the order with the broker (non-binding) ---
                 with col_prev:
@@ -1235,6 +1256,63 @@ with tab_execution:
                                 from webull.trade.trade_client import TradeClient
                                 import webull_client
 
+                                # Re-read the draft and check it is still the
+                                # order the broker priced. What gets SENT is
+                                # always preview["order"] -- rebuilding at
+                                # submit would send something the broker never
+                                # validated -- so this rebuild exists only to
+                                # compare. It catches a draft edited, cancelled
+                                # or already submitted between the preview and
+                                # this click.
+                                fresh = next(
+                                    (d for d in order_queue.load(drafts_path)
+                                     if d.get("draft_id") == draft["draft_id"]), None)
+                                if fresh is None:
+                                    st.error("This draft is no longer in the queue. "
+                                             "Nothing was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+                                if fresh.get("status") != "PENDING_APPROVAL":
+                                    st.error(
+                                        f"This draft is now {fresh.get('status')}, not "
+                                        "pending. It was acted on elsewhere. Nothing "
+                                        "was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+                                drift = broker_protocol.rebuilt_differs(
+                                    preview["order"],
+                                    broker.build_order(
+                                        symbol=fresh["symbol"], action=fresh["action"],
+                                        quantity=fresh["quantity"],
+                                        order_type=fresh["order_type"],
+                                        limit_price=fresh.get("limit_price"),
+                                        client_order_id=fresh["draft_id"]))
+                                if drift:
+                                    st.error(
+                                        "**This draft changed after it was priced.** "
+                                        f"{drift}\n\nNothing was sent. Preview it again "
+                                        "so the broker prices what the card actually "
+                                        "shows.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+
+                                # The risk checks ran when this was drafted and
+                                # never since. Buying power and inventory move.
+                                # Pinned to the desk that actually submits --
+                                # checking whichever broker FINANCE_BROKER
+                                # happens to name would clear an order against
+                                # an account it will never touch.
+                                risk, risk_notes = broker_protocol.pretrade_refusal(
+                                    brokers.get("webull"), fresh,
+                                    order_queue.load(drafts_path))
+                                for note in risk_notes:
+                                    st.warning(note)
+                                if risk:
+                                    st.error(f"**Refused at approval.** {risk}\n\n"
+                                             "Nothing was sent.")
+                                    st.session_state.pop(preview_key, None)
+                                    st.rerun()
+
                                 trade_client = TradeClient(webull_client.get_api_client())
                                 res = broker.place_order(
                                     trade_client, preview["account_id"], preview["order"])
@@ -1244,15 +1322,37 @@ with tab_execution:
                                 # to the draft and reporting a fill that never happened.
                                 st.success(f"Order submitted. Broker response: {res}")
 
-                                draft["status"] = "EXECUTED"
-                                draft["executed_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                draft["client_order_id"] = preview["order"]["client_order_id"]
-                                draft["broker_response"] = str(res)
-                                with open(drafts_path, "w", encoding="utf-8") as fw:
-                                    json.dump(drafts, fw, indent=2)
+                                order_queue.update(
+                                    draft["draft_id"], _path=drafts_path,
+                                    status="EXECUTED",
+                                    executed_at=datetime.datetime.now().strftime(
+                                        "%Y-%m-%d %H:%M:%S"),
+                                    client_order_id=preview["order"]["client_order_id"],
+                                    broker_response=str(res))
 
                                 st.session_state.pop(preview_key, None)
                                 st.rerun()
+                            except broker.AmbiguousSubmission as e:
+                                # The submit failed without establishing that
+                                # nothing was sent. Saying "the draft remains
+                                # PENDING" here would read as "nothing reached
+                                # the market", which is exactly what this
+                                # process does not know. Do not resend.
+                                order_queue.update(
+                                    draft["draft_id"], _path=drafts_path,
+                                    status="OUTCOME_UNKNOWN",
+                                    unknown_at=datetime.datetime.now().strftime(
+                                        "%Y-%m-%d %H:%M:%S"),
+                                    client_order_id=e.client_order_id)
+                                st.error(
+                                    f"**Outcome unknown.** {e.cause}\n\n"
+                                    f"This order may or may not have reached the market. "
+                                    f"Check the order book for client order id "
+                                    f"`{e.client_order_id}` before doing anything else — "
+                                    f"submitting again could place it twice. This draft is "
+                                    f"marked OUTCOME_UNKNOWN and will not be offered for "
+                                    f"approval again.")
+                                st.session_state.pop(preview_key, None)
                             except Exception as e:
                                 st.error(f"Failed to submit — the draft remains PENDING: {e}")
                                 text = str(e).upper()
@@ -1417,7 +1517,10 @@ with tab_portfolio:
             portfolio_history.record_snapshot(
                 net_liquidation=net_liq, gross_exposure=sum(b["last"] * b["quantity"] for b in book),
                 unrealised_pnl=day_pnl, currency=currency,
-                positions=[{k: b[k] for k in ("symbol", "quantity", "cost")} for b in book])
+                positions=[{k: b[k] for k in ("symbol", "quantity", "cost")} for b in book],
+                # The session observed, not this machine's date. A snapshot taken
+                # on a Bangkok Saturday morning restates Friday's New York close.
+                today=market_calendar.reference_session())
         except Exception:
             pass          # a history write must never take the live panel down
 

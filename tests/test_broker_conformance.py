@@ -1294,14 +1294,35 @@ def test_a_draft_records_the_broker_it_was_raised_against(monkeypatch, tmp_path)
     assert written[-1]["environment"] in ("LIVE", "PAPER")
 
 
-def test_the_dashboard_refuses_a_draft_raised_against_another_broker():
-    """The guard above is only useful if the approval page reads it."""
+def test_the_dashboard_refuses_a_draft_raised_against_another_desk():
+    """
+    The two fields above are only useful if the approval page reads them back.
+    It checks the wiring rather than the wording: the refusals themselves live
+    in broker_protocol.draft_refusal and are tested against its behaviour, but
+    a guard the page never calls is not a guard.
+    """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
-    assert 'draft.get("broker", "webull")' in app, (
-        "the execution page must check which broker a draft was raised against")
-    assert "can only submit to Webull" in app
-    assert "Nothing has been sent" in app
+    assert "broker_protocol.draft_refusal(" in app, (
+        "the execution page must check which desk a draft was raised against")
+    assert "environment_label=" in app, (
+        "the environment has to be passed, or only half the check runs")
+    assert "st.error(refusal)" in app and "continue" in app, (
+        "a refused draft must stop before the preview and submit buttons")
+
+
+def test_a_draft_from_the_other_environment_is_refused():
+    """
+    The behavioural half of the test above, so the wiring check cannot pass
+    against a guard that returns None for everything.
+    """
+    from dashboard import broker_protocol
+
+    draft = {"draft_id": "D1", "broker": "webull", "environment": "PAPER"}
+    assert broker_protocol.draft_refusal(
+        draft, broker_name="webull", environment_label="LIVE") is not None
+    assert broker_protocol.draft_refusal(
+        draft, broker_name="webull", environment_label="PAPER") is None
 
 
 def test_the_disk_cache_is_not_shared_across_brokers(monkeypatch):
@@ -1382,3 +1403,392 @@ def test_the_verification_scripts_cannot_place_an_order(script):
     assert "cancel_order" not in src
     assert "confirm_order" not in src
     assert "READ ONLY" in src
+
+
+@pytest.mark.parametrize("base", [
+    "https://localhost:5000/v1/api",
+    "https://127.0.0.1:5000/v1/api",
+    "https://[::1]:5000/v1/api",
+    "https://[::ffff:127.0.0.1]:5000/v1/api",   # unmaps to loopback
+])
+def test_tls_may_be_disabled_for_the_local_gateway(monkeypatch, base):
+    """
+    The Client Portal Gateway is self-signed by design and runs on loopback,
+    where nothing can sit between this process and it. That is the case the
+    opt-in exists for.
+    """
+    import ssl
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.setenv("IBKR_TLS_INSECURE", "1")
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    ctx = IbkrBroker(base_url=base, account_id=IBKR_ACCOUNT)._ssl_context()
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+@pytest.mark.parametrize("base", [
+    "https://api.ibkr.com/v1/api",
+    "https://10.0.0.4:5000/v1/api",
+])
+def test_tls_cannot_be_disabled_against_anything_but_loopback(monkeypatch, base):
+    """
+    SECURITY.md always said this was a localhost trade-off. It was not enforced:
+    _ssl_context never looked at the base URL, so the flag disabled verification
+    against IBKR's hosted API too -- an endpoint reached over the open internet
+    carrying a bearer token.
+
+    It refuses rather than silently verifying, because someone who set the flag
+    believing it applied would otherwise get an unexplained TLS failure instead
+    of being told what changed.
+    """
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.setenv("IBKR_TLS_INSECURE", "1")
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    broker = IbkrBroker(base_url=base, account_id=IBKR_ACCOUNT)
+
+    with pytest.raises(Exception) as caught:
+        broker._ssl_context()
+
+    message = str(caught.value)
+    assert "IBKR_TLS_INSECURE" in message
+    assert "loopback" in message.lower() or "localhost" in message.lower()
+    assert "tunnel" in message.lower(), \
+        "it must name a remedy that actually works for a remote gateway"
+
+
+def test_a_remote_gateway_without_the_flag_is_untouched(monkeypatch):
+    """The scoping must only constrain the opt-in, not ordinary verification."""
+    import ssl
+    from dashboard.brokers.ibkr import IbkrBroker
+
+    monkeypatch.delenv("IBKR_TLS_INSECURE", raising=False)
+    monkeypatch.delenv("IBKR_CACERT", raising=False)
+    ctx = IbkrBroker(base_url="https://api.ibkr.com/v1/api",
+                     account_id=IBKR_ACCOUNT)._ssl_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+
+# =====================================================================
+# The order submitted is the order that was previewed
+# =====================================================================
+
+def test_an_edited_draft_no_longer_matches_what_the_broker_priced():
+    """
+    The queue is a local file and the approval page rebuilds nothing at submit
+    time -- it sends the payload built at preview. So a draft edited between
+    preview and approve was harmless to the payload but made the card a lie: the
+    human read one quantity and a different one was already priced. Comparing
+    the rebuilt order against the previewed one catches either direction.
+    """
+    from dashboard import broker, broker_protocol
+
+    previewed = broker.build_order(symbol="AAPL", action="BUY", quantity=10,
+                                   order_type="LMT", limit_price=100.0,
+                                   client_order_id="DRFT_1")
+    tampered = broker.build_order(symbol="AAPL", action="BUY", quantity=10000,
+                                  order_type="LMT", limit_price=100.0,
+                                  client_order_id="DRFT_1")
+
+    why = broker_protocol.rebuilt_differs(previewed, tampered)
+    assert why and "quantity" in why
+
+
+def test_an_untouched_draft_rebuilds_identically():
+    from dashboard import broker, broker_protocol
+
+    order = dict(symbol="AAPL", action="BUY", quantity=10, order_type="LMT",
+                 limit_price=100.0, client_order_id="DRFT_1")
+    assert broker_protocol.rebuilt_differs(broker.build_order(**order),
+                                           broker.build_order(**order)) is None
+
+
+def test_the_comparison_covers_derived_fields_not_a_hand_listed_few():
+    """
+    build_order derives time_in_force, entrust_type and a formatted limit price.
+    A hand-listed five-field snapshot would miss all of them, so the comparison
+    is over the whole payload.
+    """
+    from dashboard import broker, broker_protocol
+
+    previewed = broker.build_order(symbol="AAPL", action="BUY", quantity=10,
+                                   order_type="LMT", limit_price=100.0,
+                                   client_order_id="DRFT_1")
+    other = dict(previewed)
+    other["time_in_force"] = "GTC"
+    assert broker_protocol.rebuilt_differs(previewed, other)
+
+
+def test_the_approval_page_checks_the_draft_before_it_submits():
+    """The comparison above is only worth having if the submit path runs it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    submit = app[app.index("2 — APPROVE AND SUBMIT"):]
+    assert "rebuilt_differs" in submit, "the draft must be re-checked before sending"
+    assert submit.index("rebuilt_differs") < submit.index("broker.place_order("), \
+        "the check has to happen before the order goes"
+    assert "PENDING_APPROVAL" in submit, \
+        "a draft acted on elsewhere must not be submitted again"
+    assert "preview[\"order\"]" in submit.split("broker.place_order(")[1][:120], \
+        "what is SENT must still be the payload the broker actually priced"
+
+
+# =====================================================================
+# The risk checks run again at approval, not only at draft time
+# =====================================================================
+
+class _Desk:
+    """A pinned adapter with known money. Never the ambient FINANCE_BROKER one."""
+    name = "webull"
+
+    def __init__(self, buying=1000.0, held=5.0):
+        self._buying, self._held = buying, held
+
+    def buying_power(self, currency="USD"):
+        return self._buying
+
+    def position_quantity(self, symbol):
+        return self._held
+
+
+def _d(**over):
+    d = {"draft_id": "D1", "symbol": "AAA", "action": "BUY", "quantity": 10,
+         "order_type": "LMT", "limit_price": 20.0, "status": "PENDING_APPROVAL"}
+    d.update(over)
+    return d
+
+
+def test_an_affordable_draft_passes_the_approval_recheck():
+    from dashboard import broker_protocol as bp
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=[])
+    assert why is None, why
+
+
+def test_a_draft_that_became_unaffordable_is_refused_at_approval():
+    """
+    The risk checks ran when the draft was created and never again. Buying power
+    moves -- another order fills, a position is sold, the account is swept -- so
+    a draft cleared on Monday could be approved on Friday against money that is
+    no longer there.
+    """
+    from dashboard import broker_protocol as bp
+    why, notes = bp.pretrade_refusal(_Desk(buying=50.0), _d(), pending=[])
+    assert why and "buying power" in why.lower()
+
+
+def test_the_recheck_counts_the_rest_of_the_queue():
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", est_notional=900.0)]
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=others)
+    assert why and "pending" in why.lower()
+
+
+def test_an_unpriceable_sibling_warns_but_does_not_block_a_previewed_order():
+    """
+    At draft time an unpriceable sibling is an inconvenience the model routes
+    around. At approval it would block a previewed, affordable, legitimate order
+    on account of an unrelated draft -- and the only remedy would be editing the
+    live queue by hand, which is the deadlock the Cancel button exists to
+    dissolve.
+    """
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", order_type="MKT", limit_price=None)]
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=others)
+    assert why is None, "an unpriceable sibling must not block this order"
+    assert any("D2" in n for n in notes), "but it must be named"
+
+
+def test_a_sell_is_rechecked_against_inventory_including_the_queue():
+    from dashboard import broker_protocol as bp
+    others = [_d(draft_id="D2", action="SELL", quantity=4)]
+    why, notes = bp.pretrade_refusal(
+        _Desk(held=5.0), _d(action="SELL", quantity=3), pending=others)
+    assert why and "naked" in why.lower()
+
+
+def test_the_recheck_needs_no_network_for_a_limit_order(monkeypatch):
+    """A LMT draft carries its own price, so approval must not depend on a feed."""
+    from dashboard import broker_protocol as bp
+
+    def explode(symbol):
+        raise AssertionError("approval must not reach a price feed for a LMT draft")
+
+    why, notes = bp.pretrade_refusal(_Desk(buying=1000.0), _d(), pending=[],
+                                     price_of=explode)
+    assert why is None
+
+
+def test_the_approval_page_runs_the_risk_recheck_against_the_pinned_desk():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    submit = app[app.index("2 — APPROVE AND SUBMIT"):]
+    assert "pretrade_refusal" in submit
+    assert 'brokers.get("webull")' in submit, \
+        "the re-check must read the desk that submits, not the ambient one"
+    assert submit.index("pretrade_refusal") < submit.index("broker.place_order(")
+
+
+# =====================================================================
+# An open order the tool cannot describe
+# =====================================================================
+
+# The exact envelope Webull returns for a working order, field names and
+# nesting as observed live. The adapter looked for the leg under "items";
+# the API puts it under "orders", so every field fell back to the envelope --
+# which carries none of them -- and a real STOP_LOSS on a live account
+# rendered with blank symbol, blank side and blank status.
+LIVE_COMBO_ENVELOPE = [{
+    "client_order_id": "03846CF52080O0KCJIE8000000",
+    "combo_type": "NORMAL",
+    "orders": [{
+        "client_order_id": "03846CF52080O0KCJIE8000000",
+        "order_id": "03846CF52080O0KCJIE8000000",
+        "symbol": "ZETA",
+        "side": "SELL",
+        "order_type": "STOP_LOSS",
+        "status": "SUBMITTED",
+        "total_quantity": "12",
+        "filled_quantity": "0",
+        "stop_price": "14.50",
+        "instrument_type": "EQUITY",
+        "time_in_force": "DAY",
+    }],
+}]
+
+
+def _webull_with_open_orders(monkeypatch, payload):
+    from dashboard.brokers.webull import WebullBroker
+    from dashboard import webull_client as wc
+
+    class Stub(WebullBroker):
+        def _client(self):
+            return type("C", (), {"order_v3": type("O", (), {
+                "get_order_open": staticmethod(lambda acct: payload)})()})()
+
+        def primary_account_id(self):
+            return "ACC1"
+
+    monkeypatch.setattr(wc, "unwrap", lambda r: r)
+    monkeypatch.setattr(wc, "call_webull", lambda fn, *a, **k: fn(*a, **k))
+    return Stub()
+
+
+def test_a_working_order_is_described_not_left_blank(monkeypatch):
+    order = _webull_with_open_orders(monkeypatch, LIVE_COMBO_ENVELOPE).open_orders()[0]
+
+    assert order["symbol"] == "ZETA"
+    assert order["action"] == "SELL"
+    assert order["quantity"] == 12.0
+    assert order["status"] == "SUBMITTED"
+    assert order["order_id"] == "03846CF52080O0KCJIE8000000"
+
+
+def test_a_protective_stop_is_identifiable_as_one(monkeypatch):
+    """
+    Cancelling an entry order reduces exposure; cancelling a stop removes the
+    thing limiting a loss. Telling them apart needs the order type and the stop
+    price, and neither survived the envelope.
+    """
+    order = _webull_with_open_orders(monkeypatch, LIVE_COMBO_ENVELOPE).open_orders()[0]
+
+    assert order["order_type"] == "STOP_LOSS"
+    assert order["stop_price"] == 14.50
+    assert order["protective"] is True
+
+
+def test_an_ordinary_limit_order_is_not_flagged_protective(monkeypatch):
+    payload = [{"client_order_id": "DRFT_a", "combo_type": "NORMAL", "orders": [{
+        "client_order_id": "DRFT_a", "order_id": "WB1", "symbol": "AAPL",
+        "side": "BUY", "order_type": "LIMIT", "status": "SUBMITTED",
+        "total_quantity": "5", "filled_quantity": "0", "limit_price": "100.00"}]}]
+    order = _webull_with_open_orders(monkeypatch, payload).open_orders()[0]
+
+    assert order["protective"] is False
+    assert order["limit_price"] == 100.0
+
+
+# =====================================================================
+# Cancelling an entry is a risk control. Cancelling a stop is not.
+# =====================================================================
+
+def _server_with_open(monkeypatch, orders):
+    import finance_mcp as srv
+    from dashboard import brokers
+
+    class Desk:
+        name = "webull"
+        verified = True
+
+        def primary_account_id(self):
+            return "ACC1"
+
+        def open_orders(self):
+            return orders
+
+        def cancel_order(self, client_order_id):
+            Desk.cancelled = client_order_id
+            return {"order_id": "WB1", "client_order_id": client_order_id, "raw": {}}
+
+        def environment_label(self):
+            return "LIVE"
+
+    Desk.cancelled = None
+    monkeypatch.setattr(brokers, "get", lambda name=None: Desk())
+    return srv, Desk
+
+
+ENTRY = {"client_order_id": "DRFT_a", "order_id": "WB1", "symbol": "AAPL",
+         "action": "BUY", "quantity": 5.0, "filled": 0.0, "limit_price": 100.0,
+         "stop_price": None, "order_type": "LIMIT", "protective": False,
+         "status": "SUBMITTED", "raw": {}}
+
+STOP = {"client_order_id": "03846CF5", "order_id": "03846CF5", "symbol": "ZETA",
+        "action": "SELL", "quantity": 3.0, "filled": 0.0, "limit_price": None,
+        "stop_price": 14.5, "order_type": "STOP_LOSS", "protective": True,
+        "status": "SUBMITTED", "raw": {}}
+
+
+def test_cancelling_an_entry_order_is_not_obstructed(monkeypatch):
+    """
+    Exchanges treat fast cancellation as a risk control -- kill switches exist
+    to cancel everything at once, and cancel-on-disconnect does it with no human
+    at all. Slowing this down would be backwards.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [ENTRY])
+    out = srv.cancel_order("DRFT_a")
+    assert Desk.cancelled == "DRFT_a"
+    assert "Cancellation request sent" in out
+
+
+def test_cancelling_a_protective_stop_refuses_without_an_explicit_acknowledgement(monkeypatch):
+    """
+    The opposite of a kill switch. A working STOP_LOSS is the thing limiting a
+    loss on an open position, and this account has one -- placed elsewhere, so
+    the model did not choose it and, until the combo envelope was unwrapped,
+    could not even see what it was.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [STOP])
+    out = srv.cancel_order("03846CF5")
+
+    assert Desk.cancelled is None, "nothing may be sent without acknowledgement"
+    assert "protective" in out.lower()
+    assert "ZETA" in out and "14.5" in out
+
+
+def test_a_protective_stop_is_cancellable_once_acknowledged(monkeypatch):
+    """The guard states a fact; it does not overrule the human."""
+    srv, Desk = _server_with_open(monkeypatch, [STOP])
+    out = srv.cancel_order("03846CF5", acknowledge_protective=True)
+    assert Desk.cancelled == "03846CF5"
+    assert "Cancellation request sent" in out
+
+
+def test_an_unknown_id_is_not_silently_treated_as_an_entry(monkeypatch):
+    """
+    If the order cannot be found the type cannot be established, and assuming
+    it is an ordinary entry is exactly the assumption that would remove a stop.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [ENTRY])
+    out = srv.cancel_order("NOT_THERE")
+    assert Desk.cancelled is None
+    assert "could not" in out.lower() or "not among" in out.lower()

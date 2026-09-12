@@ -107,6 +107,32 @@ TICKLE_AFTER_SECONDS = 180
 GATEWAY_BASE = "https://localhost:5000/v1/api"
 HOSTED_BASE = "https://api.ibkr.com/v1/api"
 
+
+def _is_loopback(base_url: str) -> bool:
+    """
+    Whether this URL addresses this machine.
+
+    The name "localhost" counts. A literal is decided by ipaddress, with one
+    correction: an IPv4-mapped IPv6 address such as ::ffff:127.0.0.1 reports
+    is_loopback False while addressing 127.0.0.1, so it is unmapped first.
+    Anything that will not parse -- a DNS name that is not localhost -- is not
+    loopback, which is the safe direction: this gate only ever guards turning
+    certificate verification off.
+    """
+    import ipaddress
+    import urllib.parse
+
+    host = (urllib.parse.urlsplit(base_url).hostname or "").strip()
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (getattr(address, "ipv4_mapped", None) or address).is_loopback
+
 # Ours is BUY/SELL and LMT/MKT. IBKR happens to use the same words for both,
 # which is not a reason to skip the mapping -- it is a reason the mapping is
 # cheap, and it stays here so a change on their side is one line on ours.
@@ -212,6 +238,22 @@ class IbkrBroker:
         if self._cacert:
             ctx.load_verify_locations(self._cacert)
         elif self._insecure:
+            if not _is_loopback(self.base):
+                raise IbkrError(
+                    f"IBKR_TLS_INSECURE is set, but this adapter is pointed at "
+                    f"{self.base}, which is not loopback. The opt-in exists for the "
+                    "Client Portal Gateway's self-signed certificate on localhost, "
+                    "where nothing can sit between this process and it. Over a "
+                    "network it would hand your session token to whatever answered. "
+                    "Refusing rather than quietly verifying, so you know what "
+                    "changed.\n\n"
+                    "For a gateway on another host, forward it to loopback rather "
+                    "than reaching across the network -- an SSH tunnel "
+                    "(ssh -L 5000:localhost:5000 user@host) keeps the base URL at "
+                    "https://localhost:5000 and this flag meaningful. Note that "
+                    "IBKR_CACERT alone will not help: the gateway's certificate is "
+                    "issued for localhost, so a remote address fails on hostname "
+                    "mismatch even with the certificate trusted.")
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         return ctx

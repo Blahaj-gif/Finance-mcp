@@ -33,8 +33,12 @@ Expect a slow reply. This is one person's project.
 
 - **`IBKR_TLS_INSECURE=1` disables certificate verification** for the local
   Client Portal Gateway, which is self-signed by design. It is opt-in, never a
-  default, and the error message says what you are choosing. Over localhost
-  this is a considered trade; over anything else it is not.
+  default, and it is scoped to loopback: pointed at anything else — IBKR's
+  hosted API, a gateway on another host — it refuses with a named error rather
+  than either disabling verification or quietly re-enabling it. `localhost`,
+  `127.0.0.0/8`, `::1` and IPv4-mapped forms of those count; a DNS name does
+  not. For a gateway on another machine, forward it to loopback (an SSH tunnel)
+  rather than reaching across the network.
 - **The Saxo and IBKR adapters are unverified.** They have never been run
   against their APIs. That is a correctness risk rather than a vulnerability,
   and it is stated on the class, in tool output, and in the README.
@@ -43,8 +47,17 @@ Expect a slow reply. This is one person's project.
   environment variables. There is no keyring integration; if you want one, that
   is a welcome pull request.
 - **Order drafts are a local JSON file.** Anyone who can write it can queue a
-  draft. They cannot send it — that still needs a human click and a broker
-  preview in the dashboard.
+  draft, or edit one already in it. They cannot send it — that still needs a
+  human click and a broker preview in the dashboard, and the draft's broker and
+  environment are checked against the desk before either button appears. But
+  the file carries no integrity check, and the pre-trade risk checks run when a
+  draft is *created*, not when it is approved: an edited quantity is re-priced
+  by the broker preview and shown on the approval card, but is not re-tested
+  against buying power. The card renders the symbol, quantity and price it will
+  send, so read it rather than the description. On Windows the file inherits the
+  repository's ACL, which on a default checkout under `C:\` grants Modify to
+  `Authenticated Users` — a per-user directory or an explicit DACL would be
+  better, and neither is written yet.
 
 ## If you rotate a credential
 

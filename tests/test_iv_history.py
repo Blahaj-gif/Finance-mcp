@@ -141,3 +141,69 @@ def test_coverage_marks_a_symbol_usable_once_it_qualifies():
     seed("NVDA", [0.5] * ivh.MIN_OBSERVATIONS)
     assert ivh.coverage()["NVDA"]["usable"] is True
     assert ivh.coverage()["NVDA"]["needs"] == 0
+
+
+# =====================================================================
+# History is keyed by the session observed, not by the machine's date
+# =====================================================================
+
+def test_a_saturday_observation_belongs_to_fridays_session():
+    """
+    An IV snapshot taken while the market is shut observes a stale chain from
+    the last session -- it is not a new day's data. Keyed on the machine's
+    calendar date, this box (UTC+7) filed weekend rows: MU carried real
+    observations dated 2026-08-08 and 2026-08-09, a Saturday and a Sunday.
+    """
+    from dashboard import market_calendar as mc
+    saturday = datetime.datetime(2026, 8, 8, 12, 0, tzinfo=datetime.timezone.utc)
+    assert mc.reference_session(saturday) == datetime.date(2026, 8, 7)
+
+
+def test_bangkok_morning_is_still_the_previous_new_york_session():
+    """
+    09:00 Saturday in Bangkok is 22:00 Friday in New York. The machine's date
+    says Saturday; the session being observed is Friday's.
+    """
+    from dashboard import market_calendar as mc
+    # 02:00Z Saturday = 09:00 Bangkok Sat = 22:00 ET Friday
+    moment = datetime.datetime(2026, 8, 8, 2, 0, tzinfo=datetime.timezone.utc)
+    assert mc.reference_session(moment) == datetime.date(2026, 8, 7)
+
+
+def test_the_history_writers_are_called_with_the_session_not_the_local_date():
+    """
+    The guard above is only worth having if the call sites use it. This was
+    missed once already: the days-to-expiry fix changed the two subtractions
+    beside these calls and left the calls themselves on the default.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    server = open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read()
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+
+    def call_args(src, call):
+        """Each call's argument list, bounded by its closing paren.
+
+        Not by a character count: a comment added above the argument pushed
+        `today=` outside a fixed window once already, and a test that fails on
+        a comment is a test nobody trusts.
+        """
+        found = []
+        for tail in src.split(call)[1:]:
+            depth, buf = 1, []
+            for ch in tail:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                buf.append(ch)
+            found.append("".join(buf))
+        return found
+
+    for call in ("iv_history.record_snapshot(", "iv_history.iv_rank(",
+                 "portfolio_history.record_snapshot("):
+        sites = call_args(server if call.startswith("iv_") else app, call)
+        assert sites, f"{call} should exist"
+        for site in sites:
+            assert "today=" in site, f"{call} must be given the session date"

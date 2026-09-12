@@ -22,6 +22,7 @@ import dashboard.volume_profile as volume_profile
 import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
+import dashboard.order_queue as order_queue
 import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
@@ -293,7 +294,7 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
         # Format results as a readable markdown block
         summary = f"""### Technical Analysis for {symbol.upper()} ({interval} Interval)
 - **Last Price**: ${close_val:.2f} ({'+' if price_change >= 0 else ''}{price_change:.2f} / {price_pct_change:.2f}%)
-- **Day's Range**: Low: ${latest_bar['low']:.2f} | High: ${latest_bar['high']:.2f}
+- **Latest {interval} Bar Range**: Low: ${latest_bar['low']:.2f} | High: ${latest_bar['high']:.2f}
 - **Volume**: {latest_bar['volume']:,.0f}
 {verdict_block}
 #### Indicator Readings
@@ -359,6 +360,7 @@ def get_technical_indicators(symbol: str, interval: str = "D", count: int = 5) -
         for col in display_df.select_dtypes(include=['float64', 'float32']).columns:
             display_df[col] = display_df[col].round(2)
             
+        display_df = webull_client.display_frame(display_df, interval)
         try:
             table_str = display_df.to_markdown(index=False)
         except Exception:
@@ -478,6 +480,9 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
             if col in latest.columns:
                 latest[col] = latest[col].round(2)
                 
+        # Rendered the way the freshness line above renders it: a session bar
+        # as a date, an intraday bar with its exchange clock and zone.
+        latest = webull_client.display_frame(latest, interval)
         try:
             table_str = latest.to_markdown(index=False)
         except Exception:
@@ -516,8 +521,14 @@ def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
         move_pct = straddle / spot * 100 if spot else 0.0
 
         try:
-            iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
-            real = iv_history.iv_rank(symbol.upper(), atm_iv)
+            # Keyed on the SESSION observed, not the machine's calendar day.
+            # A snapshot taken while the market is shut observes a stale chain
+            # from the last session; on a UTC+7 box the local date had already
+            # rolled over and filed real observations on Saturdays.
+            session = market_calendar.reference_session()
+            iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot,
+                                       dte=days, today=session)
+            real = iv_history.iv_rank(symbol.upper(), atm_iv, today=session)
         except Exception:
             real = None
 
@@ -530,7 +541,8 @@ def _iv_context_block(symbol, calls, puts, spot, days, price_df) -> str:
             rv = rv.dropna()
             if len(rv) > 30:
                 lo, hi = float(rv.min()), float(rv.max())
-                proxy = (atm_iv - lo) / (hi - lo) * 100 if hi > lo else 50.0
+                proxy = _rv_proxy_rank(atm_iv, lo, hi)
+                proxy = 50.0 if proxy is None else proxy
                 need = max(0, iv_history.MIN_OBSERVATIONS - iv_history.observation_count(symbol.upper()))
                 block += (f"* **IV rank (proxy)**: `{max(0, min(100, proxy)):.0f}/100` "
                           f"— against realised volatility; {need} more daily observations "
@@ -575,7 +587,8 @@ def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> 
         # Spot from the validated price feed, not from the chain's own quotes.
         df, source = webull_client.fetch_data(symbol, "D", 260)
         spot = float(df["close"].iloc[-1])
-        days = max((_dt.date.fromisoformat(near_date) - _dt.date.today()).days, 0)
+        days = max((_dt.date.fromisoformat(near_date)
+                    - market_calendar.eastern_now().date()).days, 0)
 
         header = (f"### Options Chain — {symbol.upper()} @ {near_date} ({days}d)\n"
                   + webull_client.freshness_line(df, source, "D")
@@ -1242,6 +1255,7 @@ def get_unusual_options(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
+    import datetime
     try:
         ticker = webull_client.yahoo_ticker(symbol.upper())
         opts = ticker.options
@@ -1265,6 +1279,11 @@ def get_unusual_options(symbol: str) -> str:
                 
                 if (vol > oi and vol >= 100) or iv >= 0.60:
                     unusual.append({
+                        # Carried so the printed rows can date themselves, then
+                        # dropped before rendering. An option's "Last Price" is
+                        # its last *trade*, which on a thin strike can be days
+                        # old while the expiry beside it reads as today.
+                        "_last_trade": row.get("lastTradeDate"),
                         "Type": opt_type,
                         "Strike": strike,
                         "Last Price": round(row.get("lastPrice", 0), 2),
@@ -1279,12 +1298,32 @@ def get_unusual_options(symbol: str) -> str:
             return f"No unusual options activity flagged for {symbol.upper()} on expiration {near_date}."
             
         df_u = pd.DataFrame(unusual).sort_values(by="Volume", ascending=False).head(10)
+
+        # Date the rows actually shown, not the whole chain: the stalest
+        # contract in the chain is often one that got dropped by head(10), and
+        # a timestamp covering rows nobody sees is its own kind of wrong. When
+        # the printed rows disagree, say both ends rather than picking one.
+        stamped = pd.to_datetime(df_u["_last_trade"], utc=True, errors="coerce").dropna()
+        if len(stamped):
+            first, last = stamped.min(), stamped.max()
+            if first.date() == last.date():
+                traded = f"last traded {last:%Y-%m-%d %H:%M} UTC"
+            else:
+                traded = (f"last traded between {first:%Y-%m-%d} and "
+                          f"{last:%Y-%m-%d %H:%M} UTC")
+        else:
+            traded = "last-trade time not published"
+        df_u = df_u.drop(columns=["_last_trade"])
+
         try:
             table_str = df_u.to_markdown(index=False)
         except Exception:
             table_str = df_u.to_string(index=False)
-            
-        return f"### Unusual Options Activity: {symbol.upper()} (Expiration: {near_date})\n\n" + table_str
+
+        return (f"### Unusual Options Activity: {symbol.upper()} "
+                f"(Expiration: {near_date})\n"
+                f"`Quotes {traded} · source: Yahoo Finance · "
+                f"retrieved {datetime.datetime.now():%H:%M:%S}`\n\n" + table_str)
     except Exception as e:
         raise ToolError(f"Error scanning unusual options for {symbol}: {e}") from e
 
@@ -1296,6 +1335,7 @@ def get_short_interest(symbol: str) -> str:
     Args:
         symbol: Stock ticker (e.g. GME, TSLA, NVDA).
     """
+    import datetime
     try:
         ticker = webull_client.yahoo_ticker(symbol.upper())
         info = ticker.info
@@ -1312,8 +1352,22 @@ def get_short_interest(symbol: str) -> str:
         
         squeeze_risk = "HIGH SQUEEZE POTENTIAL" if (short_pct and short_pct > 0.15) else "LOW / MODERATE SQUEEZE RISK"
 
+        # FINRA settles short interest twice a month and publishes it days
+        # later, so this figure is routinely two to three weeks old. It was
+        # rendered with nothing to date it, which reads as current.
+        settled = info.get("dateShortInterest")
+        if settled:
+            as_of = datetime.datetime.utcfromtimestamp(int(settled))
+            age = (datetime.datetime.utcnow() - as_of).days
+            asof_line = (f"`Settlement date {as_of:%Y-%m-%d} ({age} days ago) · "
+                         "source: FINRA via Yahoo Finance`\n")
+        else:
+            asof_line = ("`Settlement date not published by the upstream — the age "
+                         "of these figures is unknown`\n")
+
         out = (
             f"### Short Interest & Float Analysis: {symbol.upper()}\n"
+            f"{asof_line}"
             f"* **Short % of Float**: `{short_pct_str}`\n"
             f"* **Days to Cover (Short Ratio)**: `{days_to_cover}`\n"
             f"* **Total Shares Short**: `{shares_str}`\n"
@@ -1334,6 +1388,67 @@ def get_short_interest(symbol: str) -> str:
 # HUMAN-IN-THE-LOOP (HITL) ORDER EXECUTION DESK
 # =====================================================================
 
+# The order types that actually carry a limit price to the broker. Every
+# adapter normalises order types with its own alias table, and this guard
+# deliberately does not reuse one: it exists to catch the case where the price
+# the caller supplied is *not* the price the broker will receive, so trusting
+# the builder to tell us would be asking the suspect for an alibi.
+_LIMIT_ORDER_TYPES = frozenset({"LMT", "LIMIT"})
+
+# What this tool will draft, which is narrower than what the adapters can
+# build. Every adapter's alias table also accepts STP, but none of them attaches
+# a price to a stop order -- `build_order` attaches one only to a LIMIT -- so a
+# STP draft became a stop order carrying no stop price, which is not an order.
+# The docstring has always said LMT or MKT; this makes that true.
+_SUPPORTED_ORDER_TYPES = frozenset({"LMT", "LIMIT", "MKT", "MARKET"})
+
+
+def _pending_commitments(drafts, price_of):
+    """
+    What the approval queue has already promised, per side.
+
+    Every pre-trade check used to run against one draft as though the queue were
+    empty, so N drafts that were each individually affordable could sit there
+    together costing more than the account holds -- and each was one click from
+    submission. Returns (buy_cost, sells_by_symbol, unpriced_draft_ids).
+
+    A draft written before `est_notional` existed carries neither it nor a limit
+    price, so it is priced through `price_of(symbol)` like any market order.
+    Refusing every new draft until such a draft cleared would be a lockout with
+    no way out of it, because the dashboard has no cancel control. Only a draft
+    that cannot be priced at all is named and refused, and a draft that cannot
+    be priced is never silently treated as costing nothing.
+    """
+    buy_cost = 0.0
+    sells = {}
+    unpriced = []
+    for d in drafts:
+        if not isinstance(d, dict) or d.get("status") != "PENDING_APPROVAL":
+            continue
+        side = str(d.get("action", "")).upper()
+        try:
+            qty = float(d.get("quantity") or 0)
+        except (TypeError, ValueError):
+            unpriced.append(str(d.get("draft_id", "?")))
+            continue
+        if side == "SELL":
+            sells[str(d.get("symbol", "")).upper()] = (
+                sells.get(str(d.get("symbol", "")).upper(), 0.0) + qty)
+        elif side == "BUY":
+            cost = d.get("est_notional")
+            if cost is None and d.get("limit_price"):
+                cost = qty * float(d["limit_price"])
+            if cost is None:
+                market = price_of(str(d.get("symbol", "")).upper())
+                if market:
+                    cost = qty * float(market)
+            if cost is None:
+                unpriced.append(str(d.get("draft_id", "?")))
+            else:
+                buy_cost += float(cost)
+    return buy_cost, sells, unpriced
+
+
 @needs(capabilities.BUYING_POWER)
 def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LMT", limit_price: float = None) -> str:
     """
@@ -1353,16 +1468,29 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
     
     drafts_path = BASE_DIR + "/dashboard/order_drafts.json"
     try:
-        drafts = []
-        if os.path.exists(drafts_path):
-            with open(drafts_path, "r", encoding="utf-8") as f:
-                c = f.read().strip()
-                if c:
-                    drafts = json.loads(c)
+        drafts = order_queue.load(drafts_path)
         # Generate unique order draft ID
         fingerprint = f"{symbol.upper()}_{action.upper()}_{quantity}_{limit_price}_{datetime.datetime.now().timestamp()}"
         draft_id = "DRFT_" + hashlib.md5(fingerprint.encode()).hexdigest()[:8]
         
+        if str(order_type).upper() not in _SUPPORTED_ORDER_TYPES:
+            return (f"SAFETY BLOCK: {order_type.upper()} is not a supported order type "
+                    "here — use LMT with a limit_price, or MKT to accept the market. "
+                    "A stop order needs a stop price this desk has no way to send, so "
+                    "it would reach the broker with no price on it at all.")
+
+        # A limit price on an order type that will not carry one is refused
+        # rather than dropped. `build_order` attaches it only to a LIMIT order,
+        # so on a MKT or STP draft it vanished on the way to the broker while
+        # the confirmation, the approval card and the buying-power check all
+        # still read as though it bounded the order -- which is worse than a
+        # naked market order, not better, because it looks safe.
+        if limit_price is not None and str(order_type).upper() not in _LIMIT_ORDER_TYPES:
+            return (f"SAFETY BLOCK: A {order_type.upper()} order does not carry a limit "
+                    f"price to the broker, so {limit_price} would be dropped on the way "
+                    "out and this order would fill at whatever the market asks. Send it "
+                    "as LMT to cap the price, or drop limit_price to accept the market.")
+
         # Cheap, offline checks first. Constructing the order and testing it
         # against the broker's published rules needs no network and no
         # credentials, so a malformed order should never cost an account round
@@ -1388,13 +1516,41 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
                     "submission — " + " ".join(violations))
 
         # --- PRE-TRADE RISK CHECKS ---
+        # Recorded on the draft so the next draft can total the queue without
+        # re-pricing everything already in it.
+        est_notional = None
         try:
             account_id = adapter.primary_account_id()
 
+            # What the queue has already promised. Checking this order against
+            # the account alone is only correct when it is the only draft.
+            def _market_price(sym):
+                """Last price for totalling a draft that carries none. None if unknown."""
+                if not sym:
+                    return None
+                try:
+                    return float(webull_client.yahoo_ticker(sym).fast_info.last_price)
+                except Exception:
+                    return None
+
+            committed_cost, committed_sells, unpriced = _pending_commitments(
+                drafts, _market_price)
+            if unpriced:
+                return ("SAFETY BLOCK: The approval queue holds draft(s) whose cost "
+                        f"cannot be determined ({', '.join(unpriced)}), so what this "
+                        "account has already promised cannot be totalled. Remove them "
+                        f"from {drafts_path} and draft again.")
+
             if action.upper() == "SELL":
                 inventory = adapter.position_quantity(symbol)
+                spoken_for = committed_sells.get(symbol.upper(), 0.0)
 
-                if quantity > inventory:
+                if quantity + spoken_for > inventory:
+                    if spoken_for:
+                        return (f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, "
+                                f"and {spoken_for:g} share(s) are already spoken for by "
+                                f"pending draft(s), against inventory of {inventory}. "
+                                "Naked short-selling is blocked.")
                     return f"SAFETY BLOCK: You requested to SELL {quantity} {symbol}, but account inventory only shows {inventory} shares. Naked short-selling is blocked."
 
             elif action.upper() == "BUY":
@@ -1419,7 +1575,12 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
                             "cannot verify buying power.")
 
                 notional = float(quantity) * est_price
-                if notional > bp:
+                est_notional = notional
+                if notional + committed_cost > bp:
+                    if committed_cost:
+                        return (f"SAFETY BLOCK: Order requires ~${notional:,.2f} and "
+                                f"~${committed_cost:,.2f} is already committed by pending "
+                                f"draft(s), against buying power of ${bp:,.2f}.")
                     return f"SAFETY BLOCK: Order requires ~${notional:,.2f} but account buying power is only ${bp:,.2f}."
                     
         except Exception as e:
@@ -1448,10 +1609,13 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
             # by reading the confirmation.
             "broker": adapter.name,
             "environment": adapter.environment_label(),
+            # What this order was judged to cost, so the queue can be totalled.
+            "est_notional": est_notional,
         }
 
-        drafts.append(new_draft)
-        atomic_write_json(drafts_path, drafts)
+        # Re-reads before writing, so a draft the dashboard cancelled or executed
+        # between our read and our write is not resurrected by our stale copy.
+        order_queue.append(new_draft, drafts_path)
 
         # State the surface on the draft itself. A model reading this back later
         # should never have to infer whether approving it spends real money.
@@ -1543,16 +1707,28 @@ def get_open_orders() -> str:
 
         out = (f"### Open Orders (account {account_id}) — "
                f"{broker_protocol.describe(adapter)}\n\n")
-        out += ("| Symbol | Side | Qty | Filled | Limit | Status | Cancel with |\n"
-                "|---|---|---|---|---|---|---|\n")
+        out += ("| Symbol | Side | Type | Qty | Filled | Price | Status | Cancel with |\n"
+                "|---|---|---|---|---|---|---|---|\n")
+        protective = []
         for o in orders:
-            price = o.get("limit_price")
+            # A stop order priced by its stop, not by a limit it does not have.
+            # Without the type column a STOP_LOSS rendered as "MKT", which reads
+            # as an unpriced market order rather than a protective bracket.
+            price = o.get("limit_price") or o.get("stop_price")
+            kind = o.get("order_type") or ("LIMIT" if o.get("limit_price") else "MARKET")
+            if o.get("protective"):
+                protective.append(f"{o['symbol']} {o['action']} {kind}")
             # The last column is the id cancel_order takes. Passing the broker's
             # own id instead is a 404, and that is how the Webull cancel path sat
             # dead for months without anyone noticing.
-            out += (f"| {o['symbol']} | {o['action']} | {o['quantity']:,.4g} | "
-                    f"{o['filled']:,.4g} | {('%.4f' % price) if price else 'MKT'} | "
+            out += (f"| {o['symbol']} | {o['action']} | {kind} | "
+                    f"{o['quantity']:,.4g} | {o['filled']:,.4g} | "
+                    f"{('%.4f' % price) if price else 'MKT'} | "
                     f"{o['status']} | `{o['client_order_id'] or '(none returned)'}` |\n")
+        if protective:
+            out += ("\n*Protective order(s) working: " + "; ".join(protective) +
+                    ". These limit a loss rather than open a position — "
+                    "cancelling one removes that protection.*\n")
         return out
     except Exception as e:
         raise ToolError(f"Error fetching open orders: {e}") from e
@@ -1634,7 +1810,7 @@ def ibkr_market_scanner(scan_code: str = "TOP_PERC_GAIN", instrument: str = "STK
 
 
 @needs(capabilities.CANCEL_ORDER)
-def cancel_order(order_id: str) -> str:
+def cancel_order(order_id: str, acknowledge_protective: bool = False) -> str:
     """
     Cancels a pending or active order on the broker account immediately.
 
@@ -1643,15 +1819,54 @@ def cancel_order(order_id: str) -> str:
             when the order was drafted (it looks like `DRFT_9a32c8d5`), NOT the
             broker's own `order_id`. `get_open_orders` shows both in its last
             column; the cancel path only accepts the client one.
+        acknowledge_protective: Required to cancel a working stop. A stop limits
+            the loss on an open position, so cancelling one removes protection
+            rather than reducing exposure — the tool refuses without this.
     """
     try:
         adapter = brokers.get()
         account_id = adapter.primary_account_id()
+
+        # Establish what is being cancelled before cancelling it. Cancelling an
+        # entry order reduces exposure -- exchanges treat fast cancellation as a
+        # risk control, which is what kill switches and cancel-on-disconnect
+        # are -- so nothing here obstructs that. A working stop is the opposite:
+        # it is what limits the loss on an open position, and this account holds
+        # one that was placed elsewhere, so the model neither chose it nor, until
+        # recently, could see what it was.
+        target = None
+        try:
+            for o in adapter.open_orders():
+                if order_id in (o.get("client_order_id"), o.get("order_id")):
+                    target = o
+                    break
+        except Exception as lookup_error:
+            return (f"SAFETY BLOCK: could not read the open orders to establish what "
+                    f"{order_id} is ({str(lookup_error)[:120]}). Refusing rather than "
+                    "cancelling an order of unknown type — it may be a protective stop.")
+
+        if target is None:
+            return (f"SAFETY BLOCK: {order_id} is not among the working orders on "
+                    f"account {account_id}, so what it would cancel could not be "
+                    "established. It may already be filled or cancelled. Run "
+                    "get_open_orders to see what is actually working.")
+
+        if target.get("protective") and not acknowledge_protective:
+            stop = target.get("stop_price")
+            return (f"SAFETY BLOCK: {order_id} is a protective order — "
+                    f"{target.get('order_type')} {target.get('action')} "
+                    f"{target.get('quantity'):,.4g} {target.get('symbol')}"
+                    + (f" at {stop}" if stop else "") + ". It limits the loss on an "
+                    "open position rather than opening one, so cancelling it removes "
+                    "that protection and leaves the position uncovered. This is the "
+                    "opposite of a kill switch. If that is genuinely intended, call "
+                    "again with acknowledge_protective=true.")
+
         res = adapter.cancel_order(order_id)
         return (f"Cancellation request sent for client_order_id {order_id} "
-                f"(account {account_id}, {adapter.name}). "
-                f"Broker order id {res.get('order_id') or '(not returned)'}.\n"
-                f"```json\n{res.get('raw')}\n```")
+                f"({target.get('order_type') or 'order'} {target.get('action')} "
+                f"{target.get('symbol')}, account {account_id}, {adapter.name}). "
+                f"Broker order id {res.get('order_id') or '(not returned)'}.")
     except Exception as e:
         raise ToolError(f"Error cancelling order {order_id}: {e}") from e
 
@@ -1801,11 +2016,38 @@ def _run_sections(keys, symbol, timeout=45):
     return results
 
 
+def profile_sections(sections=None, detail: str = "standard") -> list:
+    """
+    Which sections a profile request resolves to.
+
+    Separated from the fetching so the cost claim in the tool's own description
+    -- brief is about a third of standard, one section about a sixth -- can be
+    checked without a network. A test that measured real payloads proved it
+    here and failed in CI, where there is no upstream to measure.
+    """
+    if sections:
+        raw = sections.split(",") if isinstance(sections, str) else list(sections)
+        wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
+    elif str(detail).lower() == "brief":
+        wanted = ["business", "financials", "price"]
+    elif str(detail).lower() == "full":
+        wanted = list(PROFILE_SECTIONS)
+    else:
+        wanted = list(DEFAULT_PROFILE_SECTIONS)
+
+    unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
+    if unknown:
+        raise ToolError(f"Unknown section(s) {unknown}. "
+                        f"Available: {', '.join(PROFILE_SECTIONS)}")
+    return wanted
+
+
 @mcp.tool()
 def get_company_profile(symbol: str, sections: str | list[str] = None,
                         detail: str = "standard") -> str:
     """
-    Everything worth knowing about a company, in one call. Start here.
+    Everything worth knowing about a company, in one call. Start here for an
+    open-ended question — and narrow it for a specific one.
 
     Answers "tell me about X" without the caller needing to know which of the other
     tools to reach for: what the business is, what it filed with the SEC, what
@@ -1813,6 +2055,14 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
     fetched concurrently, and each is labelled with how much weight its numbers
     carry — a figure taken from a filing is not the same kind of fact as one
     scraped from a third-party feed.
+
+    **Ask for what you need.** The default fetches eight sections; a narrow
+    question does not need them. `detail="brief"` is roughly a third the size,
+    and `sections="business"` (or any single one) is about a sixth — so "what
+    sector is this?" costs a sixth of what "tell me about this company" does.
+    Widen on a second call if the answer is not there; that is cheaper than
+    fetching insider transactions and EDGAR filings for a question about a
+    business summary.
 
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
@@ -1823,20 +2073,7 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
             or "full" (everything, including the heuristic verdict and macro calendar).
     """
     try:
-        if sections:
-            raw = sections.split(",") if isinstance(sections, str) else list(sections)
-            wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
-        elif str(detail).lower() == "brief":
-            wanted = ["business", "financials", "price"]
-        elif str(detail).lower() == "full":
-            wanted = list(PROFILE_SECTIONS)
-        else:
-            wanted = list(DEFAULT_PROFILE_SECTIONS)
-
-        unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
-        if unknown:
-            raise ToolError(f"Unknown section(s) {unknown}. "
-                            f"Available: {', '.join(PROFILE_SECTIONS)}")
+        wanted = profile_sections(sections, detail)
 
         started = time.time()
         results = _run_sections(wanted, symbol)
@@ -1880,6 +2117,82 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
 # RISK & POSITION SIZING
 # =====================================================================
 
+def _align_on_sessions(price_series: dict, bench_series):
+    """
+    Daily returns for a set of holdings and a benchmark, on one shared calendar.
+
+    Two things have to be true before a covariance means anything, and only the
+    first is obvious. The series must be paired by DATE -- these used to be
+    reset_index(drop=True) and lined up by position, so one holding missing a
+    session put every later return of every other holding against the wrong
+    day. And the bar immediately after a gap has to go: after an inner join it
+    is a multi-day return for the leg that skipped and a one-day return for the
+    rest, which is a different quantity wearing the same column.
+
+    Returns (returns_frame, benchmark_returns) on the surviving sessions.
+    """
+    import pandas as pd
+
+    panel = pd.concat(price_series, axis=1, join="inner").sort_index()
+    panel, bench = panel.align(bench_series.sort_index(), axis=0, join="inner")
+
+    keep = pd.Series(True, index=panel.index)
+    for source in list(price_series.values()) + [bench_series]:
+        position = pd.Series(range(len(source)), index=source.index)
+        keep &= (position.reindex(panel.index).diff() == 1)
+
+    rets = panel.pct_change()[keep].dropna()
+    return rets, bench.pct_change()[keep].dropna().reindex(rets.index)
+
+
+def _rv_proxy_rank(atm_iv, lo, hi):
+    """
+    Where today's implied vol sits in the past year of realised vol, 0-100, or
+    None when the range gives nothing to rank against.
+
+    Two call sites computed this and only one clamped the result -- and the
+    unclamped one is reached exactly when it matters, with today's implied vol
+    above anything realised in the past year, where it reported ranks like
+    137/100. A rank is a position within a range; outside the range the honest
+    answer is the end of it.
+    """
+    if hi is None or lo is None or hi <= lo:
+        return None
+    return max(0.0, min(100.0, (float(atm_iv) - float(lo)) / (float(hi) - float(lo)) * 100))
+
+
+def _price_currency(symbol: str):
+    """
+    The currency the price feed quotes this symbol in, or None if it will not say.
+
+    Deliberately the FEED's currency and not the broker's: entry, stop and ATR
+    all come from webull_client.fetch_data, so the unit that matters is that
+    feed's, and the broker may not carry the instrument at all. None means "do
+    not assert", never "same as the account".
+    """
+    try:
+        return (webull_client.yahoo_feed_delay(symbol.upper()).get("currency")
+                or "").upper() or None
+    except Exception:
+        return None
+
+
+def _money(amount, currency: str) -> str:
+    """
+    Money with its unit attached. A THB figure must never wear a dollar sign.
+
+    An unknown currency renders bare rather than borrowing one: a number with no
+    denomination is at least honest about what it is, where a "$" put there by
+    default is the mistake this exists to prevent.
+    """
+    code = str(currency or "").upper()
+    if code == "USD":
+        return f"${amount:,.2f}"
+    if not code or code == "?":
+        return f"{amount:,.2f}"
+    return f"{amount:,.2f} {code}"
+
+
 @needs(capabilities.BUYING_POWER)
 def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: float = 1.0,
                             entry_price: float = None, account_currency: str = "USD") -> str:
@@ -1913,6 +2226,24 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             raise ToolError("Entry and stop-loss are identical — risk per share would be zero.")
 
         direction = "LONG" if stop < entry else "SHORT"
+
+        # A share count is a ratio of two money amounts, so both have to be in
+        # the same currency. This account is THB-denominated with a USD line;
+        # dividing a THB risk budget by a USD risk-per-share gives a size wrong
+        # by the exchange rate, and there is no FX source here that could
+        # correct it. Refuse rather than invent one.
+        quote_ccy = _price_currency(symbol)
+        acct_ccy = account_currency.upper()
+        price_ccy = quote_ccy or acct_ccy
+        if quote_ccy and quote_ccy != acct_ccy:
+            raise ToolError(
+                f"{symbol.upper()} is quoted in {quote_ccy}, but the risk budget was "
+                f"asked for against this account's {acct_ccy} line. Dividing a "
+                f"{acct_ccy} budget by a {quote_ccy} risk-per-share gives a share "
+                f"count wrong by the exchange rate, and this server has no FX source "
+                f"it is willing to invent one from. Re-run with "
+                f"account_currency='{quote_ccy}' if that line exists on the account; "
+                f"get_account_info lists the ones that do.")
 
         adapter = brokers.get()
         account_id = adapter.primary_account_id()
@@ -1954,17 +2285,25 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             # next to it, not implied by the absence of a warning.
             f"{webull_client.freshness_line(df, source, 'D')}"
             f"{fallback_warning(source)}"
-            f"* **Entry**: `${entry:,.2f}`{'' if entry_price is not None else ' (latest close)'}\n"
-            f"* **Stop loss**: `${stop:,.2f}`  →  risk/share `${risk_per_share:,.2f}` ({stop_pct:.2f}%)\n"
-            f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` (ATR = ${atr:,.2f})\n\n"
-            f"* **{account_currency} equity**: `${equity:,.2f}`\n"
-            f"* **Risk budget @ {risk_percent:g}%**: `${risk_budget:,.2f}`\n"
+            f"* **Entry**: `{_money(entry, price_ccy)}`"
+            f"{'' if entry_price is not None else ' (latest close)'}\n"
+            f"* **Stop loss**: `{_money(stop, price_ccy)}`  →  risk/share "
+            f"`{_money(risk_per_share, price_ccy)}` ({stop_pct:.2f}%)\n"
+            f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` "
+            f"(ATR = {_money(atr, price_ccy)})\n\n"
+            f"* **{acct_ccy} equity**: `{_money(equity, acct_ccy)}`\n"
+            f"* **Risk budget @ {risk_percent:g}%**: `{_money(risk_budget, acct_ccy)}`\n"
             f"* **Suggested size**: **{shares:,.4f} shares** "
-            f"(notional `${shares * entry:,.2f}`)\n"
+            f"(notional `{_money(shares * entry, price_ccy)}`)\n"
         )
+        if quote_ccy is None:
+            out += (f"\n*The price feed would not say which currency {symbol.upper()} "
+                    f"is quoted in, so this size assumes it matches the account's "
+                    f"{acct_ccy} line. If it does not, the share count is wrong by "
+                    f"the exchange rate.*\n")
         if capped_by:
-            out += (f"\n**Warning:** Risk-based size was **{raw_shares:,.4f} shares** (`${notional:,.2f}`) "
-                    f"but that exceeds {capped_by} of `${buying_power:,.2f}`. Size shown is capped.\n")
+            out += (f"\n**Warning:** Risk-based size was **{raw_shares:,.4f} shares** (`{_money(notional, price_ccy)}`) "
+                    f"but that exceeds {capped_by} of `{_money(buying_power, acct_ccy)}`. Size shown is capped.\n")
         if atr > 0 and atr_multiple < 1:
             out += ("\n**Warning:** The stop is inside one ATR of daily noise — a routine day's range "
                     "would likely take you out.\n")
@@ -2080,7 +2419,22 @@ def get_portfolio_risk() -> str:
             return f"### Portfolio Risk\n\nNo open positions in account {account_id}."
 
         rows, returns, warnings, ages = [], {}, [], []
-        gross = 0.0
+        # Gross exposure is per currency, never across. Adding a THB holding to
+        # a USD one produces a number that is not money in any denomination, and
+        # dividing by it gives weights that are wrong for both. There is no FX
+        # source here, so this groups rather than converting.
+        from collections import defaultdict
+        gross_by_ccy = defaultdict(float)
+        # A position whose payload omits the key is denominated in the account's
+        # own currency rather than unknown -- the alternative relabels a
+        # perfectly good single-currency book as "?".
+        account_ccy = ""
+        try:
+            account_ccy = next(
+                (str(a.get("currency", "")).upper() for a in adapter.accounts()
+                 if a.get("id") == account_id), "")
+        except Exception:
+            pass
         for p in positions:
             # Protocol shape, not Webull's: cost/last rather than
             # cost_price/last_price, so every adapter reads the same here.
@@ -2089,7 +2443,8 @@ def get_portfolio_risk() -> str:
             cost = float(p.get("cost") or 0)
             last = float(p.get("last") or 0)
             value = qty * last
-            gross += value
+            ccy = (str(p.get("currency", "")).upper() or account_ccy or "?")
+            gross_by_ccy[ccy] += value
             pnl_pct = ((last - cost) / cost * 100) if cost else 0.0
 
             vol = None
@@ -2099,7 +2454,11 @@ def get_portfolio_risk() -> str:
                 age = webull_client.bar_age(df, "D")
                 ages.append(age)
                 r = df["close"].pct_change().dropna()
-                returns[sym] = r.reset_index(drop=True)
+                # Keep the DATE. These used to be reset_index(drop=True) and
+                # paired by position, so one holding missing a session lined
+                # every later return up against the wrong day for all of them.
+                closes = df.set_index(pd.to_datetime(df["time"]).dt.normalize())["close"]
+                returns[sym] = closes[~closes.index.duplicated(keep="last")]
                 vol = float(r.std() * (252 ** 0.5) * 100)
             except Exception as e:
                 warnings.append(f"{sym}: no price history ({str(e)[:60]})")
@@ -2110,6 +2469,7 @@ def get_portfolio_risk() -> str:
                 "Cost": round(cost, 2),
                 "Last": round(last, 2),
                 "Value": round(value, 2),
+                "Ccy": ccy,
                 "P&L %": f"{pnl_pct:+.2f}%",
                 # The broker supplies the mark; the volatility comes from our
                 # own history, and those can be different ages.
@@ -2118,13 +2478,15 @@ def get_portfolio_risk() -> str:
             })
 
         for r in rows:
-            r["Weight %"] = f"{(r['Value'] / gross * 100):.1f}%" if gross else "n/a"
-            if gross and r["Value"] / gross > 0.40:
-                warnings.append(f"{r['Symbol']} is {r['Value'] / gross * 100:.0f}% of the portfolio "
-                                "— single-name concentration above 40%.")
+            book = gross_by_ccy[r["Ccy"]]
+            r["Weight %"] = f"{(r['Value'] / book * 100):.1f}%" if book else "n/a"
+            if book and r["Value"] / book > 0.40:
+                warnings.append(
+                    f"{r['Symbol']} is {r['Value'] / book * 100:.0f}% of the "
+                    f"{r['Ccy']} book — single-name concentration above 40%.")
 
         table = pd.DataFrame(rows)[
-            ["Symbol", "Qty", "Cost", "Last", "Value", "Weight %", "P&L %", "Ann. Vol %"]]
+            ["Symbol", "Qty", "Cost", "Last", "Value", "Ccy", "Weight %", "P&L %", "Ann. Vol %"]]
         try:
             table_str = table.to_markdown(index=False)
         except Exception:
@@ -2132,41 +2494,72 @@ def get_portfolio_risk() -> str:
 
         out = (f"### Portfolio Risk — account {account_id}\n\n"
                + webull_client.freshness_summary(ages, "D", "position histories")
-               + f"**Gross exposure**: `${gross:,.2f}` across {len(rows)} position(s)\n\n"
+               + "**Gross exposure**: "
+               + " · ".join(f"`{_money(v, c)}`"
+                            for c, v in sorted(gross_by_ccy.items()))
+               + f" across {len(rows)} position(s)\n\n"
                + table_str + "\n")
 
-        # Portfolio-level volatility and beta, weighted by position value.
+        if "?" in gross_by_ccy:
+            out += ("\n*The broker did not report a currency for every position, so "
+                    "those values are shown without a denomination rather than "
+                    "assumed to be dollars.*\n")
+        if len(gross_by_ccy) > 1:
+            out += ("\n*This account holds more than one currency, so exposures and "
+                    "weights are reported within each and never summed across them. "
+                    "There is no exchange rate here to convert with.*\n")
+
+        # Portfolio-level volatility and beta, weighted by position value. Only
+        # meaningful inside one currency: value-weighting across unconverted
+        # denominations would weight by the size of the number rather than by
+        # the size of the holding.
+        gross = next(iter(gross_by_ccy.values())) if len(gross_by_ccy) == 1 else 0.0
+        if len(gross_by_ccy) > 1:
+            out += ("\n*Portfolio volatility and beta are suppressed: they weight "
+                    "positions by value, which cannot be done across currencies "
+                    "without an exchange rate.*\n")
         if len(returns) >= 1 and gross:
             try:
                 bench, _ = webull_client.fetch_data("SPY", "D", 90)
-                bench_r = bench["close"].pct_change().dropna().reset_index(drop=True)
+                bench_px = bench.set_index(
+                    pd.to_datetime(bench["time"]).dt.normalize())["close"]
+                bench_px = bench_px[~bench_px.index.duplicated(keep="last")]
 
-                weights, series = [], []
+                weights, wanted = [], []
                 for r in rows:
                     s = returns.get(r["Symbol"])
                     if s is not None and len(s) > 5:
                         weights.append(r["Value"] / gross)
-                        series.append(s)
+                        wanted.append(r["Symbol"])
 
-                if series:
-                    n = min(min(len(s) for s in series), len(bench_r))
-                    mat = np.column_stack([s.tail(n).to_numpy() for s in series])
+                rets = None
+                if wanted:
+                    rets, b_ret = _align_on_sessions(
+                        {sym: returns[sym] for sym in wanted}, bench_px)
+                    mat = rets.to_numpy()
+                    b = b_ret.to_numpy()
+
+                if rets is not None and len(rets) < 20:
+                    out += (f"\n*Portfolio beta and correlation suppressed: only "
+                            f"{len(rets)} clean consecutive sessions are shared by "
+                            f"every holding and SPY.*\n")
+                elif rets is not None:
                     w = np.array(weights) / sum(weights)
                     port = mat @ w
-                    b = bench_r.tail(n).to_numpy()
 
                     port_vol = float(port.std() * (252 ** 0.5) * 100)
                     var = b.var()
                     beta = float(np.cov(port, b)[0][1] / var) if var else float("nan")
 
                     out += (f"\n**Portfolio annualised volatility**: `{port_vol:.1f}%`\n"
-                            f"**Beta vs SPY**: `{beta:.2f}`\n")
+                            f"**Beta vs SPY**: `{beta:.2f}` "
+                            f"<br>*over {len(rets)} sessions shared by all legs*\n")
 
-                    if len(series) > 1:
+                    if len(wanted) > 1:
                         corr = np.corrcoef(mat, rowvar=False)
                         pairs = [
-                            f"{rows[i]['Symbol']}/{rows[j]['Symbol']} `{corr[i][j]:.2f}`"
-                            for i in range(len(series)) for j in range(i + 1, len(series))
+                            f"{wanted[i]}/{wanted[j]} `{corr[i][j]:.2f}`"
+                            for i in range(len(wanted)) for j in range(i + 1, len(wanted))
                             if corr[i][j] > 0.7
                         ]
                         if pairs:
@@ -2238,7 +2631,8 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         if calls.empty or puts.empty:
             raise ToolError(f"Empty option chain for {symbol.upper()} at {expiry}.")
 
-        days = max((_dt.date.fromisoformat(expiry) - _dt.date.today()).days, 0)
+        days = max((_dt.date.fromisoformat(expiry)
+                    - market_calendar.eastern_now().date()).days, 0)
         t = max(days, 1) / 365.0
 
         # ATM strike and the straddle's implied move.
@@ -2279,8 +2673,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         # history; realised volatility is a different quantity and only ever a
         # stand-in until the real series exists.
         try:
-            observations = iv_history.record_snapshot(symbol.upper(), atm_iv, spot=spot, dte=days)
-            real_rank = iv_history.iv_rank(symbol.upper(), atm_iv)
+            session = market_calendar.reference_session()
+            observations = iv_history.record_snapshot(
+                symbol.upper(), atm_iv, spot=spot, dte=days, today=session)
+            real_rank = iv_history.iv_rank(symbol.upper(), atm_iv, today=session)
         except Exception:
             observations, real_rank = 0, None
 
@@ -2294,8 +2690,7 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             iv_rank = iv_pct = None
             if len(rv) > 30:
                 lo, hi = float(rv.min()), float(rv.max())
-                if hi > lo:
-                    iv_rank = (atm_iv - lo) / (hi - lo) * 100
+                iv_rank = _rv_proxy_rank(atm_iv, lo, hi)
                 iv_pct = float((rv < atm_iv).mean() * 100)
             still_needed = max(0, iv_history.MIN_OBSERVATIONS - observations)
             rank_basis = (f"proxy against 1y realised volatility — "
@@ -2604,8 +2999,22 @@ def get_insider_activity(symbol: str, limit: int = 10, person: str = None,
         if not reports:
             scope = f" matching '{person}'" if person else ""
             scope += f" since {since}" if since else ""
+            # Name the registrant searched. A ticker can point at a successor
+            # entity that has never filed a Form 4 while the history sits on the
+            # predecessor CIK, and "no filings found" read as "no insider
+            # activity" is exactly the wrong conclusion to hand a model.
+            looked = res.get("searched") or {}
+            where = ""
+            if looked.get("cik"):
+                where = (f"\n\n*Searched CIK `{looked['cik']}` "
+                         f"({looked.get('company', res['company'])}), which lists "
+                         f"{looked.get('listed_filings', 0)} filing(s) of "
+                         f"form {'/'.join(looked.get('forms') or ['4'])}. "
+                         "If this company was recently reorganised, its earlier "
+                         "filings are under the predecessor registrant and this "
+                         "is not evidence that nobody traded.*")
             return (f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
-                    f"*No Form 4 filings found{scope}.*")
+                    f"*No Form 4 filings found{scope}.*{where}")
 
         out = f"### Insider Activity — {res['company']} ({res['symbol']})\n\n"
 
@@ -2965,9 +3374,28 @@ def get_institutional_holdings(institution: str, limit: int = 25, source: str = 
                           + ".*")
 
         shown = sum(h["value"] or 0 for h in data["holdings"])
+
+        # A 13F is a photograph of the quarter end, due 45 days after it and
+        # superseded only by the next one -- so the newest figure available is
+        # routinely three months old and can be four and a half. The header
+        # named the quarter and the filing date and left the reader to do the
+        # subtraction; "latest 13F" reads as "current" to anything that does
+        # not do it.
+        age_note = ""
+        try:
+            import datetime as _d
+            period = _d.date.fromisoformat(str(data["period"]))
+            age = (market_calendar.eastern_now().date() - period).days
+            age_note = (f" · positions as at that date, **{age} days old** "
+                        f"(13F is due 45 days after quarter end and stands until "
+                        f"the next one, so the manager may have traded out since)")
+        except Exception:
+            pass
+
         return (f"### 13F Holdings — {data['institution']}\n"
                 f"*Quarter ending {data['period']} · filed {data['filed']} · "
-                f"{data['positions']} positions · **${data['total_value']:,.0f}** total*\n\n"
+                f"{data['positions']} positions · **${data['total_value']:,.0f}** total"
+                f"{age_note}*\n\n"
                 + table_str
                 + f"\n\n*Top {len(rows)} shown = {shown / total * 100:.1f}% of reported value. "
                   "13F covers US-listed long equity and options only — it excludes cash, bonds, "

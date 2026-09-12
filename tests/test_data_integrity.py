@@ -13,6 +13,7 @@ descending order the API delivered them in.
 """
 import datetime
 import json
+import re
 import os
 import sys
 
@@ -22,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dashboard import webull_client as wc
+from dashboard import broker
 from dashboard.webull_client import DataIntegrityError, StaleDataError
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -751,3 +753,360 @@ def test_nothing_the_server_imports_writes_to_stdout():
     assert not offenders, (
         "print() without file=sys.stderr writes to stdout and breaks the "
         f"JSON-RPC stream: {offenders}")
+
+
+# =====================================================================
+# Bars are stored in UTC and shown in exchange time
+# =====================================================================
+
+def _frame_at(stamp):
+    return pd.DataFrame({"time": [stamp], "open": [1.0], "high": [1.0],
+                         "low": [1.0], "close": [1.0], "volume": [1]})
+
+
+def _bar_stamp(line):
+    """The bar timestamp out of a freshness line, without the age or source."""
+    return re.search(r"Latest \w+ bar: (.+?) \(", line).group(1)
+
+
+def test_an_intraday_bar_is_shown_in_exchange_local_time():
+    """
+    Bars are stored naive-UTC. Friday's 15:45 ET closing bar was printed as
+    "19:45" with no timezone marker, which reads as an after-hours print -- from
+    a server that has no extended-hours data at all.
+    """
+    line = wc.freshness_line(_frame_at("2026-09-04 19:45:00"), "Webull OpenAPI", "M15")
+    assert _bar_stamp(line) == "2026-09-04 15:45 EDT"
+
+
+def test_the_display_clock_follows_dst_rather_than_a_fixed_offset():
+    winter = wc.freshness_line(_frame_at("2026-01-15 21:00:00"), "Webull OpenAPI", "M15")
+    assert _bar_stamp(winter) == "2026-01-15 16:00 EST"
+
+
+def test_a_session_bar_is_shown_as_a_date_with_no_clock():
+    """
+    A daily bar is a session, not an instant. It is stamped 04:00 UTC (midnight
+    ET) and printing a clock on it invites reading it as a 4 a.m. print.
+    """
+    for iv in ("D", "W", "M"):
+        line = wc.freshness_line(_frame_at("2026-09-04 04:00:00"), "Webull OpenAPI", iv)
+        assert _bar_stamp(line) == "2026-09-04", f"{iv} should carry no clock"
+
+
+def test_an_unrecognised_interval_is_never_given_a_shifted_date():
+    """
+    whats_changed passes raw interval strings like "60". Converting an unknown
+    interval can move the calendar day backward -- a bar stamped 00:00 UTC
+    becomes the previous day at 20:00 ET -- so anything not known to be intraday
+    renders as the bare stored date.
+    """
+    line = wc.freshness_line(_frame_at("2026-08-07 00:00:00"), "Webull OpenAPI", "60")
+    assert _bar_stamp(line).startswith("2026-08-07"), \
+        "an unknown interval must not shift the calendar day"
+
+
+def test_a_bad_display_timezone_degrades_the_label_and_never_the_import(monkeypatch):
+    """
+    webull_client is imported by finance_mcp, the dashboard, the alert manager
+    and both brokers. A display preference must never be able to take price
+    fetching down with it.
+    """
+    monkeypatch.setenv("MARKET_DISPLAY_TZ", "Not/AZone")
+    tz = wc._resolve_display_tz()
+    assert tz is not None
+    line = wc.freshness_line(_frame_at("2026-09-04 19:45:00"), "Webull OpenAPI", "M15")
+    assert "2026-09-04" in line
+
+
+def test_the_stored_time_column_stays_naive_utc():
+    """
+    The display change must not reach storage: staleness, the disk cache and the
+    indicator maths all compare these strings as UTC.
+    """
+    # Built relative to the clock. A fixed date here passes on the day it is
+    # written and then fails forever after, because the intraday staleness gate
+    # measures in wall-clock hours -- the frame ages out and the test starts
+    # reporting a storage bug that is really a calendar.
+    newest = datetime.datetime.utcnow().replace(second=0, microsecond=0)
+    earlier = newest - datetime.timedelta(minutes=15)
+    eastern = datetime.timezone(datetime.timedelta(hours=-4))
+    frame = pd.DataFrame({
+        "time": pd.to_datetime([
+            earlier.replace(tzinfo=datetime.timezone.utc).astimezone(eastern),
+            newest.replace(tzinfo=datetime.timezone.utc).astimezone(eastern)]),
+        "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+        "close": [1.0, 1.0], "volume": [1, 1]})
+
+    out = wc._validate_frame(frame, "SPY", "M15", "test")
+
+    assert str(out["time"].iloc[-1]) == newest.strftime("%Y-%m-%d %H:%M:%S"), \
+        "storage must remain naive UTC even when the input carries a zone"
+
+
+def test_an_intraday_bar_range_is_not_labelled_the_days_range():
+    """
+    The label was "Day's Range" unconditionally, so on an M15 request it
+    reported a fifteen-minute high and low as the day's -- indexing one bar,
+    with no aggregation over the session.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "finance_mcp.py"), encoding="utf-8").read()
+    block = src[src.index("### Technical Analysis for"):][:600]
+    assert "Day's Range" not in block, (
+        "a single bar's high/low must not be labelled the day's range on an "
+        "interval that is not a day")
+
+
+# =====================================================================
+# A submit is sent exactly once
+# =====================================================================
+
+class _Timeout(RuntimeError):
+    """A transport failure whose text happens to carry the throttle token."""
+
+
+def test_a_submit_is_never_retried(monkeypatch):
+    """
+    Webull's own SDK ships RetryableMethods: ["GET"] and its documentation says
+    "Do no retry when it's not a GET request" -- place_order is a POST. The
+    wrapper sat outside the SDK and reinstated retry for the one call the vendor
+    had excluded, re-POSTing a byte-identical payload. Webull documents
+    client_order_id as a client-side uniqueness obligation, never as an
+    idempotency key, so nothing establishes the second POST would be rejected.
+    """
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def place_order(account_id, orders):
+                calls.append(orders)
+                raise FakeRateLimitError()
+
+    with pytest.raises(Exception):
+        broker.place_order(Client(), "ACC1", {"client_order_id": "DRFT_x"})
+
+    assert len(calls) == 1, f"a submit must be sent once, was sent {len(calls)}x"
+
+
+def test_a_cancel_is_never_retried(monkeypatch):
+    """Cancel is a POST too, and a duplicated cancel is a duplicated instruction."""
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def cancel_order(account_id, client_order_id):
+                calls.append(client_order_id)
+                raise FakeRateLimitError()
+
+    with pytest.raises(Exception):
+        broker.cancel_order(Client(), "ACC1", "DRFT_x")
+
+    assert len(calls) == 1
+
+
+def test_a_preview_still_retries(monkeypatch):
+    """
+    Preview is non-binding by design, so throttling it should still be ridden
+    out. Removing retry from reads would be a different and worse change.
+    """
+    monkeypatch.setattr(wc, "WEBULL_RETRY_BACKOFF", 0.0)
+    calls = []
+
+    class Client:
+        class order_v3:
+            @staticmethod
+            def preview_order(account_id, orders):
+                calls.append(orders)
+                if len(calls) < 2:
+                    raise FakeRateLimitError()
+                return {"data": {"ok": True}}
+
+    broker.preview_order(Client(), "ACC1", {"client_order_id": "DRFT_x"})
+    assert len(calls) == 2, "a preview should still ride out a throttle"
+
+
+def test_a_transport_error_is_not_read_as_a_rate_limit():
+    """
+    The predicate ended in a substring match on the exception text, so a read
+    timeout whose message merely carried the token retried -- which is exactly
+    the failure where the order may already have reached the matching engine.
+    """
+    assert not wc._is_rate_limited(
+        _Timeout("HTTPSConnectionPool: Read timed out. (TOO_MANY_REQUESTS?)"))
+
+
+def test_structured_rate_limit_evidence_is_still_honoured():
+    """The tightening must not stop reads riding out a real 429."""
+    class ByStatus(RuntimeError):
+        http_status = 429
+
+    class ByCode(RuntimeError):
+        error_code = "TOO_MANY_REQUESTS"
+
+    assert wc._is_rate_limited(ByStatus())
+    assert wc._is_rate_limited(ByCode())
+
+
+# =====================================================================
+# An unknown outcome is reported as unknown
+# =====================================================================
+
+def _submit_raising(exc):
+    class Client:
+        class order_v3:
+            @staticmethod
+            def place_order(account_id, orders):
+                raise exc
+    return Client()
+
+
+@pytest.mark.parametrize("status,label", [(None, "transport failure"),
+                                          (500, "server error"),
+                                          (408, "request timeout")])
+def test_an_unproven_failure_is_reported_as_ambiguous(monkeypatch, status, label):
+    """
+    A timeout, a reset and a 500 all leave the outcome unknown: the order may
+    have reached the matching engine. Re-raising them bare let the dashboard
+    print "the draft remains PENDING", which reads as "nothing was sent" -- a
+    claim this process cannot support.
+    """
+    exc = RuntimeError(f"{label} while submitting")
+    if status is not None:
+        exc.http_status = status
+
+    with pytest.raises(broker.AmbiguousSubmission) as caught:
+        broker.place_order(_submit_raising(exc), "ACC1",
+                           {"client_order_id": "DRFT_abc"})
+
+    assert caught.value.client_order_id == "DRFT_abc", \
+        "the id is the only handle for finding out what happened"
+
+
+def test_a_broker_refusal_is_not_dressed_up_as_ambiguous():
+    """
+    A 4xx is the server having received, parsed and refused the order. Calling
+    that ambiguous would be the opposite error -- it would send someone hunting
+    the order book for an order that was never accepted.
+    """
+    exc = RuntimeError("BUYING_POWER_INSUFFICIENT")
+    exc.http_status = 400
+
+    with pytest.raises(RuntimeError) as caught:
+        broker.place_order(_submit_raising(exc), "ACC1",
+                           {"client_order_id": "DRFT_abc"})
+
+    assert not isinstance(caught.value, broker.AmbiguousSubmission)
+
+
+def test_the_dashboard_does_not_claim_nothing_was_sent_when_it_cannot_know():
+    """
+    The guard above is only worth having if the approval page reads it. The
+    error text after an ambiguous submit must not assert the order was not
+    placed, and must point at the order book.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    assert "AmbiguousSubmission" in app, \
+        "the approval page must distinguish an unknown outcome from a refusal"
+    start = app.index("except broker.AmbiguousSubmission")
+    block = app[start:app.index("except Exception", start)]
+    assert "order book" in block.lower()
+    assert "remains PENDING" not in block, \
+        "an unknown outcome must not be reported as a draft that was never sent"
+
+
+def test_a_pending_draft_can_be_cancelled_from_the_dashboard():
+    """
+    There was no way to clear a draft except by editing the JSON by hand. That
+    absence is the missing remedy behind several refusals -- an unpriceable
+    pending draft, a draft raised against the wrong desk, one whose outcome is
+    unknown -- each of which tells the operator to deal with the draft and gave
+    them nothing to deal with it with.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app = open(os.path.join(root, "dashboard", "app.py"), encoding="utf-8").read()
+    execution = app[app.index("PENDING_APPROVAL"):]
+    assert "CANCELLED" in execution, "the execution page needs a cancel control"
+    assert "cancel_draft" in execution
+
+
+def test_a_cancelled_draft_stops_counting_against_buying_power():
+    """A cancelled draft has to actually free the commitment it was holding."""
+    import finance_mcp as srv
+    queue = [{"draft_id": "D1", "symbol": "AAA", "action": "BUY", "quantity": 100,
+              "limit_price": 2.0, "est_notional": 200.0, "status": "CANCELLED"}]
+    cost, sells, unpriced = srv._pending_commitments(queue, lambda s: None)
+    assert cost == 0.0 and not sells and not unpriced
+
+
+def test_bar_age_says_what_unit_it_counted_in():
+    """`behind` is sessions for daily and slower, hours otherwise. A number
+    whose unit depends on an argument has to carry it."""
+    daily = wc.bar_age(_frame_at("2026-09-04 04:00:00"), "D")
+    intraday = wc.bar_age(_frame_at("2026-09-04 19:45:00"), "M15")
+    broken = wc.bar_age(pd.DataFrame({"time": []}), "D")
+    assert daily["unit"] == "sessions"
+    assert intraday["unit"] == "hours"
+    assert "unit" in broken, "even the unreadable case needs a unit"
+
+
+def test_a_mixed_unit_sweep_does_not_rank_hours_against_sessions():
+    """
+    freshness_summary picks the worst by `behind`, which is sessions for a daily
+    bar and hours for an intraday one. Mixed, it compared 2 sessions against
+    3 hours and called the 3 worse -- so the header quoted the fresher of the
+    two as the stalest.
+    """
+    daily = {"bar": 1, "as_of": "2026-09-04", "age": "2 sessions",
+             "behind": 2.0, "current": False, "unit": "sessions"}
+    intraday = {"bar": 1, "as_of": "2026-09-08 15:45 EDT", "age": "3.0h",
+                "behind": 3.0, "current": False, "unit": "hours"}
+
+    line = wc.freshness_summary([daily, intraday], "D", "series")
+
+    assert "2 sessions" in line and "3.0h" in line, (
+        "with two units in play both worsts have to be stated, not ranked "
+        f"against each other: {line}")
+
+
+def test_the_bar_table_dates_a_session_the_same_way_the_header_does():
+    """
+    The header was fixed to render a daily bar as a bare date; the table beside
+    it still printed "2026-09-11 04:00:00" for the same bar. One response, two
+    renderings, and the one left behind is the midnight-ET-as-UTC form that was
+    removed from the header precisely because it reads as a 4 a.m. print.
+    """
+    frame = pd.DataFrame({
+        "time": ["2026-09-10 04:00:00", "2026-09-11 04:00:00"],
+        "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+        "close": [1.0, 1.0], "volume": [1, 1]})
+
+    shown = wc.display_frame(frame, "D")
+
+    assert list(shown["time"]) == ["2026-09-10", "2026-09-11"]
+
+
+def test_an_intraday_table_keeps_its_clock_and_says_the_zone():
+    frame = pd.DataFrame({
+        "time": ["2026-09-11 19:45:00"],
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]})
+
+    shown = wc.display_frame(frame, "M15")
+
+    assert shown["time"].iloc[0] == "2026-09-11 15:45 EDT"
+
+
+def test_displaying_a_frame_does_not_mutate_the_stored_one():
+    """Storage stays naive UTC; this is a view, not a conversion."""
+    frame = pd.DataFrame({
+        "time": ["2026-09-11 04:00:00"],
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]})
+
+    wc.display_frame(frame, "D")
+
+    assert frame["time"].iloc[0] == "2026-09-11 04:00:00"
