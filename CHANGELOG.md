@@ -5,13 +5,13 @@ the bug that caused it — the commit log is the fuller record.
 
 ## Unreleased
 
-This began as an audit of three outside reviews of this repository against the
-source. They named two real defects between them; checking their claims found
-the rest, and the rest are the more serious — the reviews were written from the
-README, so everything that needed a file opened to see was still there.
+This began as an audit of three outside reviews of this repository. They named
+two real defects between them. The rest were found while checking their claims,
+because the reviews were written from the README and stopped where the code
+started.
 
-Several entries below were then found by reviewing the fixes for the entries
-above them, which is its own argument for the practice.
+A number of the entries below were found by reviewing the fix for the entry
+above.
 
 - **The buying-power check could be switched off from a tool call.** A
   `limit_price` on a `MKT` or `STP` draft was used as the order's price for the
@@ -133,18 +133,44 @@ above them, which is its own argument for the practice.
 - **Drafts could not be cancelled.** The execution page has a Cancel button;
   clearing a draft previously meant editing the JSON by hand, which made every
   refusal that says "deal with this draft" a dead end.
-- **Parsers reported what they found badly.** A Form 4 mismatch printed both
-  sides of the discrepancy identically at four significant figures; an empty
-  insider result read as "no insider activity" when a ticker's registrant had
-  been succeeded; and a chain the filer explained in a footnote was called a
-  mismatch rather than unverified — decided on the `footnoteId` attached to the
-  failing balance, so it rests on structure rather than prose.
-- **Numbers that meant something other than what they said.** Days-to-expiry
-  counted from the machine's calendar rather than the exchange's; backtest win
-  rate and profit factor were gross of the fee while the equity curve was
-  charged for it; a mixed sweep ranked trading sessions against wall-clock
-  hours; an IV rank could read 137/100; and a 13F gave its quarter and filing
-  date without saying the positions were months old.
+- **A Form 4 mismatch printed both sides of the discrepancy identically.**
+  Four significant figures turned a real 57-share break into "should be
+  4.587e+05, filing says 4.587e+05", under an instruction to open an issue about
+  it. Share counts print in full now, with the difference stated.
+- **An empty insider result read as "no insider activity".** A ticker whose
+  registrant has been succeeded resolves to a CIK with no Form 4s while the
+  history sits on the predecessor. The result records which CIK was searched,
+  and the tool says so rather than rendering an empty list as an absence.
+- **A chain the filer explained in a footnote was called a mismatch.** Filers
+  disclose interstitial acquisitions in prose and attach the note to the exact
+  running balance that will not chain. That attachment is a `footnoteId`
+  attribute, so the parser tells an explained break from an unexplained one
+  without reading the English. An explained break is now unverified rather than
+  wrong; an unexplained one is still a mismatch.
+- **Days-to-expiry counted from the machine's calendar.** Options expire on an
+  exchange calendar. On a host east of New York the local date runs ahead for
+  part of every day, so every DTE — and every theta and annualised IV derived
+  from it — was a day short. Both sites count from the exchange date now.
+- **Backtest win rate and profit factor were gross of the fee.** The equity
+  curve was charged for transaction costs and the per-trade statistics were
+  not, so a strategy that lost money after costs could show a healthy win rate
+  beside a losing curve. Trades carry `gross_ret` and a net `ret` now; a
+  still-open trade pays one leg rather than two. The dashboard's profit-factor
+  tooltip said "before slippage" and now says what it measures.
+- **A mixed sweep ranked trading sessions against wall-clock hours.**
+  `bar_age`'s `behind` is sessions for daily and slower intervals and hours
+  otherwise, so a sweep spanning both compared 2 sessions with 3 hours and
+  called the 3 worse — quoting the fresher item as the stalest. It carries its
+  unit now, and a mixed sweep reports each clock's worst separately.
+- **An IV rank could read 137/100.** Two call sites computed the same
+  realised-volatility proxy and only one clamped it; the unclamped one is
+  reached exactly when today's implied vol sits above anything realised in the
+  past year. One helper now, clamped, returning nothing for a flat range rather
+  than guessing 50.
+- **13F holdings did not say how old they were.** A 13F is a photograph of the
+  quarter end, due 45 days after it and superseded only by the next one, so the
+  newest figure available is routinely three months old. The tool gave the
+  quarter and the filing date and left the reader to subtract.
 - **The cheap path existed and nothing told the model to take it.**
   `get_company_profile` spans 555 tokens for one section to 6,015 for all of
   them, but its description said *"Everything worth knowing… Start here"* and
