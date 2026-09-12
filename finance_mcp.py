@@ -1707,16 +1707,28 @@ def get_open_orders() -> str:
 
         out = (f"### Open Orders (account {account_id}) — "
                f"{broker_protocol.describe(adapter)}\n\n")
-        out += ("| Symbol | Side | Qty | Filled | Limit | Status | Cancel with |\n"
-                "|---|---|---|---|---|---|---|\n")
+        out += ("| Symbol | Side | Type | Qty | Filled | Price | Status | Cancel with |\n"
+                "|---|---|---|---|---|---|---|---|\n")
+        protective = []
         for o in orders:
-            price = o.get("limit_price")
+            # A stop order priced by its stop, not by a limit it does not have.
+            # Without the type column a STOP_LOSS rendered as "MKT", which reads
+            # as an unpriced market order rather than a protective bracket.
+            price = o.get("limit_price") or o.get("stop_price")
+            kind = o.get("order_type") or ("LIMIT" if o.get("limit_price") else "MARKET")
+            if o.get("protective"):
+                protective.append(f"{o['symbol']} {o['action']} {kind}")
             # The last column is the id cancel_order takes. Passing the broker's
             # own id instead is a 404, and that is how the Webull cancel path sat
             # dead for months without anyone noticing.
-            out += (f"| {o['symbol']} | {o['action']} | {o['quantity']:,.4g} | "
-                    f"{o['filled']:,.4g} | {('%.4f' % price) if price else 'MKT'} | "
+            out += (f"| {o['symbol']} | {o['action']} | {kind} | "
+                    f"{o['quantity']:,.4g} | {o['filled']:,.4g} | "
+                    f"{('%.4f' % price) if price else 'MKT'} | "
                     f"{o['status']} | `{o['client_order_id'] or '(none returned)'}` |\n")
+        if protective:
+            out += ("\n*Protective order(s) working: " + "; ".join(protective) +
+                    ". These limit a loss rather than open a position — "
+                    "cancelling one removes that protection.*\n")
         return out
     except Exception as e:
         raise ToolError(f"Error fetching open orders: {e}") from e
@@ -1798,7 +1810,7 @@ def ibkr_market_scanner(scan_code: str = "TOP_PERC_GAIN", instrument: str = "STK
 
 
 @needs(capabilities.CANCEL_ORDER)
-def cancel_order(order_id: str) -> str:
+def cancel_order(order_id: str, acknowledge_protective: bool = False) -> str:
     """
     Cancels a pending or active order on the broker account immediately.
 
@@ -1807,15 +1819,54 @@ def cancel_order(order_id: str) -> str:
             when the order was drafted (it looks like `DRFT_9a32c8d5`), NOT the
             broker's own `order_id`. `get_open_orders` shows both in its last
             column; the cancel path only accepts the client one.
+        acknowledge_protective: Required to cancel a working stop. A stop limits
+            the loss on an open position, so cancelling one removes protection
+            rather than reducing exposure — the tool refuses without this.
     """
     try:
         adapter = brokers.get()
         account_id = adapter.primary_account_id()
+
+        # Establish what is being cancelled before cancelling it. Cancelling an
+        # entry order reduces exposure -- exchanges treat fast cancellation as a
+        # risk control, which is what kill switches and cancel-on-disconnect
+        # are -- so nothing here obstructs that. A working stop is the opposite:
+        # it is what limits the loss on an open position, and this account holds
+        # one that was placed elsewhere, so the model neither chose it nor, until
+        # recently, could see what it was.
+        target = None
+        try:
+            for o in adapter.open_orders():
+                if order_id in (o.get("client_order_id"), o.get("order_id")):
+                    target = o
+                    break
+        except Exception as lookup_error:
+            return (f"SAFETY BLOCK: could not read the open orders to establish what "
+                    f"{order_id} is ({str(lookup_error)[:120]}). Refusing rather than "
+                    "cancelling an order of unknown type — it may be a protective stop.")
+
+        if target is None:
+            return (f"SAFETY BLOCK: {order_id} is not among the working orders on "
+                    f"account {account_id}, so what it would cancel could not be "
+                    "established. It may already be filled or cancelled. Run "
+                    "get_open_orders to see what is actually working.")
+
+        if target.get("protective") and not acknowledge_protective:
+            stop = target.get("stop_price")
+            return (f"SAFETY BLOCK: {order_id} is a protective order — "
+                    f"{target.get('order_type')} {target.get('action')} "
+                    f"{target.get('quantity'):,.4g} {target.get('symbol')}"
+                    + (f" at {stop}" if stop else "") + ". It limits the loss on an "
+                    "open position rather than opening one, so cancelling it removes "
+                    "that protection and leaves the position uncovered. This is the "
+                    "opposite of a kill switch. If that is genuinely intended, call "
+                    "again with acknowledge_protective=true.")
+
         res = adapter.cancel_order(order_id)
         return (f"Cancellation request sent for client_order_id {order_id} "
-                f"(account {account_id}, {adapter.name}). "
-                f"Broker order id {res.get('order_id') or '(not returned)'}.\n"
-                f"```json\n{res.get('raw')}\n```")
+                f"({target.get('order_type') or 'order'} {target.get('action')} "
+                f"{target.get('symbol')}, account {account_id}, {adapter.name}). "
+                f"Broker order id {res.get('order_id') or '(not returned)'}.")
     except Exception as e:
         raise ToolError(f"Error cancelling order {order_id}: {e}") from e
 

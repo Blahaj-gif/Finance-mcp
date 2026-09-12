@@ -1626,3 +1626,169 @@ def test_the_approval_page_runs_the_risk_recheck_against_the_pinned_desk():
     assert 'brokers.get("webull")' in submit, \
         "the re-check must read the desk that submits, not the ambient one"
     assert submit.index("pretrade_refusal") < submit.index("broker.place_order(")
+
+
+# =====================================================================
+# An open order the tool cannot describe
+# =====================================================================
+
+# The exact envelope Webull returns for a working order, field names and
+# nesting as observed live. The adapter looked for the leg under "items";
+# the API puts it under "orders", so every field fell back to the envelope --
+# which carries none of them -- and a real STOP_LOSS on a live account
+# rendered with blank symbol, blank side and blank status.
+LIVE_COMBO_ENVELOPE = [{
+    "client_order_id": "03846CF52080O0KCJIE8000000",
+    "combo_type": "NORMAL",
+    "orders": [{
+        "client_order_id": "03846CF52080O0KCJIE8000000",
+        "order_id": "03846CF52080O0KCJIE8000000",
+        "symbol": "ZETA",
+        "side": "SELL",
+        "order_type": "STOP_LOSS",
+        "status": "SUBMITTED",
+        "total_quantity": "12",
+        "filled_quantity": "0",
+        "stop_price": "14.50",
+        "instrument_type": "EQUITY",
+        "time_in_force": "DAY",
+    }],
+}]
+
+
+def _webull_with_open_orders(monkeypatch, payload):
+    from dashboard.brokers.webull import WebullBroker
+    from dashboard import webull_client as wc
+
+    class Stub(WebullBroker):
+        def _client(self):
+            return type("C", (), {"order_v3": type("O", (), {
+                "get_order_open": staticmethod(lambda acct: payload)})()})()
+
+        def primary_account_id(self):
+            return "ACC1"
+
+    monkeypatch.setattr(wc, "unwrap", lambda r: r)
+    monkeypatch.setattr(wc, "call_webull", lambda fn, *a, **k: fn(*a, **k))
+    return Stub()
+
+
+def test_a_working_order_is_described_not_left_blank(monkeypatch):
+    order = _webull_with_open_orders(monkeypatch, LIVE_COMBO_ENVELOPE).open_orders()[0]
+
+    assert order["symbol"] == "ZETA"
+    assert order["action"] == "SELL"
+    assert order["quantity"] == 12.0
+    assert order["status"] == "SUBMITTED"
+    assert order["order_id"] == "03846CF52080O0KCJIE8000000"
+
+
+def test_a_protective_stop_is_identifiable_as_one(monkeypatch):
+    """
+    Cancelling an entry order reduces exposure; cancelling a stop removes the
+    thing limiting a loss. Telling them apart needs the order type and the stop
+    price, and neither survived the envelope.
+    """
+    order = _webull_with_open_orders(monkeypatch, LIVE_COMBO_ENVELOPE).open_orders()[0]
+
+    assert order["order_type"] == "STOP_LOSS"
+    assert order["stop_price"] == 14.50
+    assert order["protective"] is True
+
+
+def test_an_ordinary_limit_order_is_not_flagged_protective(monkeypatch):
+    payload = [{"client_order_id": "DRFT_a", "combo_type": "NORMAL", "orders": [{
+        "client_order_id": "DRFT_a", "order_id": "WB1", "symbol": "AAPL",
+        "side": "BUY", "order_type": "LIMIT", "status": "SUBMITTED",
+        "total_quantity": "5", "filled_quantity": "0", "limit_price": "100.00"}]}]
+    order = _webull_with_open_orders(monkeypatch, payload).open_orders()[0]
+
+    assert order["protective"] is False
+    assert order["limit_price"] == 100.0
+
+
+# =====================================================================
+# Cancelling an entry is a risk control. Cancelling a stop is not.
+# =====================================================================
+
+def _server_with_open(monkeypatch, orders):
+    import finance_mcp as srv
+    from dashboard import brokers
+
+    class Desk:
+        name = "webull"
+        verified = True
+
+        def primary_account_id(self):
+            return "ACC1"
+
+        def open_orders(self):
+            return orders
+
+        def cancel_order(self, client_order_id):
+            Desk.cancelled = client_order_id
+            return {"order_id": "WB1", "client_order_id": client_order_id, "raw": {}}
+
+        def environment_label(self):
+            return "LIVE"
+
+    Desk.cancelled = None
+    monkeypatch.setattr(brokers, "get", lambda name=None: Desk())
+    return srv, Desk
+
+
+ENTRY = {"client_order_id": "DRFT_a", "order_id": "WB1", "symbol": "AAPL",
+         "action": "BUY", "quantity": 5.0, "filled": 0.0, "limit_price": 100.0,
+         "stop_price": None, "order_type": "LIMIT", "protective": False,
+         "status": "SUBMITTED", "raw": {}}
+
+STOP = {"client_order_id": "03846CF5", "order_id": "03846CF5", "symbol": "ZETA",
+        "action": "SELL", "quantity": 3.0, "filled": 0.0, "limit_price": None,
+        "stop_price": 14.5, "order_type": "STOP_LOSS", "protective": True,
+        "status": "SUBMITTED", "raw": {}}
+
+
+def test_cancelling_an_entry_order_is_not_obstructed(monkeypatch):
+    """
+    Exchanges treat fast cancellation as a risk control -- kill switches exist
+    to cancel everything at once, and cancel-on-disconnect does it with no human
+    at all. Slowing this down would be backwards.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [ENTRY])
+    out = srv.cancel_order("DRFT_a")
+    assert Desk.cancelled == "DRFT_a"
+    assert "Cancellation request sent" in out
+
+
+def test_cancelling_a_protective_stop_refuses_without_an_explicit_acknowledgement(monkeypatch):
+    """
+    The opposite of a kill switch. A working STOP_LOSS is the thing limiting a
+    loss on an open position, and this account has one -- placed elsewhere, so
+    the model did not choose it and, until the combo envelope was unwrapped,
+    could not even see what it was.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [STOP])
+    out = srv.cancel_order("03846CF5")
+
+    assert Desk.cancelled is None, "nothing may be sent without acknowledgement"
+    assert "protective" in out.lower()
+    assert "ZETA" in out and "14.5" in out
+
+
+def test_a_protective_stop_is_cancellable_once_acknowledged(monkeypatch):
+    """The guard states a fact; it does not overrule the human."""
+    srv, Desk = _server_with_open(monkeypatch, [STOP])
+    out = srv.cancel_order("03846CF5", acknowledge_protective=True)
+    assert Desk.cancelled == "03846CF5"
+    assert "Cancellation request sent" in out
+
+
+def test_an_unknown_id_is_not_silently_treated_as_an_entry(monkeypatch):
+    """
+    If the order cannot be found the type cannot be established, and assuming
+    it is an ordinary entry is exactly the assumption that would remove a stop.
+    """
+    srv, Desk = _server_with_open(monkeypatch, [ENTRY])
+    out = srv.cancel_order("NOT_THERE")
+    assert Desk.cancelled is None
+    assert "could not" in out.lower() or "not among" in out.lower()

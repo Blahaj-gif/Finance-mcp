@@ -179,19 +179,43 @@ class WebullBroker:
         for o in raw or []:
             if not isinstance(o, dict):
                 continue
-            # Webull nests the instrument leg; a stock order has exactly one.
-            leg = (o.get("items") or [{}])[0] if isinstance(o.get("items"), list) else {}
+            # Webull returns a combo ENVELOPE: {client_order_id, combo_type,
+            # orders: [...]}. The leg key is "orders", not "items" -- with the
+            # wrong key every field fell back to the envelope, which carries
+            # none of them, and a real working STOP_LOSS on a live account
+            # rendered with blank symbol, blank side and blank status. A model
+            # asked what orders were working was told one existed and nothing
+            # about it.
+            legs = o.get("orders") if isinstance(o.get("orders"), list) else None
+            if legs is None:
+                legs = o.get("items") if isinstance(o.get("items"), list) else []
+            leg = legs[0] if legs else {}
+
+            def field(*names):
+                for name in names:
+                    if leg.get(name) not in (None, ""):
+                        return leg[name]
+                    if o.get(name) not in (None, ""):
+                        return o[name]
+                return None
+
+            order_type = str(field("order_type", "orderType") or "").upper()
             out.append({
-                "order_id": str(o.get("order_id") or o.get("orderId") or ""),
-                "client_order_id": str(o.get("client_order_id")
-                                       or o.get("clientOrderId") or ""),
-                "symbol": str(o.get("symbol") or leg.get("symbol") or ""),
-                "action": str(o.get("side") or leg.get("side") or "").upper(),
-                "quantity": _as_float(o.get("quantity", leg.get("quantity"))) or 0.0,
-                "filled": _as_float(o.get("filled_quantity",
-                                          o.get("filledQuantity"))) or 0.0,
-                "limit_price": _as_float(o.get("limit_price", o.get("limitPrice"))),
-                "status": str(o.get("order_status") or o.get("status") or ""),
+                "order_id": str(field("order_id", "orderId") or ""),
+                "client_order_id": str(field("client_order_id", "clientOrderId") or ""),
+                "symbol": str(field("symbol") or ""),
+                "action": str(field("side", "action") or "").upper(),
+                "quantity": _as_float(
+                    field("total_quantity", "quantity", "totalQuantity")) or 0.0,
+                "filled": _as_float(field("filled_quantity", "filledQuantity")) or 0.0,
+                "limit_price": _as_float(field("limit_price", "limitPrice")),
+                "stop_price": _as_float(field("stop_price", "stopPrice")),
+                "order_type": order_type,
+                # A stop is not an entry order. Cancelling an entry reduces
+                # exposure; cancelling this removes the thing limiting a loss,
+                # so the two must be distinguishable before either is offered.
+                "protective": "STOP" in order_type or "TRAIL" in order_type,
+                "status": str(field("order_status", "status") or ""),
                 "raw": o,
             })
         return out
