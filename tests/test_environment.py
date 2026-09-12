@@ -9,6 +9,7 @@ import datetime
 import os
 import re
 import sys
+import types
 
 import pandas as pd
 import pytest
@@ -706,6 +707,11 @@ def test_the_dashboard_binds_loopback_by_default(monkeypatch):
     from dashboard import cli
 
     seen = {}
+    # Streamlit is an optional extra. `dashboard()` returns early with an
+    # install hint when it is absent, so without this the test silently proves
+    # nothing anywhere it is not installed -- which is CI, where it failed.
+    monkeypatch.setitem(sys.modules, "streamlit", types.ModuleType("streamlit"))
+    monkeypatch.setattr(cli.os.path, "isfile", lambda p: True)
     monkeypatch.setattr(cli.subprocess, "call",
                         lambda argv, **kw: seen.setdefault("argv", argv) and 0 or 0)
     monkeypatch.setattr(cli.sys, "argv", ["finance-mcp-dashboard"])
@@ -725,6 +731,11 @@ def test_an_explicit_address_still_wins(monkeypatch):
     from dashboard import cli
 
     seen = {}
+    # Streamlit is an optional extra. `dashboard()` returns early with an
+    # install hint when it is absent, so without this the test silently proves
+    # nothing anywhere it is not installed -- which is CI, where it failed.
+    monkeypatch.setitem(sys.modules, "streamlit", types.ModuleType("streamlit"))
+    monkeypatch.setattr(cli.os.path, "isfile", lambda p: True)
     monkeypatch.setattr(cli.subprocess, "call",
                         lambda argv, **kw: seen.setdefault("argv", argv) and 0 or 0)
     monkeypatch.setattr(cli.sys, "argv",
