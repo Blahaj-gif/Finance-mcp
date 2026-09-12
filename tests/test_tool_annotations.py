@@ -249,13 +249,16 @@ def test_the_profile_tells_the_model_how_to_ask_for_less():
 def test_the_profile_presets_are_actually_cheaper_in_that_order():
     """
     The description now makes a cost claim. If brief were not materially
-    cheaper than standard, that claim would be a lie the model acts on.
-    """
-    import finance_mcp as srv
-    sizes = {}
-    for level in ("brief", "standard", "full"):
-        sizes[level] = len(srv.get_company_profile("AAPL", detail=level))
+    narrower than standard, that claim would be a lie the model acts on.
 
-    assert sizes["brief"] < sizes["standard"] < sizes["full"]
-    assert sizes["brief"] * 2 < sizes["standard"], \
-        "brief has to be worth choosing, not a rounding error"
+    Counted in sections rather than characters: the first version measured real
+    payloads, which passed here and failed in CI, where there is no upstream to
+    fetch. A unit test that needs the internet is not a unit test.
+    """
+    brief = srv.profile_sections(detail="brief")
+    standard = srv.profile_sections(detail="standard")
+    full = srv.profile_sections(detail="full")
+
+    assert len(brief) < len(standard) < len(full)
+    assert len(brief) * 2 <= len(standard),         "brief has to be worth choosing, not a rounding error"
+    assert len(srv.profile_sections(sections="business")) == 1

@@ -2016,6 +2016,32 @@ def _run_sections(keys, symbol, timeout=45):
     return results
 
 
+def profile_sections(sections=None, detail: str = "standard") -> list:
+    """
+    Which sections a profile request resolves to.
+
+    Separated from the fetching so the cost claim in the tool's own description
+    -- brief is about a third of standard, one section about a sixth -- can be
+    checked without a network. A test that measured real payloads proved it
+    here and failed in CI, where there is no upstream to measure.
+    """
+    if sections:
+        raw = sections.split(",") if isinstance(sections, str) else list(sections)
+        wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
+    elif str(detail).lower() == "brief":
+        wanted = ["business", "financials", "price"]
+    elif str(detail).lower() == "full":
+        wanted = list(PROFILE_SECTIONS)
+    else:
+        wanted = list(DEFAULT_PROFILE_SECTIONS)
+
+    unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
+    if unknown:
+        raise ToolError(f"Unknown section(s) {unknown}. "
+                        f"Available: {', '.join(PROFILE_SECTIONS)}")
+    return wanted
+
+
 @mcp.tool()
 def get_company_profile(symbol: str, sections: str | list[str] = None,
                         detail: str = "standard") -> str:
@@ -2047,20 +2073,7 @@ def get_company_profile(symbol: str, sections: str | list[str] = None,
             or "full" (everything, including the heuristic verdict and macro calendar).
     """
     try:
-        if sections:
-            raw = sections.split(",") if isinstance(sections, str) else list(sections)
-            wanted = [str(x).strip().lower() for x in raw if str(x).strip()]
-        elif str(detail).lower() == "brief":
-            wanted = ["business", "financials", "price"]
-        elif str(detail).lower() == "full":
-            wanted = list(PROFILE_SECTIONS)
-        else:
-            wanted = list(DEFAULT_PROFILE_SECTIONS)
-
-        unknown = [w for w in wanted if w not in PROFILE_SECTIONS]
-        if unknown:
-            raise ToolError(f"Unknown section(s) {unknown}. "
-                            f"Available: {', '.join(PROFILE_SECTIONS)}")
+        wanted = profile_sections(sections, detail)
 
         started = time.time()
         results = _run_sections(wanted, symbol)
