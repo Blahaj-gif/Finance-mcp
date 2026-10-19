@@ -196,6 +196,48 @@ def test_unknown_release_slug_is_rejected():
         ec.fetch_release_schedule("nonsense")
 
 
+def test_upcoming_releases_windows_against_the_date_it_was_given(monkeypatch):
+    """
+    The BLS source is the only one that windows itself -- fetch_fomc_meetings and
+    fetch_bea_schedule hand back everything and let economic_calendar do it. While
+    upcoming_releases read the clock instead of its caller, a calendar asked about
+    an explicit date windowed two of its three sources against that date and BLS
+    against the real one, and the BLS rows simply went missing.
+
+    The fixture's releases are 2026-07-14, 2026-08-12 and 2026-09-11. Both calls
+    below ask for a zero-width window, so each can only answer from the date it
+    was handed. If `today` is ignored they both read the same real clock and
+    return the same thing, which is what makes this fail rather than drift.
+    """
+    monkeypatch.setattr(ec, "_http", lambda url, *a, **k: SCHEDULE_HTML)
+
+    on_the_day, _ = ec.upcoming_releases(days_ahead=0, days_back=0, slugs=["cpi"],
+                                         today=datetime.date(2026, 8, 12))
+    assert [str(e["date"]) for e in on_the_day] == ["2026-08-12"]
+
+    nowhere_near, _ = ec.upcoming_releases(days_ahead=0, days_back=0, slugs=["cpi"],
+                                           today=datetime.date(2026, 1, 1))
+    assert nowhere_near == [], "a window that contains no release must answer with none"
+
+
+def test_the_calendar_hands_its_date_to_every_source(monkeypatch):
+    """The integration path that broke: BLS absent from a calendar pinned to a date."""
+    def serve(url, *a, **k):
+        if "federalreserve" in url:
+            return _fixture("fomc_calendar.html")
+        if "bea.gov" in url:
+            return _fixture("bea_schedule.html")
+        if "bls.gov/schedule" in url:
+            return SCHEDULE_HTML
+        return json.dumps(JOIN_RESPONSE)
+
+    monkeypatch.setattr(ec, "_http", serve)
+    entries, _ = ec.economic_calendar(days_ahead=10, days_back=10,
+                                      today=datetime.date(2026, 8, 12))
+    assert "BLS" in {e["source"] for e in entries}, (
+        "BLS was windowed against a different date than the calendar was given")
+
+
 # =====================================================================
 # Joining the schedule to the numbers
 # =====================================================================
