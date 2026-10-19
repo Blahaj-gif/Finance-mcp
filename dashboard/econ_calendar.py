@@ -426,9 +426,18 @@ def fetch_release_schedule(slug):
     return entries
 
 
-def upcoming_releases(days_ahead=30, days_back=7, slugs=None):
-    """Every scheduled BLS release inside the window, chronologically."""
-    today = _today()
+def upcoming_releases(days_ahead=30, days_back=7, slugs=None, today=None):
+    """
+    Every scheduled BLS release inside the window, chronologically.
+
+    ``today`` is accepted rather than read from the clock here because this
+    is the one source that windows itself: fetch_fomc_meetings and
+    fetch_bea_schedule return everything and let economic_calendar do the
+    windowing. While this ignored its caller, a calendar asked about an
+    explicit date windowed BLS against the real one -- three sources, two
+    dates, and the BLS rows silently absent.
+    """
+    today = today or _today()
     lo, hi = today - datetime.timedelta(days=days_back), today + datetime.timedelta(days=days_ahead)
 
     found, failed = [], []
@@ -1191,7 +1200,7 @@ def economic_calendar(days_ahead=30, days_back=7, sources=None, with_values=True
     with ThreadPoolExecutor(max_workers=3) as pool:
         if "bls" in wanted:
             jobs["bls"] = pool.submit(upcoming_releases, days_ahead=days_ahead,
-                                      days_back=days_back)
+                                      days_back=days_back, today=today)
         if "fomc" in wanted:
             jobs["fomc"] = pool.submit(fetch_fomc_meetings)
         if "bea" in wanted:

@@ -3,7 +3,7 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
-## Unreleased
+## 0.4.0 — 2026-10-19
 
 This began as an audit of three outside reviews of this repository. They named
 two real defects between them. The rest were found while checking their claims,
@@ -13,6 +13,15 @@ started.
 A number of the entries below were found by reviewing the fix for the entry
 above.
 
+- **The economic calendar windowed BLS against a different date than the one it
+  was given.** `upcoming_releases` is the only source that windows itself —
+  `fetch_fomc_meetings` and `fetch_bea_schedule` return everything and let
+  `economic_calendar` do the windowing — and it read the clock instead of its
+  caller. A calendar asked about an explicit date therefore windowed two of its
+  three sources against that date and BLS against the real one, and the BLS rows
+  went missing with nothing in the output to say they had. Found when a test
+  pinned to a fixed date began failing a month after it was written: the code was
+  wrong the whole time, and only the real calendar moving made it visible.
 - **The buying-power check could be switched off from a tool call.** A
   `limit_price` on a `MKT` or `STP` draft was used as the order's price for the
   notional check, but `build_order` attaches a limit price only to a `LIMIT`
