@@ -5,7 +5,7 @@ description = "MCP server for market data, macro calendar, SEC filings and risk 
 readme = "README.md"
 license = { file = "LICENSE" }
 keywords = ["mcp", "model-context-protocol", "finance", "trading", "market-data", "sec-edgar"]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "pandas",
     "numpy",

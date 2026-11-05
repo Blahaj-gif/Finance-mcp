@@ -762,3 +762,37 @@ def test_the_checked_out_config_also_pins_the_bind_address():
     assert '127.0.0.1' in server, (
         "the [server] section must pin address = \"127.0.0.1\"")
     assert re.search(r'^\s*address\s*=\s*"127\.0\.0\.1"', server, re.M)
+
+
+def test_no_source_file_carries_an_invalid_escape_sequence():
+    r"""
+    A stray backslash in a string literal used to be a DeprecationWarning, became
+    a SyntaxWarning in 3.12, and a later Python will make it an error.
+
+    This existed for months as `C:\ ` in a docstring and nothing saw it, because
+    the only interpreter anyone ran the suite on was 3.10, where the warning is a
+    DeprecationWarning that pytest does not surface. A check that cannot fire on
+    the interpreter it runs under is not a check, so this one promotes the warning
+    to an error and the floor is now 3.12.
+    """
+    import pathlib
+    import warnings
+
+    skip = {".venv", "build", "__pycache__", "hindsight", "reliquary", "snare",
+            "vouch", "chartlag", "pgplan", "pgsow", "masher", "crossfoot",
+            "dropdown_indicators", "extract-chart-dsl", ".playwright-mcp"}
+    offenders, scanned = [], 0
+    for path in sorted(pathlib.Path(ROOT).rglob("*.py")):
+        rel = path.relative_to(ROOT)
+        if skip & set(rel.parts) or "egg-info" in str(rel):
+            continue
+        scanned += 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            try:
+                compile(path.read_text(encoding="utf-8"), str(rel), "exec")
+            except (SyntaxWarning, SyntaxError) as exc:
+                offenders.append(f"{rel}: {exc}")
+
+    assert scanned > 40, f"only scanned {scanned} files; the walk is not finding them"
+    assert not offenders, "invalid escape sequences:\n" + "\n".join(offenders)

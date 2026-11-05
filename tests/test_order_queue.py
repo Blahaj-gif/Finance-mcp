@@ -53,11 +53,15 @@ def test_a_half_written_queue_is_never_left_behind(tmp_path, monkeypatch):
 
 
 def test_the_queue_file_is_not_readable_by_other_users(tmp_path, monkeypatch):
-    """
+    r"""
     Staged orders name what an account is about to buy. On Windows the file
     inherited the repository's ACL, which on a default checkout under C:\ grants
     Authenticated Users Modify -- so any process on the box could read pending
     trades or rewrite their quantities before approval.
+
+    The docstring is raw because the path above ends in a backslash-space, which
+    3.12 turned from a DeprecationWarning into a SyntaxWarning and a later
+    Python will make an error.
     """
     path = tmp_path / "order_drafts.json"
     monkeypatch.setattr(oq, "default_path", lambda: str(path))
