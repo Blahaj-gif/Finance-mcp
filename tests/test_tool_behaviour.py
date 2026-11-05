@@ -538,18 +538,34 @@ def test_price_responses_stamp_the_bar_they_quote(monkeypatch):
 
 
 def test_freshness_line_names_the_session_age():
-    import datetime
+    """
+    The test reads the same clock freshness_line does.
+
+    It used to build `latest` as previous_trading_day(date.today() + 1 day) --
+    the exact construction reference_session's own docstring records as wrong,
+    because it collapses to today on any trading day and counts a session that
+    has not closed as complete. Worse, `date.today()` is the LOCAL date while
+    the code works from the Eastern one, so for the hours those disagree the
+    test's "two sessions older" was the code's "current session" and the stale
+    case was reported as fresh.
+
+    reference_session() is the newest session whose bar should exist by now,
+    which is precisely what freshness_line measures against.
+    """
     from dashboard import market_calendar as mc
-    latest = mc.previous_trading_day(datetime.date.today() + datetime.timedelta(days=1))
+    latest = mc.reference_session()
     fresh = rising_frame(10)
     fresh.loc[fresh.index[-1], "time"] = f"{latest} 21:00:00"
     line = wc.freshness_line(fresh, "Webull OpenAPI", "D")
-    assert "current session" in line
+    assert "current session" in line, line
 
     stale = fresh.copy()
     older = mc.previous_trading_day(mc.previous_trading_day(latest))
+    assert older < latest, "the stale bar must be genuinely older than the reference"
     stale.loc[stale.index[-1], "time"] = f"{older} 21:00:00"
-    assert "trading session" in wc.freshness_line(stale, "Webull OpenAPI", "D")
+    aged = wc.freshness_line(stale, "Webull OpenAPI", "D")
+    assert "trading session" in aged, aged
+    assert "current session" not in aged, aged
 
 
 def test_freshness_line_flags_a_cache_hit():

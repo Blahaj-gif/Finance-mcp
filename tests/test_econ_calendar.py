@@ -157,28 +157,43 @@ def test_release_date_parsing(text, expected):
 
 
 def test_upcoming_releases_filters_to_the_window(monkeypatch):
+    """
+    The window is measured from an anchor this test supplies, not from a clock.
+
+    Two previous versions read a clock and both drifted. The first used a
+    zero-day window and failed on the one morning the calendar reached a fixture
+    date. The second measured the gap relative to the fixture, which fixed that
+    but still took `today` from `datetime.date.today()` while the code takes it
+    from `_today()`, which is the EASTERN date -- so for the roughly twelve
+    hours a day those two disagree, the test computed a window from one clock
+    and asserted about the other. The nearest fixture date then sat exactly on
+    the boundary it believed was empty.
+
+    `upcoming_releases` accepts `today`, so the honest fix is to use it and let
+    the test depend on no clock whatsoever.
+    """
     monkeypatch.setattr(ec, "_http", lambda *a, **k: SCHEDULE_HTML)
-    found, failed = ec.upcoming_releases(days_ahead=3650, days_back=3650, slugs=["cpi"])
+
+    # The fixture's releases are 2026-07-14, 2026-08-12 and 2026-09-11.
+    anchor = datetime.date(2026, 10, 1)        # deliberately not a fixture date
+    found, failed = ec.upcoming_releases(days_ahead=3650, days_back=3650,
+                                         slugs=["cpi"], today=anchor)
     assert len(found) == 3 and not failed
 
-    # A zero-day window means "today only", and one of the fixture's own dates
-    # is 2026-08-12 -- so this assertion held on every day except that one, and
-    # failed the morning the calendar reached it. The window has to be defined
-    # relative to the fixture rather than to whatever today happens to be.
     fixture_days = sorted(r["date"] for r in found)
-    today = datetime.date.today()
-    gap = min(abs((day - today).days) for day in fixture_days)
-    if gap == 0:
-        # Today *is* a fixture date. Nothing excludes it but asking for a
-        # window that does not contain today at all, which the API cannot
-        # express -- so assert the complementary fact instead: the row that
-        # matched is one of the fixture's, not an invention.
-        same_day, _ = ec.upcoming_releases(days_ahead=0, days_back=0, slugs=["cpi"])
-        assert [r["date"] for r in same_day] == [today]
-    else:
-        narrower, _ = ec.upcoming_releases(days_ahead=gap - 1, days_back=gap - 1,
-                                           slugs=["cpi"])
-        assert narrower == [], f"±{gap - 1}d should exclude {fixture_days}"
+    gap = min(abs((day - anchor).days) for day in fixture_days)
+    assert gap == 20, f"anchor moved relative to the fixture: {fixture_days}"
+
+    # One day inside the nearest release, and one day outside it: the boundary
+    # is asserted from both sides, so an off-by-one in either direction fails.
+    narrower, _ = ec.upcoming_releases(days_ahead=gap - 1, days_back=gap - 1,
+                                       slugs=["cpi"], today=anchor)
+    assert narrower == [], f"±{gap - 1}d should exclude {fixture_days}"
+
+    onto, _ = ec.upcoming_releases(days_ahead=gap, days_back=gap,
+                                   slugs=["cpi"], today=anchor)
+    assert [r["date"] for r in onto] == [datetime.date(2026, 9, 11)], (
+        f"±{gap}d should admit exactly the nearest release, got {onto}")
 
 
 def test_upcoming_releases_reports_a_failed_source_instead_of_dropping_it(monkeypatch):
