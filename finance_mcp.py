@@ -4141,12 +4141,16 @@ def annotate_tools():
         # duplicate: no declared schema, no structured content.
         tool.output_schema = None
         write = WRITING_TOOLS.get(name)
+        # Snake case here, camelCase on the wire. These are the model's canonical
+        # field names; MCP's camelCase spellings are serialisation aliases, which
+        # model_dump(by_alias=True) still emits, so the protocol is unchanged.
+        # Reading the aliases as attributes is deprecated from mcp-types onward.
         tool.annotations = ToolAnnotations(
             title=name.replace("_", " ").strip().title(),
-            readOnlyHint=write is None,
-            destructiveHint=bool(write and write["destructive"]),
-            idempotentHint=(True if write is None else write["idempotent"]),
-            openWorldHint=name not in LOCAL_ONLY_TOOLS,
+            read_only_hint=write is None,
+            destructive_hint=bool(write and write["destructive"]),
+            idempotent_hint=(True if write is None else write["idempotent"]),
+            open_world_hint=name not in LOCAL_ONLY_TOOLS,
         )
         annotated += 1
     return annotated
