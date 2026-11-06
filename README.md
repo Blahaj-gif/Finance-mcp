@@ -1,7 +1,7 @@
 # Finance MCP
 
 [![tests](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Blahaj-gif/Finance-mcp/actions/workflows/tests.yml)
-[![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](https://github.com/Blahaj-gif/Finance-mcp/blob/master/pyproject.toml)
+[![python](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue)](https://github.com/Blahaj-gif/Finance-mcp/blob/master/pyproject.toml)
 [![licence](https://img.shields.io/badge/licence-MIT-green)](https://github.com/Blahaj-gif/Finance-mcp/blob/master/LICENSE)
 
 An MCP server that gives an AI assistant read access to your real brokerage

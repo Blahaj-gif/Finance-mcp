@@ -888,3 +888,35 @@ def test_the_lint_gate_is_selected_and_wired_into_ci():
     lint = lint_lines[0]
     for path in ("finance_mcp.py", "dashboard", "tests"):
         assert path in lint, f"ruff must lint {path}; the CI line is: {lint.strip()}"
+
+
+def test_the_readme_python_badge_matches_the_versions_ci_runs():
+    """
+    The badge is the second line of the README, directly under the title, and
+    it said "3.10 | 3.12" for the whole day after the floor moved to 3.12 and
+    CI moved to 3.12 and 3.14. Nothing noticed, because a badge is an image URL
+    and no test had ever read one.
+
+    It mirrors the CI matrix rather than `requires-python` on purpose: the
+    matrix is the set of interpreters actually exercised, which is the stronger
+    claim and the one a reader is really asking about.
+    """
+    readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+    workflow = open(os.path.join(ROOT, ".github", "workflows", "tests.yml"),
+                    encoding="utf-8").read()
+
+    matrix = re.search(r"python-version:\s*\[([^\]]+)\]", workflow)
+    assert matrix, "could not find the CI python matrix"
+    tested = re.findall(r"\d+\.\d+", matrix.group(1))
+    assert len(tested) >= 2, f"expected at least two tested versions, got {tested}"
+
+    badge = re.search(r"img\.shields\.io/badge/python-([^-]+)-", readme)
+    assert badge, "the README must carry a python badge"
+    # Decode first: shields.io percent-encodes the separator, and reading
+    # "%203.14" raw yields the version 203.14.
+    import urllib.parse
+    shown = re.findall(r"\d+\.\d+", urllib.parse.unquote(badge.group(1)))
+
+    assert shown == tested, (
+        f"the badge advertises {shown} but CI runs {tested}. The badge is the "
+        "second line of the README; a reader checks it before anything else.")
