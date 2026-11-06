@@ -2,9 +2,12 @@
 Webull adapter. The reference implementation.
 
 This is the only adapter that has been run against a live account: a real order
-was drafted, previewed, placed, watched resting, and cancelled. Everything the
-protocol asserts about broker behaviour was learned here, including the two
-things that cost the most to find --
+was drafted, previewed, placed, watched resting, and cancelled -- on the SDK's
+2.0 series. The dependency is now 3.x and that run has not been repeated, so the
+end-to-end claim describes 2.0 while only the structural checks describe 3.x.
+
+Everything the protocol asserts about broker behaviour was learned here,
+including the two things that cost the most to find --
 
   * cancel_order lives on order_v3. order_v2 documents itself as HK/US only and
     returns 404 SDK.UnknownServerError everywhere else, so the emergency stop
@@ -23,7 +26,17 @@ from dashboard import webull_client as _wc
 
 class WebullBroker:
     name = "webull"
-    verified = True          # exercised end to end against a live account
+
+    #: Exercised end to end against a live account -- on the SDK's 2.0 series.
+    #: The dependency has since moved to 3.x, and that live exercise has NOT
+    #: been repeated against it. The flag stays True because describe()'s other
+    #: branch says the adapter "has never been run against the live API", which
+    #: would be false; but "verified" here means a real order was placed and
+    #: cancelled through 2.0, not that 3.x has been proven. Only someone with an
+    #: account can close that gap, and the import-and-signature checks the suite
+    #: can do are not a substitute for it.
+    verified = True
+    verified_against = "webull-openapi-python-sdk 2.0.x"
 
     #: What this adapter implements. What the regional entity serves, and what
     #: this account is entitled to buy, are two further questions the code

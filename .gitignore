@@ -67,3 +67,30 @@ dashboard/events.jsonl
 
 # Build 4, its own repository living in this working tree.
 pgplan/
+
+# chartlag is its own repository.
+chartlag/
+
+# masher is its own repository.
+masher/
+
+# reliquary is its own repository.
+reliquary/
+
+# dropdown_indicators is its own repository.
+dropdown_indicators/
+
+# hindsight is its own repository.
+hindsight/
+
+# snare is its own repository. Private: it fires traversal, SSRF and injection
+# payloads at MCP servers, so it is not published alongside this one.
+snare/
+
+# vouch is its own repository.
+vouch/
+
+# Playwright MCP session scratch: page snapshots and console logs from browser
+# runs. The *.log rule already caught the logs and left the directory itself
+# untracked, which is how it kept showing up in git status.
+.playwright-mcp/

@@ -44,7 +44,7 @@ def test_the_only_destructive_tool_is_the_one_that_acts_on_the_market():
     not a no-op -- it is a 404 on an order that already executed. Nothing else
     here destroys anything.
     """
-    destructive = sorted(t.name for t in _tools() if t.annotations.destructiveHint)
+    destructive = sorted(t.name for t in _tools() if t.annotations.destructive_hint)
     assert destructive == ["cancel_order"], destructive
 
 
@@ -54,8 +54,8 @@ def test_drafting_an_order_is_not_marked_destructive():
     would train a reader to click through the warning that matters.
     """
     draft = next(t for t in _tools() if t.name == "draft_order")
-    assert draft.annotations.readOnlyHint is False, "it does write something"
-    assert draft.annotations.destructiveHint is False
+    assert draft.annotations.read_only_hint is False, "it does write something"
+    assert draft.annotations.destructive_hint is False
 
 
 def test_previewing_an_order_is_read_only():
@@ -67,7 +67,7 @@ def test_previewing_an_order_is_read_only():
     preview = next((t for t in _tools() if t.name == "preview_order"), None)
     if preview is None:
         pytest.skip("preview_order not registered for this broker")
-    assert preview.annotations.readOnlyHint is True
+    assert preview.annotations.read_only_hint is True
 
 
 def test_the_writing_tools_are_the_ones_that_write():
@@ -99,9 +99,9 @@ def test_the_writing_tools_are_the_ones_that_write():
 def test_local_only_tools_do_not_claim_to_reach_the_world():
     for tool in _tools():
         if tool.name in srv.LOCAL_ONLY_TOOLS:
-            assert tool.annotations.openWorldHint is False, tool.name
+            assert tool.annotations.open_world_hint is False, tool.name
         else:
-            assert tool.annotations.openWorldHint is True, tool.name
+            assert tool.annotations.open_world_hint is True, tool.name
 
 
 def test_read_only_tools_are_idempotent_and_writing_ones_are_not():
@@ -111,10 +111,10 @@ def test_read_only_tools_are_idempotent_and_writing_ones_are_not():
     already gone.
     """
     for tool in _tools():
-        if tool.annotations.readOnlyHint:
-            assert tool.annotations.idempotentHint is True, tool.name
+        if tool.annotations.read_only_hint:
+            assert tool.annotations.idempotent_hint is True, tool.name
         else:
-            assert tool.annotations.idempotentHint is False, tool.name
+            assert tool.annotations.idempotent_hint is False, tool.name
 
 
 def test_most_of_this_server_is_read_only():
@@ -123,7 +123,7 @@ def test_most_of_this_server_is_read_only():
     so is the pitch.
     """
     tools = _tools()
-    read_only = [t for t in tools if t.annotations.readOnlyHint]
+    read_only = [t for t in tools if t.annotations.read_only_hint]
     assert len(read_only) / len(tools) > 0.8, (
         f"only {len(read_only)} of {len(tools)} tools are read-only")
 
@@ -217,7 +217,7 @@ def test_the_readme_states_the_real_read_only_count():
     assert match, "the README no longer states the read-only ratio"
 
     tools = _tools()
-    read_only = sum(1 for t in tools if t.annotations.readOnlyHint)
+    read_only = sum(1 for t in tools if t.annotations.read_only_hint)
     assert (int(match.group(1)), int(match.group(2))) == (read_only, len(tools)), (
         f"README says {match.group(1)} of {match.group(2)}; "
         f"the server registers {read_only} of {len(tools)}")

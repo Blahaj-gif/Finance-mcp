@@ -3,6 +3,55 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
+## Unreleased
+
+Maintenance, prompted by a review that asked whether to move to Python 3.15.
+The answer is no, and the reason the question was worth asking anyway is that
+it surfaced an end-of-life interpreter and a dependency set two months stale.
+
+- **The declared floor, the development venv and a CI job were all Python
+  3.10, which reached end of life on 2026-10-01.** The floor is now 3.12 and
+  the CI matrix is 3.12 and 3.14 — the floor because current numpy and pandas
+  require 3.12 and 3.11 and staying below pinned us to older majors, and 3.14
+  because testing the ceiling is how we learn the day the ceiling moves.
+- **3.15 is deliberately not the target.** `webull-openapi-python-sdk` caps
+  `requires_python` at `<3.15` in every release, including the one published
+  eight days after 3.15 shipped, so the cap is maintained rather than
+  forgotten. pip refuses to install on 3.15 and it is the only adapter that has
+  been run against a live account.
+- **`fastmcp` 3.4.6 to 4.1.6, and the annotation accessors with it.** Reading
+  `ToolAnnotations.readOnlyHint` is deprecated; reads and construction now use
+  the canonical `read_only_hint` names, and `model_dump(by_alias=True)` was
+  checked to confirm the wire form is still `readOnlyHint` — a silent change
+  there would be a protocol break, not a refactor. `fastmcp` is pinned `>=4`,
+  because 3.4.6 has no snake_case attributes at all.
+- **The Webull SDK moved 2.0.17 to 3.0.4, and the dev environment was the thing
+  that was behind.** The dependency is unpinned, so every fresh install since
+  2026-10-17 already received 3.x while this repository tested against 2.0.17.
+  Testing a version nobody installs is the hazard; the upgrade removes it. The
+  live end-to-end exercise was performed on the 2.0 series and has not been
+  repeated, which the adapter now records rather than implies.
+- **Two tests crossed clocks and failed for twelve hours of every day.** Both
+  computed a date from `datetime.date.today()`, the local date, and asserted
+  about code working from the Eastern one. `test_upcoming_releases_filters_to_
+  the_window` built a window from one clock and a boundary from the other, so
+  the nearest fixture release sat exactly on the edge it believed was empty.
+  `test_freshness_line_names_the_session_age` built its reference session with
+  `previous_trading_day(today + 1 day)` — the construction
+  `reference_session`'s own docstring records as wrong, because it counts a
+  session that has not closed as complete. They now take an explicit anchor and
+  the exchange clock respectively, and were confirmed to pass while the two
+  clocks disagree, which is the only window in which the bug is visible.
+- **A docstring carried an invalid escape sequence for months.** `C:\ ` in
+  `tests/test_order_queue.py`. Invalid escapes were a `DeprecationWarning`
+  before 3.12 and a `SyntaxWarning` after, so running the suite only on 3.10
+  could never surface it. A guard now compiles every first-party file with
+  `SyntaxWarning` promoted to an error.
+- **Eight paths were untracked but not ignored**, including five sibling
+  repositories, and `git status` had been noisy for months. That is the same
+  shape as the `iv_history.json` incident this file already records: untracked
+  and unignored is one `git add -A` from shipping.
+
 ## 0.4.0 — 2026-10-19
 
 This began as an audit of three outside reviews of this repository. They named
