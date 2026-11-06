@@ -918,7 +918,7 @@ def test_the_options_cheap_or_dear_reading_is_withheld_when_an_event_is_due(monk
         [{"what": "earnings", "date": datetime.date(2026, 12, 1),
           "confidence": "confirmed"}], []))
 
-    out = srv.get_options_analytics("AAA")
+    out = srv.get_options_analytics("AAA", include_verdict=True)
 
     assert "Scheduled before this expiry" in out, out
     assert "earnings 2026-12-01" in out, out
@@ -927,20 +927,74 @@ def test_the_options_cheap_or_dear_reading_is_withheld_when_an_event_is_due(monk
     assert "not evidence of a mispricing either way" in out, out
 
 
-def test_the_cheap_or_dear_reading_survives_when_the_window_is_clear(monkeypatch):
+def _true_rank(monkeypatch, rank):
+    """A recorded IV history, so the rank is a real one rather than the proxy."""
+    monkeypatch.setattr(srv.iv_history, "record_snapshot", lambda *a, **k: 60)
+    monkeypatch.setattr(srv.iv_history, "iv_rank", lambda *a, **k: {
+        "rank": rank, "percentile": rank, "observations": 60,
+        "first_date": "2026-09-01", "last_date": "2026-11-06",
+        "low": 0.18, "high": 0.52})
+
+
+def test_the_cheap_or_dear_reading_survives_when_it_is_asked_for(monkeypatch):
     """
-    The withholding must be conditional on the date, not a quiet removal of the
-    behaviour. With nothing scheduled, an IV rank of 80 still reads as dear.
+    Withholding must stay conditional, not become a quiet removal. Asked for,
+    against a true rank, with nothing scheduled, an 80 still reads as dear --
+    and it arrives with the note saying the threshold was never tested.
     """
     _stub_chain(monkeypatch,
                 calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
                 puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
-    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 80.0)
+    _true_rank(monkeypatch, 80.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA", include_verdict=True)
+    assert "favours selling premium" in out, out
+    assert "never backtested here" in out, out
+    assert "not evidence of a mispricing either way" not in out, out
+
+
+def test_no_cheap_or_dear_reading_is_offered_unless_it_is_asked_for(monkeypatch):
+    """
+    get_market_analysis's rule, applied here: an unvalidated call anchors
+    judgment even when labelled, so the default hands back the measurements.
+    This tool used to print the call unconditionally -- the strongest-sounding
+    sentence the server emits, from a threshold nothing has ever tested.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    _true_rank(monkeypatch, 80.0)
     monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
 
     out = srv.get_options_analytics("AAA")
-    assert "favours selling premium" in out, out
-    assert "not evidence of a mispricing either way" not in out, out
+
+    assert "IV rank" in out, "the measurement itself must still be reported"
+    assert "favours selling premium" not in out, out
+    assert "favours buying premium" not in out, out
+
+
+def test_a_proxy_rank_never_supports_a_cheap_or_dear_reading(monkeypatch):
+    """
+    The proxy ranks implied volatility against REALISED volatility, which the
+    basis line already calls a different quantity. AMD on 2026-11-05 is the
+    case: down 17% on the session, implied volatility at 119%, one IV
+    observation recorded -- so the rank was a proxy reading 100/100, and the
+    tool said "favours selling premium" into a same-day expiry on a name that
+    had just crashed. Asking for the verdict is not enough; the number has to
+    be able to carry it.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 100.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA", include_verdict=True)
+
+    assert "IV rank (proxy)" in out, out
+    assert "favours selling premium" not in out, out
+    assert "a different quantity" in out, out
 
 
 def test_a_clear_expiry_says_so_rather_than_staying_silent(monkeypatch):
@@ -1109,3 +1163,29 @@ def test_an_unreachable_source_is_remembered_for_a_minute_not_a_quarter_hour(
     time.sleep(0.4)
     real_scheduled_events("AAA", 30, today=today)
     assert len(attempts) == 1, "a complete result must keep its full TTL"
+
+
+def test_an_unreachable_calendar_withholds_the_cheap_or_dear_reading(monkeypatch):
+    """
+    "The calendar did not answer" is not "nothing is scheduled", and the
+    verdict has to refuse the same way the disclosure line does.
+
+    This is how the AMD case actually printed. One failed BLS fetch left the
+    event list empty, the guard read that as a clear window, and the tool made
+    a cheap/dear call on a same-day expiry that had an Employment Situation
+    release inside it. The event guard was only ever as strong as the calendar
+    being reachable.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    _true_rank(monkeypatch, 80.0)
+    monkeypatch.setattr(srv, "scheduled_events",
+                        lambda *a, **k: ([], ["BLS release schedule"]))
+
+    out = srv.get_options_analytics("AAA", include_verdict=True)
+
+    assert "favours selling premium" not in out, out
+    assert "could not be reached" in out, out
+    # And the disclosure line above must not have claimed a clear window either.
+    assert "nothing found" not in out, out

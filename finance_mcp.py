@@ -63,6 +63,17 @@ STALE_STRADDLE_NOTE = (
     " up to 31 days stale on illiquid strikes; a stale straddle understates the"
     " move")
 
+# Attached to the IV cheap/dear call whenever it is asked for. The threshold is
+# 65, it was chosen rather than measured, and nothing in this repository has
+# backtested it -- the same standing as the consensus score, which carries
+# HEURISTIC_NOTE for the same reason. The second sentence is the one that
+# matters: high implied volatility usually means the market can see something,
+# and "expensive" is not a synonym for "mispriced".
+IV_VERDICT_NOTE = (
+    " *A fixed threshold at rank 65, never backtested here. Elevated implied"
+    " volatility is usually the market pricing something it can see, which is"
+    " not the same as options being mispriced.*")
+
 #: Macro releases worth naming beside one symbol's price or option chain.
 #: Deliberately three. The full calendar is get_economic_calendar's job, and a
 #: disclosure that lists eight BLS products is a disclosure nobody reads.
@@ -2815,7 +2826,8 @@ def get_portfolio_risk() -> str:
 
 
 @mcp.tool()
-def get_options_analytics(symbol: str, expiration: str = None) -> str:
+def get_options_analytics(symbol: str, expiration: str = None,
+                          include_verdict: bool = False) -> str:
     """
     Options analytics beyond a raw chain: implied-volatility rank and percentile
     against the past year of realised volatility, the ATM straddle's implied move,
@@ -2825,9 +2837,18 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
     implied move is enough, get_options_chain returns that alone; to screen for
     contracts trading unusually heavily use get_unusual_options.
 
+    No cheap-or-dear call is made unless you ask for one, which is the same rule
+    get_market_analysis follows and for the same reason: the threshold is fixed at
+    rank 65, nothing here has backtested it, and an unvalidated call anchors
+    judgment even when it is labelled unvalidated. The measurements are the answer.
+
     Args:
         symbol: Ticker symbol (e.g. MU, NVDA).
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest expiry.
+        include_verdict: Set true to also print whether options look cheap or dear.
+            Off by default. Still withheld when a scheduled event falls inside the
+            expiry, or when the rank is the realised-volatility proxy rather than a
+            true IV rank — in both cases the number cannot support the claim.
     """
     import datetime as _dt
     from math import log, sqrt, exp, erf, pi
@@ -2970,24 +2991,50 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             out += (f"* **{label}**: `{iv_rank:.0f}/100`"
                     f"  |  **percentile**: `{iv_pct:.0f}%`\n"
                     f"  <br>*Basis: {rank_basis}.*\n")
-            # Withheld when a dated event falls inside the expiry. Implied
-            # volatility is routinely elevated ahead of a scheduled release, so
-            # a high rank there is not evidence of a mispricing in either
-            # direction -- it is the event being priced. This was the only line
-            # in the server that told a reader what to do, and it inverted on a
-            # date the tool already had in hand. No reading is offered instead
-            # of one that is wrong exactly when it matters most.
-            if window_events:
-                out += ("  *No cheap/dear reading while a scheduled event falls "
-                        "inside this expiry: implied volatility is routinely "
-                        "elevated beforehand, so the rank is not evidence of a "
-                        "mispricing either way.*\n")
-            else:
-                verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
-                           else "Options look cheap — favours buying premium." if iv_rank < 35
-                           else "")
-                if verdict:
-                    out += f"  *{verdict}*\n"
+            # Off unless asked for, which is get_market_analysis's rule and the
+            # reason it gives: an unvalidated score anchors judgment even when
+            # it is labelled unvalidated, so the default is to hand back the
+            # evidence and leave the call to the reader. This tool printed a
+            # directional call unconditionally -- the strongest-sounding
+            # sentence the server emits, from a fixed threshold nothing here
+            # has ever tested.
+            if include_verdict:
+                if window_unreachable:
+                    # "The calendar did not answer" is not "nothing is
+                    # scheduled". The disclosure line above already refuses to
+                    # collapse those two; the verdict has to refuse as well, or
+                    # a transient outage silently re-enables the reading the
+                    # event guard exists to suppress. That is how this printed
+                    # on AMD: one failed BLS fetch, an empty event list, and a
+                    # cheap/dear call on a same-day expiry with an Employment
+                    # Situation release inside it.
+                    out += ("  *No cheap/dear reading: the release calendar could "
+                            "not be reached, so whether an event falls inside this "
+                            "expiry is unknown.*\n")
+                elif window_events:
+                    # Implied volatility is routinely elevated ahead of a
+                    # scheduled release, so a high rank there is the event
+                    # being priced rather than a mispricing.
+                    out += ("  *No cheap/dear reading while a scheduled event falls "
+                            "inside this expiry: implied volatility is routinely "
+                            "elevated beforehand, so the rank is not evidence of a "
+                            "mispricing either way.*\n")
+                elif rank_is_proxy:
+                    # The proxy ranks implied volatility against REALISED
+                    # volatility, which the basis line already calls a
+                    # different quantity. Ranking one against the other is a
+                    # usable stand-in for context and is not an IV rank, so it
+                    # cannot support a statement about options being dear.
+                    out += ("  *No cheap/dear reading from a proxy rank: this ranks "
+                            "implied volatility against realised volatility, a "
+                            "different quantity, so it cannot say whether options "
+                            "are dear against their own history.*\n")
+                else:
+                    verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
+                               else "Options look cheap — favours buying premium." if iv_rank < 35
+                               else "")
+                    if verdict:
+                        out += f"  *{verdict}*{IV_VERDICT_NOTE}\n"
         else:
             out += f"* **IV rank**: not yet available — {rank_basis}.\n"
         # Which quotes this came from, every time. straddle_price refuses
