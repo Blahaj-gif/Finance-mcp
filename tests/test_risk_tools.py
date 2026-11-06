@@ -6,6 +6,7 @@ is pinned down rather than smoke-tested.
 """
 import datetime
 import os
+import re
 import sys
 
 import pandas as pd
@@ -641,3 +642,470 @@ def test_alignment_keeps_a_clean_book_whole():
 
     rets, bench_ret = srv._align_on_sessions({"A": a, "B": b}, bench)
     assert len(rets) == 3, "three returns from four clean sessions"
+
+
+# =====================================================================
+# Which base the risk budget was sized on
+# =====================================================================
+# The comment in calculate_position_size promises that where equity is
+# unavailable "the output says so rather than presenting a different number
+# under the same name". It did not: the fallback value was printed under the
+# label "equity", and the variable holding the real basis was never read.
+
+def _account_with(monkeypatch, balance):
+    """Re-point the fake broker at a specific balance payload."""
+    class Acct:
+        def get_account_list(self):
+            return [{"account_id": "ACC1", "account_label": "Individual Cash"}]
+
+        def get_account_balance(self, account_id):
+            return balance
+
+        def get_account_position(self, account_id):
+            return []
+
+    import webull.trade.trade_client as tc
+    monkeypatch.setattr(tc, "TradeClient",
+                        lambda api: type("T", (), {"account_v2": Acct()})())
+
+
+def test_position_size_names_equity_as_the_base_when_the_broker_reports_it(
+        monkeypatch, fake_account):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                      risk_percent=1.0, entry_price=100.0)
+
+    assert "USD equity**: `$10,000.00`" in out, out
+    assert "buying power" not in out.split("Suggested size")[0], (
+        "equity was available; nothing should mention sizing on buying power")
+
+
+def test_position_size_says_when_it_sized_on_buying_power_instead(
+        monkeypatch, fake_account):
+    """
+    Equity unavailable -- the balance carries no line for the account currency,
+    which is what a non-Webull broker looks like here. The number is the same
+    either way; the label was the lie.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    _account_with(monkeypatch, {
+        "total_asset_currency": "THB",
+        "account_currency_assets": [
+            {"currency": "USD", "cash_balance": "0.00",
+             "buying_power": "10000.00", "market_value": "0.00"},
+        ],
+    })
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                      risk_percent=1.0, entry_price=100.0)
+
+    assert "USD buying power**: `$10,000.00`" in out, out
+    assert "USD equity**" not in out, "buying power must not be labelled equity"
+    assert "would not report equity" in out, (
+        "the substitution has to be stated, not inferred from the label")
+
+
+# =====================================================================
+# Which quotes the straddle was priced from
+# =====================================================================
+# options_math.straddle_price refuses lastPrice on purpose: the audit found it
+# up to 31 days stale on illiquid strikes. get_options_analytics recorded the
+# basis in `straddle_quality` and printed none of it, so an implied move
+# derived from month-old trades read exactly like one derived from live quotes.
+
+def _chain_row(strike, bid, ask, last):
+    return {"strike": strike, "bid": bid, "ask": ask, "lastPrice": last,
+            "impliedVolatility": 0.30, "volume": 100, "openInterest": 500}
+
+
+def _stub_chain(monkeypatch, calls, puts, expiry="2026-12-18"):
+    class Chain:
+        def __init__(self):
+            self.calls = pd.DataFrame(calls)
+            self.puts = pd.DataFrame(puts)
+
+    class Ticker:
+        options = (expiry,)
+
+        def option_chain(self, which):
+            return Chain()
+
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker", lambda s: Ticker())
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=260: (flat_frame(n=260, price=100.0),
+                                                 "Webull OpenAPI"))
+
+
+def test_the_straddle_states_the_quotes_it_was_priced_from(monkeypatch):
+    """A two-sided market on both legs. Good case, still labelled."""
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "ATM straddle" in out, out
+    assert "Basis: mid" in out, out
+    assert "stale" not in out.lower().split("put/call")[0], (
+        "a clean two-sided market must not carry the staleness caveat")
+
+
+def test_a_straddle_priced_off_last_trades_is_labelled_as_such(monkeypatch):
+    """
+    No bid and no ask on either leg, so quote_mid falls to the last trade and
+    straddle_price reports quality "last/last". The straddle is still returned
+    and the move is still computed -- it is the provenance that was missing.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 0.0, 0.0, 5.0)],
+                puts=[_chain_row(100.0, 0.0, 0.0, 4.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    # The straddle is still priced and still reported -- 5.00 + 4.00 off the
+    # last trades. Only the provenance was missing.
+    assert "`$9.00`" in out, out
+    assert re.search(r"±\d+\.\d\d%\*\* move by expiry", out), out
+    assert "±0.00%" not in out, out
+    assert "Basis: last/last" in out, out
+    assert "31 days" in out, (
+        "the measured staleness is the reason this matters and belongs in the "
+        "output, not only in a source comment")
+
+
+def test_an_unpriceable_straddle_does_not_report_a_zero_percent_move(monkeypatch):
+    """
+    No bid, no ask and no last trade. straddle_price declines, and the old
+    fallback summed two lastPrice columns of 0.0 and announced "market implies
+    a +/-0.00% move by expiry" -- a fabricated certainty, and the most
+    confident-sounding line in the whole output.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 0.0, 0.0, 0.0)],
+                puts=[_chain_row(100.0, 0.0, 0.0, 0.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "0.00%" not in out, f"a move of zero must never be asserted: {out}"
+    assert "ATM straddle" in out, out
+    assert "not priceable" in out or "unavailable" in out, (
+        f"it has to say why there is no implied move: {out}")
+
+
+# =====================================================================
+# Scheduled events: dated facts, not advice
+# =====================================================================
+# An event is named in these outputs because it changes what the reader is
+# looking at, never because it explains a move that already happened. Three
+# tools carry it and none of them tells anyone what to do about it.
+
+def _raise_offline(*a, **k):
+    raise OSError("no dns")
+
+
+def _stub_calendars(monkeypatch, earnings_date=None, earnings_status="confirmed",
+                    releases=(), fomc=(), failures=()):
+    """Both calendars, offline. Dates are passed in, so nothing is time-dependent."""
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": earnings_date,
+                                     "status": earnings_status})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases",
+                        lambda **kw: (list(releases), list(failures)))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings",
+                        lambda: list(fomc))
+
+
+def test_only_events_inside_the_window_are_named(monkeypatch, real_scheduled_events):
+    today = datetime.date(2026, 11, 6)
+    _stub_calendars(
+        monkeypatch,
+        earnings_date=datetime.date(2026, 11, 12),          # 6 days out: inside
+        releases=[{"release": "Consumer Price Index",
+                   "date": datetime.date(2026, 11, 10)}],
+        fomc=[{"date": datetime.date(2026, 12, 16)}])       # 40 days out: outside
+
+    found, unreachable = real_scheduled_events("AAA", 30, today=today)
+
+    assert [e["what"] for e in found] == ["Consumer Price Index", "earnings"], found
+    assert unreachable == []
+    assert [e["date"] for e in found] == sorted(e["date"] for e in found), \
+        "events must come back chronologically"
+
+
+def test_an_unreachable_calendar_is_never_reported_as_a_clear_window(
+        monkeypatch, real_scheduled_events):
+    """
+    "Nothing is scheduled" and "the calendar did not answer" lead to opposite
+    decisions. Collapsing them is the one thing this must not do.
+    """
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": None,
+                                     "status": "unknown"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    found, unreachable = real_scheduled_events(
+        "AAA", 30, today=datetime.date(2026, 11, 6))
+    assert found == []
+    assert unreachable, "a failed source has to be reported as a failed source"
+
+    line = srv.event_disclosure(found, unreachable, "in the next 30 days")
+    assert "unknown" in line, line
+    assert "not a statement that nothing is scheduled" in line, line
+
+
+def test_a_dead_calendar_does_not_take_the_price_tool_down(
+        monkeypatch, real_scheduled_events):
+    """Every source is a network read, and this is an addition to someone else's answer."""
+    monkeypatch.setattr(srv.earnings, "next_report", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", _raise_offline)
+
+    found, unreachable = real_scheduled_events(
+        "AAA", 30, today=datetime.date(2026, 11, 6))
+    assert found == []
+    assert len(unreachable) == 3, unreachable
+
+
+def test_the_event_line_never_tells_the_reader_what_to_do():
+    """
+    A disclosure, not a suggestion. What to make of a date is the reader's --
+    the same stance get_market_analysis takes in withholding a verdict.
+    """
+    line = srv.event_disclosure(
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "estimated"}], [], "in the next 30 days")
+
+    assert "earnings 2026-11-12 (estimated)" in line, line
+    advice = ("consider", "should", "recommend", "avoid", "favours", "suggest",
+              "advise", "better to", "you may want", "it is wise")
+    reads_as_advice = [w for w in advice if w in line.lower()]
+    assert not reads_as_advice, f"the event line reads as advice: {reads_as_advice} in {line!r}"
+
+
+def test_an_estimated_date_is_marked_and_a_firm_one_is_not():
+    """An estimated earnings date and a published CPI date are different facts."""
+    firm = srv.event_disclosure(
+        [{"what": "Consumer Price Index", "date": datetime.date(2026, 11, 10),
+          "confidence": "scheduled"}], [], "before this expiry")
+    assert "(scheduled)" not in firm, f"a firm schedule needs no qualifier: {firm}"
+
+    soft = srv.event_disclosure(
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "disputed"}], [], "before this expiry")
+    assert "(disputed)" in soft, soft
+
+
+def test_the_options_cheap_or_dear_reading_is_withheld_when_an_event_is_due(monkeypatch):
+    """
+    This was the only line in the server that told a reader what to do, and it
+    inverted on a date the tool already had in hand: implied volatility is
+    routinely elevated before a scheduled release, so a high rank there is the
+    event being priced rather than a mispricing.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    # A rank of 80 is what used to print "favours selling premium". Pinned
+    # rather than engineered out of a price series, so the branch under test is
+    # the one being exercised: flat_frame's realised vol is a single value, so
+    # the proxy correctly declines and there would be no reading either way.
+    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 80.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: (
+        [{"what": "earnings", "date": datetime.date(2026, 12, 1),
+          "confidence": "confirmed"}], []))
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "Scheduled before this expiry" in out, out
+    assert "earnings 2026-12-01" in out, out
+    assert "favours selling premium" not in out, out
+    assert "favours buying premium" not in out, out
+    assert "not evidence of a mispricing either way" in out, out
+
+
+def test_the_cheap_or_dear_reading_survives_when_the_window_is_clear(monkeypatch):
+    """
+    The withholding must be conditional on the date, not a quiet removal of the
+    behaviour. With nothing scheduled, an IV rank of 80 still reads as dear.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 80.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA")
+    assert "favours selling premium" in out, out
+    assert "not evidence of a mispricing either way" not in out, out
+
+
+def test_a_clear_expiry_says_so_rather_than_staying_silent(monkeypatch):
+    """The empty window is what makes the rank below readable as a rank."""
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA")
+    assert "Scheduled before this expiry**: nothing found" in out, out
+
+
+def test_position_size_names_the_event_and_does_not_resize_for_it(
+        monkeypatch, fake_account):
+    """
+    A stop is a price at which an order is sent, not one at which it fills, and
+    a scheduled event is the ordinary way a name opens through it. Saying so is
+    the tool's job. Quietly changing the share count is not.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0),
+                                                 "Webull OpenAPI"))
+
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+    quiet = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                        risk_percent=1.0, entry_price=100.0)
+
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: (
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "confirmed"}], []))
+    noisy = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                        risk_percent=1.0, entry_price=100.0)
+
+    assert "earnings 2026-11-12" in noisy, noisy
+    assert "Stated, not sized for" in noisy, noisy
+    assert "earnings" not in quiet.lower(), quiet
+
+    size = "**10.0000 shares**"
+    assert size in quiet and size in noisy, (
+        "the disclosure must not change the number it is disclosed beside")
+
+
+def test_the_event_lookup_is_memoised_per_symbol_horizon_and_anchor(
+        monkeypatch, real_scheduled_events):
+    """
+    get_company_profile runs its sections concurrently and "price" is one of
+    the defaults, so one profile request asks for the same symbol's calendar at
+    least once and up to three times. The BLS and Fed schedules are cached
+    inside econ_calendar for 24h; the Yahoo earnings date is not, and that was
+    the measured 0.44s of warm cost per repeat.
+    """
+    calls = []
+
+    def counted(sym):
+        calls.append(sym)
+        return {"symbol": sym, "date": datetime.date(2026, 11, 12),
+                "status": "confirmed"}
+
+    monkeypatch.setattr(srv.earnings, "next_report", counted)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    today = datetime.date(2026, 11, 6)
+    first, _ = real_scheduled_events("AAA", 30, today=today)
+    second, _ = real_scheduled_events("AAA", 30, today=today)
+
+    assert first == second
+    assert len(calls) == 1, f"the calendar was consulted {len(calls)} times, not once"
+
+    # A different anchor is a different question and must not collide.
+    real_scheduled_events("AAA", 30, today=datetime.date(2026, 12, 20))
+    assert len(calls) == 2, "a different anchor served a cached answer"
+
+    # So is a different horizon.
+    real_scheduled_events("AAA", 7, today=today)
+    assert len(calls) == 3, "a different horizon served a cached answer"
+
+
+def test_a_caller_mutating_its_result_cannot_poison_the_memo(
+        monkeypatch, real_scheduled_events):
+    """The cache hands out copies, so sorting or clearing a result is harmless."""
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym,
+                                     "date": datetime.date(2026, 11, 12),
+                                     "status": "confirmed"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    today = datetime.date(2026, 11, 6)
+    handed_out, _ = real_scheduled_events("AAA", 30, today=today)
+    assert len(handed_out) == 1
+    handed_out.clear()
+    handed_out_again, _ = real_scheduled_events("AAA", 30, today=today)
+    assert len(handed_out_again) == 1, "the caller's clear() reached the cache"
+
+
+def test_only_the_nearest_occurrence_of_a_repeated_release_is_named(
+        monkeypatch, real_scheduled_events):
+    """
+    A 30-day window catches two Employment Situation releases. The second tells
+    a reader nothing the first did not, and a disclosure listing four dates is
+    one nobody reads. Measured on AAPL: it turned a three-item line into four.
+    """
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": None,
+                                     "status": "unknown"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([
+        {"release": "Employment Situation", "date": datetime.date(2026, 12, 4)},
+        {"release": "Consumer Price Index", "date": datetime.date(2026, 11, 10)},
+        {"release": "Employment Situation", "date": datetime.date(2026, 11, 6)},
+    ], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    found, _ = real_scheduled_events("AAA", 30, today=datetime.date(2026, 11, 6))
+
+    assert [(e["what"], e["date"]) for e in found] == [
+        ("Employment Situation", datetime.date(2026, 11, 6)),
+        ("Consumer Price Index", datetime.date(2026, 11, 10)),
+    ], found
+
+
+def test_an_unreachable_source_is_remembered_for_a_minute_not_a_quarter_hour(
+        monkeypatch, real_scheduled_events):
+    """
+    Caching a failure as long as a success means one network blip keeps telling
+    the reader the calendar is down for fifteen minutes after it came back --
+    and "unreachable" is the answer this lookup exists to avoid overstating.
+    A clean result keeps its full term; a failed one is retried a minute later.
+    """
+    import time
+
+    monkeypatch.setattr(srv, "TTL_EVENTS_FAILED", 0.3)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+    today = datetime.date(2026, 11, 6)
+
+    attempts = []
+
+    def failing(sym):
+        attempts.append(sym)
+        raise OSError("calendar down")
+
+    monkeypatch.setattr(srv.earnings, "next_report", failing)
+    _, first = real_scheduled_events("AAA", 30, today=today)
+    real_scheduled_events("AAA", 30, today=today)
+    assert first, "the failure has to be reported"
+    assert len(attempts) == 1, "a failure is cached briefly rather than hammered"
+
+    time.sleep(0.4)
+    real_scheduled_events("AAA", 30, today=today)
+    assert len(attempts) == 2, (
+        "past the short window a failed source must be retried, or a blip "
+        "outlives the outage")
+
+    # And the other half: a clean answer is not thrown away after a minute.
+    srv.EVENT_CACHE.clear()
+    attempts.clear()
+
+    def clean(sym):
+        attempts.append(sym)
+        return {"symbol": sym, "date": None, "status": "unknown"}
+
+    monkeypatch.setattr(srv.earnings, "next_report", clean)
+    real_scheduled_events("AAA", 30, today=today)
+    time.sleep(0.4)
+    real_scheduled_events("AAA", 30, today=today)
+    assert len(attempts) == 1, "a complete result must keep its full TTL"

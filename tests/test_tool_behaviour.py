@@ -1047,8 +1047,8 @@ def test_a_draft_that_the_broker_would_refuse_never_reaches_the_queue(monkeypatc
     (1, 0.10, True),          # at the boundary the step no longer applies
 ])
 def test_the_penny_quantity_step_matches_what_the_broker_enforces(qty, price, clean):
-    order = srv.broker.build_order("ZETA", "BUY", qty, "LMT", price)
-    assert (srv.broker.order_rule_violations(order) == []) is clean
+    order = broker.build_order("ZETA", "BUY", qty, "LMT", price)
+    assert (broker.order_rule_violations(order) == []) is clean
 
 
 def test_the_rules_check_is_advisory_not_authoritative():
@@ -1057,9 +1057,9 @@ def test_the_rules_check_is_advisory_not_authoritative():
     the broker has to agree with. Anything it does not know about must still
     reach the broker.
     """
-    order = srv.broker.build_order("ZETA", "BUY", 5, "LMT", 26.0)
+    order = broker.build_order("ZETA", "BUY", 5, "LMT", 26.0)
     order["some_future_field"] = "unknown to us"
-    assert srv.broker.order_rule_violations(order) == []
+    assert broker.order_rule_violations(order) == []
 
 
 def test_the_offline_rules_run_before_anything_that_needs_the_network():

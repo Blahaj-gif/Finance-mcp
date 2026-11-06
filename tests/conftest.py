@@ -56,3 +56,54 @@ def _empty_bar_cache_between_tests():
     barcache.clear()
     yield
     barcache.clear()
+
+
+#: Captured the first time the stub is installed, so the tests that exercise
+#: the real lookup can still reach it.
+_REAL_SCHEDULED_EVENTS = None
+
+
+@pytest.fixture(autouse=True)
+def _no_calendar_lookups(monkeypatch):
+    """
+    No test reaches a calendar over the network.
+
+    The event disclosure added to get_market_analysis, calculate_position_size
+    and get_options_analytics calls two live calendars -- Yahoo for the issuer's
+    earnings date and the BLS/Fed schedule pages for releases. The suite is
+    offline by contract: the comment on the tests workflow says every test runs
+    against recorded payloads or stubs, and that a test needing the network is a
+    bug in the test.
+
+    Measured before this existed: 3.9s per call, and test_risk_tools alone went
+    from 21s to 32s, all of it real HTTP.
+
+    Stubbed to "nothing scheduled", which is the quiet default. A test that
+    wants an event in the window sets its own return value, and that assignment
+    wins because it runs after this fixture.
+    """
+    global _REAL_SCHEDULED_EVENTS
+    import finance_mcp as srv
+    if _REAL_SCHEDULED_EVENTS is None:
+        _REAL_SCHEDULED_EVENTS = srv.scheduled_events
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    # The real lookup memoises on (symbol, horizon, anchor) for 15 minutes, so
+    # the tests that exercise it -- all of which use the same symbol and the
+    # same explicit anchor -- would serve each other's stubbed calendars. Same
+    # reasoning as the bar cache above: a test must read only what it wrote.
+    srv.EVENT_CACHE.clear()
+    yield
+    srv.EVENT_CACHE.clear()
+
+
+@pytest.fixture
+def real_scheduled_events():
+    """
+    The unstubbed scheduled_events, for the tests that exercise it directly.
+
+    They stub its two calendars instead, so nothing here opens a socket either.
+    """
+    assert _REAL_SCHEDULED_EVENTS is not None, (
+        "the autouse stub has not run yet, so the original was never captured")
+    return _REAL_SCHEDULED_EVENTS

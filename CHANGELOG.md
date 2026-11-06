@@ -47,6 +47,155 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   before 3.12 and a `SyntaxWarning` after, so running the suite only on 3.10
   could never surface it. A guard now compiles every first-party file with
   `SyntaxWarning` promoted to an error.
+- **That guard could not fire, because the floor it assumed was enforced
+  nowhere.** Raising `requires-python` to 3.12 moved pyproject, the CI matrix
+  and the Dockerfile. It did not move the only virtualenv in the tree, still
+  3.10.11 carrying `fastmcp` 3.4.6 against a declared `fastmcp>=4`. The suite
+  passed there, all 1539 of it, and the escape scan reported a clean tree while
+  reading nothing — invalid escapes do not warn before 3.12. A test now asserts
+  the running interpreter satisfies `requires-python`, and the scan compiles a
+  planted escape first and fails loudly if the interpreter cannot see it. Both
+  were confirmed failing on 3.10 before the virtualenv was rebuilt on 3.12.13.
+- **The chart's "95% CI" was the spread of a random walk.**
+  `forecaster.run_ar_forecast` fits an AR(p) on log returns and then drew its
+  bands at `sqrt(k) * sigma`, a formula that ignores the coefficients it had
+  just estimated. A shock at step one is still propagating at step fifteen, so
+  the cumulative spread grows faster than `sqrt(k)` whenever those coefficients
+  are not zero: measured 2.81x too narrow on an AR(1) with phi 0.69 at fifteen
+  steps — a 95% band of 6.07–6.98 where it should have been 5.35–7.93. It was
+  right only in the limit where the model is pointless, and wrong in the
+  direction that makes a position look safer than it is. Shocks are now
+  propagated through the fitted recursion, and the docstring states that
+  coefficient uncertainty remains excluded, so the band is a floor on the true
+  interval rather than an estimate of it.
+- **The same module drew forecast bars on days the exchange is shut**, and was
+  the only logic module here with no tests. It stepped over Saturdays by hand —
+  only Saturdays, so a Sunday reachable from a Saturday bar survived, and no
+  market holiday was handled at all — which put a bar on Thanksgiving in any
+  fifteen-session projection from 21 November 2025. It now asks
+  `market_calendar.is_trading_day`, the calendar the rest of the project
+  already uses, and leaves intraday spacing alone because a trading-day walk
+  would spread fifteen hourly bars over fifteen days. The residual scale also
+  divides by the degrees of freedom left after fitting rather than using
+  numpy's population deviation, which had drawn every band slightly too tight.
+  The headline test simulates 120,000 paths from the fitted parameters and
+  compares the band against where they land, so an error copied into both the
+  code and the test cannot pass.
+- **`calculate_position_size` printed a budget sized on buying power under the
+  label "equity".** The comment above the fallback promised the opposite — that
+  where equity is unavailable "the output says so rather than presenting a
+  different number under the same name" — and the variable holding the real
+  basis was written twice and read nowhere. Equity and buying power are
+  different quantities, so the same risk percentage against one is a different
+  trade from the same percentage against the other. The label now names the
+  base it actually used and says why when it is not equity.
+- **`get_options_analytics` reported an implied move off quotes it declined to
+  trust, and invented one when it had none.** `options_math.straddle_price`
+  refuses `lastPrice` on purpose: the chain audit measured it up to 31 days
+  stale on illiquid strikes. The caller recorded the basis in
+  `straddle_quality` and printed none of it, so a move derived from month-old
+  trades read exactly like one derived from a two-sided market — while the
+  greeks table two lines below already printed a per-row `Quote` column. Worse,
+  when neither ATM leg had a bid, an ask *or* a last trade, the fallback summed
+  two zero columns and announced `market implies a ±0.00% move by expiry`: a
+  fabricated certainty, and the most confident-sounding line in the output. The
+  basis is now stated every time, a stale leg carries the measured caveat, and
+  an unpriceable straddle says so instead of forecasting stillness.
+- **There was no linter, anywhere.** No ruff, black, flake8 or pre-commit, and
+  nothing in CI, which is how a module with no docstring and the two defects
+  above went unremarked. `ruff check` is now a CI step and a dev dependency,
+  selecting the pyflakes (`F`) rules only — the ones that find defects rather
+  than opinions. Both bugs above were sitting in it as unused assignments. The
+  style rules stay off deliberately: 45 of this codebase's E402 hits are
+  deliberate late imports with reasons written beside them, and a reformat is
+  not a review. Clearing the 36 findings removed 25 dead imports, a duplicate
+  `re`, four f-strings with nothing to interpolate, and a line in
+  `test_data_integrity.py` that called a function which does not exist —
+  overwritten by the next statement, so it had never once run. Two kept their
+  calls and lost only the dead name, with a comment saying why: the CSV header
+  consumed by `central_banks`, and `primary_account_id()` in `draft_order`,
+  which is there to fail — it turns an unreachable account into a SAFETY BLOCK
+  rather than a draft raised blind. A test asserts the gate stays wired, so
+  removing it now takes an argument rather than a quiet YAML deletion.
+- **Three tool descriptions were the weakest prompt the server hands a model.**
+  A description is the only thing read when choosing whether to call something,
+  so what the server knows and does not put there is knowledge the caller does
+  not have. `get_unusual_options` claimed to "detect smart money positioning"
+  from two threshold tests over a feed that carries no identity — the one
+  unearned inference in a codebase built to strip them. `get_multi_timeframe`
+  and `scan_watchlist` advertised a "Confluence Score" and a "ranked verdict
+  table" without saying either is the fixed-weight heuristic that
+  underperformed buy-and-hold in backtest; their *output* has always carried
+  that caveat, but a model reads the caveat only after deciding the number was
+  worth asking for, which is the anchoring effect `get_market_analysis`'s own
+  description gives as its reason for withholding a verdict. And routing was
+  one-directional across five tools of thirty-six: `get_options_chain` named
+  both siblings, neither named it back, and `get_edgar_filings` and
+  `read_filing` did not reference each other at all despite one listing filings
+  and the other reading inside them. All three families now route both ways.
+  Three tests assert it: mutual references per family, a banned list of claims
+  the data cannot support, and — derived from the source rather than listed, so
+  a fourth one cannot slip in — every tool that appends `HEURISTIC_NOTE` must
+  call the score a heuristic in its description. Cost: +553 tokens on
+  `tools/list`, against a single wrong call into the most expensive options
+  tool, which returns more than that.
+- **Nothing asserted the freshness rule, so an audit for it read six false
+  gaps.** `freshness_line`'s docstring states that every price-bearing answer
+  says which bar it is quoting and how old it is. Thirteen tools fetch bars and
+  only seven call it — which looks like a gap and is not one. The rule is met
+  two ways by design: a single-symbol answer gets one stamp under the heading,
+  and a sweep gets `bar_age` per row, for the reason that function's own
+  docstring gives — one stale name among twenty fresh ones is invisible in a
+  summary line, and a watchlist scan or sector heatmap is where that hides. All
+  six sweeps were checked and all six render it, as an `As of`, `Age` or `Vol
+  as of` column. A test now asserts the rule as it stands: disclosure by either
+  mechanism, and that `bar_age` callers render what they computed, since a
+  dropped staleness label would leave stale prices looking live while the code
+  appeared to handle it. Confirmed to fail both ways — a stamp removed from a
+  single-symbol tool, and a sweep that computes the age and renders none of it.
+- **Three tools now name the scheduled events inside their own horizon, and
+  one of them stopped giving advice that inverted on a date it already had.**
+  `get_options_analytics` printed "Options look expensive — favours selling
+  premium" on any IV rank above 65, with no check for whether earnings or a
+  macro release fell inside the expiry. Implied volatility is routinely
+  elevated ahead of a scheduled release, so a high rank there is the event
+  being priced rather than a mispricing — and this was the only line in the
+  server that told a reader what to do. It is now withheld whenever an event
+  sits in the window, with the reason given, and kept unchanged when the window
+  is clear.
+  `calculate_position_size` and `get_market_analysis` gained the same dated
+  line. The data was already here and unused: `earnings.next_report` carries
+  its own confirmed/estimated/disputed confidence and never raises, and
+  `econ_calendar` already had the BLS, FOMC and BEA schedules. Twelve of
+  thirteen price-bearing tools used none of it.
+  Deliberately a disclosure and not a suggestion. An event is named because it
+  changes what the reader is looking at, never because it explains a move that
+  already happened — "up 3% on CPI optimism" is a claim no feed here supports,
+  and two true facts side by side are enough to invite it. A test asserts the
+  line contains no advice verb. Position sizing says "stated, not sized for"
+  and another test proves the share count is byte-identical with and without
+  the event, so the disclosure cannot quietly become a judgement.
+  An unreachable calendar is reported as unreachable, never as a clear window:
+  "nothing is scheduled" and "the calendar did not answer" lead to opposite
+  decisions. All three sources failing leaves the host tool's answer intact.
+  The lookup costs two live calendars, so `conftest` stubs it to "nothing
+  scheduled" for every test — the suite is offline by contract and this added
+  3.9s per call before that. The whole suite was then re-run with outbound HTTP
+  blocked at `urllib` and `requests`: 1573 passed, which is the first time that
+  claim has been tested rather than asserted in a CI comment.
+  Then reviewed again, which found three things the first pass missed. `"price"`
+  is a default section of `get_company_profile`, and its sections run
+  concurrently, so one profile request asked for the same symbol's calendar up
+  to three times — the lookup is now memoised on (symbol, horizon, anchor) and
+  a repeat went from 0.44s to 0.000s. A 30-day window returned two Employment
+  Situation releases; only the nearest occurrence of a repeated event is now
+  named, which took a measured four-item line back to three. And a failure was
+  being cached as long as a success, so one network blip would have kept
+  reporting the calendar as unreachable for a quarter of an hour after it came
+  back — failures now expire in a minute while complete answers keep their full
+  term. The memo also leaked between the three tests that share a symbol and an
+  anchor, which those tests caught; `conftest` clears it per test for the same
+  reason it clears the bar cache.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

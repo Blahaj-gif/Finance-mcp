@@ -43,7 +43,6 @@ Two structural differences from Webull that the protocol had to absorb:
 """
 import json
 import os
-import time
 import urllib.error
 import urllib.parse
 import urllib.request

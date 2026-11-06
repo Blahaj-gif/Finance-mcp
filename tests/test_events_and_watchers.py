@@ -5,7 +5,6 @@ feed can be a string in the test, which is the only way to assert on a filing
 that landed at a particular moment.
 """
 import json
-import os
 
 import pytest
 

@@ -23,27 +23,197 @@ import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
 import dashboard.order_queue as order_queue
-import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
 import dashboard.capabilities as capabilities
 import dashboard.live_signals as live_signals
 import dashboard.macro_watch as macro_watch
-import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 import dashboard.events as events
-import dashboard.watchers as watchers
+import dashboard.earnings as earnings
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
 # string. A tool that returns "Error: ..." as ordinary text is indistinguishable
 # from content, which is how untrustworthy prices get read as authoritative.
-from dashboard.webull_client import DataIntegrityError, StaleDataError, fallback_warning
+from dashboard.webull_client import DataIntegrityError, fallback_warning
 
 # Every tool that prints a consensus verdict carries this. The score is a
 # hand-tuned weighting, and presenting a number between -5 and +5 without that
 # context invites it to be read as a measured probability.
 HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over five indicators, not a validated edge — backtested over 250 daily bars it underperformed buy & hold on MU, SPY and NVDA. Read it as a summary of what the indicators currently say.*')
+
+# Said when the risk budget had to be sized on buying power because the broker
+# would not report equity. The two are different quantities -- buying power
+# reflects what can be deployed, equity what is owned -- so the same risk
+# percentage against one is not the same trade as against the other. Naming the
+# substitution matters more than naming which is larger, which depends on the
+# account.
+EQUITY_FALLBACK_NOTE = (
+    " — this broker would not report equity for the account, so the risk budget"
+    " is sized on buying power instead. The two are different quantities, so the"
+    " same risk percentage is a different trade.")
+
+# Said when either straddle leg was priced from a last trade rather than a live
+# market. Not a generic caveat: 31 days is the measured staleness from the
+# AAPL/SPY/NVDA/MU chain audit, and a stale straddle understates the move,
+# which is the direction that matters to someone selling premium against it.
+STALE_STRADDLE_NOTE = (
+    " — at least one leg has no live market, so this uses a last trade, measured"
+    " up to 31 days stale on illiquid strikes; a stale straddle understates the"
+    " move")
+
+#: Macro releases worth naming beside one symbol's price or option chain.
+#: Deliberately three. The full calendar is get_economic_calendar's job, and a
+#: disclosure that lists eight BLS products is a disclosure nobody reads.
+MACRO_EVENT_SLUGS = ("cpi", "ppi", "empsit")
+
+#: Short-lived memo for the event lookup.
+#:
+#: get_company_profile runs its sections concurrently and "price" is one of the
+#: defaults, so a single profile request asks for the same symbol's calendar at
+#: least once and up to three times if "options" and "consensus" are added. The
+#: BLS and Fed schedules are already cached inside econ_calendar for 24h; the
+#: Yahoo earnings date is not, and that is the whole of the measured 0.44s warm
+#: cost. Memoising the composed answer removes the repeat entirely.
+#:
+#: Separate instance from econ_calendar.CACHE on purpose: clearing one must
+#: never clear the other, which is what a test isolating this would do.
+EVENT_CACHE = econ_calendar.TTLCache()
+TTL_EVENTS = 900          # 15 minutes. A scheduled date does not move inside one.
+
+#: A result with an unreachable source is held for a minute, not fifteen.
+#: Remembering a failure for as long as a success means one network blip keeps
+#: telling the reader the calendar is down for a quarter of an hour after it
+#: came back -- and "unreachable" is the answer this whole lookup exists to
+#: avoid overstating. A minute is still enough that a calendar which is
+#: genuinely down is not hammered once per tool call.
+TTL_EVENTS_FAILED = 60
+
+#: How far ahead the price and sizing tools look for a scheduled event. The
+#: options tool uses its own expiry instead, which is the horizon that actually
+#: applies to the contract being priced.
+EVENT_HORIZON_DAYS = 30
+
+
+def scheduled_events(symbol, days_ahead, today=None):
+    """
+    Dated events inside a window. Facts, and deliberately nothing more.
+
+    An event is named here because it changes what the reader is looking at,
+    never because it explains a move that already happened. "Up 3% on CPI
+    optimism" is a claim no feed in this project supports, and two true facts
+    printed side by side are enough to invite it — so this returns dates and
+    nothing causal, and the callers print them under the word "scheduled".
+
+    Nothing here tells anyone what to do about a date. What to make of it is
+    the reader's, which is the same stance get_market_analysis takes when it
+    declines to hand back a verdict by default.
+
+    Never raises. Every source is a network read and this is an addition to
+    someone else's answer, so an unreachable calendar has to degrade into
+    saying it was unreachable rather than taking a price tool down with it.
+    Returns (events, unreachable).
+    """
+    found, unreachable = [], []
+    anchor = market_calendar.eastern_now().date() if today is None else today
+
+    # Keyed on the anchor as well as the symbol, so a caller that passes an
+    # explicit date never receives an answer computed for a different one.
+    cache_key = (str(symbol).upper(), int(days_ahead), anchor.isoformat())
+    # Within the short window anything cached will do. Past it, only a result
+    # with every source reachable is still worth serving -- so a blip is retried
+    # a minute later while a clean answer keeps its full fifteen.
+    cached = EVENT_CACHE.get(cache_key, TTL_EVENTS_FAILED)
+    if cached is None:
+        complete = EVENT_CACHE.get(cache_key, TTL_EVENTS)
+        cached = complete if (complete and not complete[1]) else None
+    if cached is not None:
+        # Copies. A caller that sorts or mutates the list it was handed must
+        # not be able to rewrite what the next caller is given.
+        return [dict(e) for e in cached[0]], list(cached[1])
+
+    def _inside(when):
+        return when is not None and 0 <= (when - anchor).days <= days_ahead
+
+    # The issuer's own date, carrying the confidence earnings.next_report
+    # derived for it: confirmed, estimated, or disputed between two feeds.
+    try:
+        report = earnings.next_report(symbol)
+        if _inside(report.get("date")):
+            found.append({"what": "earnings", "date": report["date"],
+                          "confidence": str(report.get("status") or "unknown")})
+    except Exception:
+        unreachable.append("issuer earnings calendar")
+
+    try:
+        releases, failures = econ_calendar.upcoming_releases(
+            days_ahead=days_ahead, days_back=0,
+            slugs=list(MACRO_EVENT_SLUGS), today=anchor)
+        for row in releases or []:
+            found.append({"what": row.get("release") or row.get("slug") or "release",
+                          "date": row["date"], "confidence": "scheduled"})
+        unreachable += [str(f) for f in (failures or [])]
+    except Exception:
+        unreachable.append("BLS release schedule")
+
+    try:
+        for meeting in econ_calendar.fetch_fomc_meetings() or []:
+            if _inside(meeting.get("date")):
+                found.append({"what": "FOMC decision", "date": meeting["date"],
+                              "confidence": "scheduled"})
+    except Exception:
+        unreachable.append("FOMC calendar")
+
+    found.sort(key=lambda e: e["date"])
+
+    # One occurrence per event, nearest kept. A 30-day window catches two
+    # Employment Situation releases, and the second tells a reader nothing the
+    # first did not -- measured on AAPL, it turned a three-item line into four.
+    # Sorted first, so "first seen" is "soonest".
+    seen, nearest = set(), []
+    for event in found:
+        if event["what"] in seen:
+            continue
+        seen.add(event["what"])
+        nearest.append(event)
+
+    EVENT_CACHE.put(cache_key, (nearest, list(unreachable)))
+    return [dict(e) for e in nearest], list(unreachable)
+
+
+def event_disclosure(events_found, unreachable, window_text):
+    """
+    One line naming what is scheduled inside a window.
+
+    No imperative and no suggestion: an event here is a disclosure about the
+    horizon, not advice about it. A confidence other than a firm schedule is
+    shown in brackets, because an estimated earnings date and a published CPI
+    date are not the same kind of fact.
+
+    An empty result with a failed source is NOT reported as a clear window.
+    "Nothing scheduled" and "the calendar did not answer" lead to opposite
+    decisions, and collapsing them is the failure this whole file is careful
+    about everywhere else.
+    """
+    if not events_found:
+        if unreachable:
+            return (f"* **Scheduled {window_text}**: unknown — "
+                    f"{', '.join(sorted(set(unreachable)))} could not be reached. "
+                    "This is not a statement that nothing is scheduled.\n")
+        return ""
+
+    named = " · ".join(
+        f"{e['what']} {e['date']:%Y-%m-%d}"
+        + ("" if str(e["confidence"]).lower() in ("scheduled", "confirmed")
+           else f" ({e['confidence']})")
+        for e in events_found)
+    line = f"* **Scheduled {window_text}**: {named}\n"
+    if unreachable:
+        line += (f"  <br>*{', '.join(sorted(set(unreachable)))} could not be "
+                 "reached, so this list may be incomplete.*\n")
+    return line
+
 
 # Initialize FastMCP Server
 mcp = FastMCP("Finance MCP")
@@ -169,6 +339,8 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
 
     This is the usual starting point for a single symbol. For the full picture including
     fundamentals, filings and insider activity, call get_company_profile instead of chaining calls.
+    If you only need the bars, get_ohlcv is cheaper; to ask whether the daily, hourly and
+    15-minute pictures agree, use get_multi_timeframe.
 
     No BUY/SELL score is produced unless you ask for one. The composite verdict is a
     fixed-weight heuristic that underperformed buy-and-hold in backtest, and an
@@ -310,6 +482,15 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
 """
         out = (webull_client.freshness_line(df, source, interval)
                + fallback_warning(source) + summary)
+
+        # One line, and only when there is something to say. Indicators
+        # describe what price has already done; a scheduled date is the part
+        # that is not in the bars yet. It goes after the readings rather than
+        # beside them, so nothing here reads as a cause for a move above.
+        ahead, ahead_unreachable = scheduled_events(symbol, EVENT_HORIZON_DAYS)
+        out += event_disclosure(ahead, ahead_unreachable,
+                                f"in the next {EVENT_HORIZON_DAYS} days")
+
         if include_verdict:
             out += HEURISTIC_NOTE
         else:
@@ -465,8 +646,12 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
     """
     Fetches raw OHLCV (Open, High, Low, Close, Volume) candlestick bars for a symbol.
     Use when you need the price series itself — to eyeball recent action or do your own
-    maths. For indicators and a reading of them use get_market_analysis.
-    
+    maths.
+
+    This is the cheapest of the three price tools and the only one that returns bars.
+    For indicators and a reading of them use get_market_analysis; for whether the
+    daily, hourly and 15-minute pictures agree use get_multi_timeframe.
+
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
         interval: Bar interval (D, M1, M5, M15, M30, H1, W).
@@ -632,7 +817,12 @@ def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> 
 @mcp.tool()
 def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
     """
-    Scans a list of stock tickers, calculates consensus score & regime, and returns a ranked verdict table.
+    Ranks a list of tickers by consensus score and market regime.
+
+    The ranking is the same fixed-weight heuristic get_market_analysis declines to
+    lead with — it underperformed buy-and-hold in backtest — so read the table as
+    the order in which to look at these names, not as a set of calls. Each row
+    carries the measurements the score came from.
 
     Args:
         symbols: Symbols as a comma-separated string ("AAPL, TSLA, NVDA") or a list (["AAPL", "TSLA"]).
@@ -723,8 +913,18 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
 @mcp.tool()
 def get_multi_timeframe(symbol: str) -> str:
     """
-    Performs multi-timeframe analysis across Daily (D), 1-Hour (H1), and 15-Min (M15) for a symbol to compute a Confluence Score.
-    
+    Whether the daily, hourly and 15-minute pictures agree, for one symbol.
+
+    Runs the same indicator set on D, H1 and M15 and reports each timeframe's
+    consensus score beside a weighted Confluence Score. The score answers one
+    narrow question — do the timeframes point the same way — and is the same
+    fixed-weight heuristic get_market_analysis declines to lead with: it
+    underperformed buy-and-hold in backtest and is not a signal. Read it as a
+    measure of agreement, not of direction.
+
+    For the bars themselves use get_ohlcv; for one timeframe in full detail,
+    with every indicator's own reading, use get_market_analysis.
+
     Args:
         symbol: Stock ticker (e.g. AAPL, KBANK).
     """
@@ -1250,8 +1450,16 @@ def set_alert(symbol: str, condition: str, target_value: float, note: str = "") 
 @mcp.tool()
 def get_unusual_options(symbol: str) -> str:
     """
-    Scans for unusual options activity (Volume > Open Interest or high IV > 50%) to detect smart money positioning.
-    
+    Screens one symbol's option chain for contracts trading unusually heavily.
+
+    Two threshold tests: volume above open interest (more contracts changed hands
+    today than were outstanding) and implied volatility above 50%. Both describe
+    the tape, not who is on the other side of it — the feed carries no identity,
+    so nothing here establishes intent or direction.
+
+    For the chain itself with IV rank and the implied move use get_options_chain;
+    for greeks, skew and the ATM straddle use get_options_analytics.
+
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
@@ -1462,7 +1670,6 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         order_type: LMT (Limit) or MKT (Market).
         limit_price: The limit price if order_type is LMT.
     """
-    import json
     import datetime
     import hashlib
     
@@ -1520,7 +1727,14 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         # re-pricing everything already in it.
         est_notional = None
         try:
-            account_id = adapter.primary_account_id()
+            # Resolved and deliberately not kept: nothing below needs the id,
+            # and this call is here to fail. If the account cannot be resolved
+            # -- bad credentials, wrong regional entity, an entitlement problem
+            # -- the `except` at the end of this block turns that into a SAFETY
+            # BLOCK instead of letting a draft be raised against an account
+            # this process cannot actually see. Removing the call because the
+            # name was unused would delete the check.
+            adapter.primary_account_id()
 
             # What the queue has already promised. Checking this order against
             # the account alone is only correct when it is the only draft.
@@ -2208,7 +2422,6 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
         entry_price: Planned entry. Defaults to the latest close.
         account_currency: Currency line to size against (default USD).
     """
-    from webull.trade.trade_client import TradeClient
     try:
         if risk_percent <= 0 or risk_percent > 100:
             raise ToolError(f"risk_percent must be between 0 and 100, got {risk_percent}")
@@ -2264,7 +2477,10 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
                               + float(asset.get("cash_balance", 0) or 0))
                     break
         if equity <= 0:
-            equity, equity_basis = buying_power, "buying power (equity unavailable)"
+            # Short enough to be a label. The explanation rides on
+            # EQUITY_FALLBACK_NOTE beside it, because the number needs a name
+            # and the substitution needs a sentence.
+            equity, equity_basis = buying_power, "buying power"
 
         risk_budget = equity * (risk_percent / 100.0)
         raw_shares = risk_budget / risk_per_share
@@ -2291,11 +2507,33 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             f"`{_money(risk_per_share, price_ccy)}` ({stop_pct:.2f}%)\n"
             f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` "
             f"(ATR = {_money(atr, price_ccy)})\n\n"
-            f"* **{acct_ccy} equity**: `{_money(equity, acct_ccy)}`\n"
+            # The base, under its own name. This used to say "equity"
+            # unconditionally, so a budget sized on buying power was presented
+            # as a budget sized on equity -- the one thing the comment above
+            # the fallback promised it would not do.
+            f"* **{acct_ccy} {equity_basis}**: `{_money(equity, acct_ccy)}`"
+            f"{'' if equity_basis == 'equity' else EQUITY_FALLBACK_NOTE}\n"
             f"* **Risk budget @ {risk_percent:g}%**: `{_money(risk_budget, acct_ccy)}`\n"
             f"* **Suggested size**: **{shares:,.4f} shares** "
             f"(notional `{_money(shares * entry, price_ccy)}`)\n"
         )
+
+        # The size above is derived from a stop distance, and a stop is a price
+        # at which an order is sent, not a price at which it fills. A scheduled
+        # event is the ordinary way a name opens through one. Named, not sized
+        # for: adjusting the share count on a date would be this tool making a
+        # judgement the reader did not ask it to make.
+        sized_events, sized_unreachable = scheduled_events(
+            symbol, EVENT_HORIZON_DAYS)
+        event_text = event_disclosure(
+            sized_events, sized_unreachable,
+            f"in the next {EVENT_HORIZON_DAYS} days")
+        if event_text:
+            out += event_text
+            if sized_events:
+                out += ("  <br>*A gap through the stop is not filled at the "
+                        "stop. Stated, not sized for.*\n")
+
         if quote_ccy is None:
             out += (f"\n*The price feed would not say which currency {symbol.upper()} "
                     f"is quoted in, so this size assumes it matches the account's "
@@ -2408,7 +2646,6 @@ def get_portfolio_risk() -> str:
     Analyses the live account: position-level P&L, concentration, and portfolio
     volatility/beta versus SPY. Highlights over-concentration and correlated clusters.
     """
-    from webull.trade.trade_client import TradeClient
     import numpy as np
     try:
         adapter = brokers.get()
@@ -2584,11 +2821,14 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
     against the past year of realised volatility, the ATM straddle's implied move,
     put/call skew, and Black-Scholes greeks for near-the-money strikes.
 
+    The most expensive of the three options tools. If a chain with IV rank and the
+    implied move is enough, get_options_chain returns that alone; to screen for
+    contracts trading unusually heavily use get_unusual_options.
+
     Args:
         symbol: Ticker symbol (e.g. MU, NVDA).
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest expiry.
     """
-    import numpy as np
     import datetime as _dt
     from math import log, sqrt, exp, erf, pi
 
@@ -2651,9 +2891,15 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         if sd:
             straddle, straddle_quality = sd["straddle"], sd["quality"]
         else:
+            # straddle_price declines when a leg has no bid, no ask and no last
+            # trade. This used to sum the two lastPrice columns anyway, which
+            # in that situation are both zero -- and then announce a +/-0.00%
+            # implied move, the most confident-sounding line in the output and
+            # a fabricated one. A straddle of zero is the absence of a price,
+            # not a forecast of no movement.
             straddle = float(atm_call["lastPrice"]) + float(atm_put["lastPrice"])
             straddle_quality = "last"
-        implied_move_pct = straddle / spot * 100
+        implied_move_pct = straddle / spot * 100 if straddle > 0 else None
 
         iv_info = options_math.atm_iv(calls, puts, spot, t)
         atm_iv = iv_info["iv"]
@@ -2698,6 +2944,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
                           f"{still_needed} more needed for a true IV rank")
             rank_is_proxy = True
 
+        # The horizon here is the contract's own, not a fixed lookahead: what
+        # matters to an option is whether the event lands before it expires.
+        window_events, window_unreachable = scheduled_events(symbol, days)
+
         out = (
             f"### Options Analytics — {symbol.upper()} @ {expiry} ({days}d)\n"
             # Spot comes from the validated price feed, so it carries the feed's
@@ -2707,21 +2957,55 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             f"* **Spot**: `${spot:,.2f}` ({webull_client.base_source(source)})\n"
             f"* **ATM implied volatility**: `{atm_iv * 100:.1f}%`\n"
         )
+        # Stated either way here, unlike the other tools. An empty window is
+        # what makes the rank below readable as a rank, so silence would hide
+        # the one fact the next line depends on.
+        if window_events or window_unreachable:
+            out += event_disclosure(window_events, window_unreachable,
+                                    "before this expiry")
+        else:
+            out += "* **Scheduled before this expiry**: nothing found.\n"
         if iv_rank is not None:
             label = "IV rank (proxy)" if rank_is_proxy else "IV rank"
             out += (f"* **{label}**: `{iv_rank:.0f}/100`"
                     f"  |  **percentile**: `{iv_pct:.0f}%`\n"
                     f"  <br>*Basis: {rank_basis}.*\n")
-            verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
-                       else "Options look cheap — favours buying premium." if iv_rank < 35
-                       else "")
-            if verdict:
-                out += f"  *{verdict}*\n"
+            # Withheld when a dated event falls inside the expiry. Implied
+            # volatility is routinely elevated ahead of a scheduled release, so
+            # a high rank there is not evidence of a mispricing in either
+            # direction -- it is the event being priced. This was the only line
+            # in the server that told a reader what to do, and it inverted on a
+            # date the tool already had in hand. No reading is offered instead
+            # of one that is wrong exactly when it matters most.
+            if window_events:
+                out += ("  *No cheap/dear reading while a scheduled event falls "
+                        "inside this expiry: implied volatility is routinely "
+                        "elevated beforehand, so the rank is not evidence of a "
+                        "mispricing either way.*\n")
+            else:
+                verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
+                           else "Options look cheap — favours buying premium." if iv_rank < 35
+                           else "")
+                if verdict:
+                    out += f"  *{verdict}*\n"
         else:
             out += f"* **IV rank**: not yet available — {rank_basis}.\n"
-        out += (f"* **ATM straddle**: `${straddle:,.2f}`  →  market implies a "
-                f"**±{implied_move_pct:.2f}%** move by expiry "
-                f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)\n")
+        # Which quotes this came from, every time. straddle_price refuses
+        # `lastPrice` deliberately, and the branch above reinstates it when
+        # there is no live market -- so an implied move derived from month-old
+        # trades used to read exactly like one derived from a two-sided market.
+        # The greeks table below already prints a per-row `Quote` column; this
+        # is the same disclosure for the headline number.
+        if implied_move_pct is None:
+            out += ("* **ATM straddle**: not priceable — neither ATM leg has a "
+                    "bid, an ask or a last trade, so there is no implied move "
+                    "to report.\n")
+        else:
+            out += (f"* **ATM straddle**: `${straddle:,.2f}`  →  market implies a "
+                    f"**±{implied_move_pct:.2f}%** move by expiry "
+                    f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)"
+                    f"  <br>*Basis: {straddle_quality} quotes"
+                    f"{STALE_STRADDLE_NOTE if 'last' in straddle_quality else ''}.*\n")
 
         # Put/call skew: are downside strikes bid up relative to upside?
         # Illiquid rows are dropped first. 30% of AAPL strikes had a zero bid
@@ -2743,7 +3027,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         # On a 1-day expiry nothing trades 5% out, so a fixed band reported
         # "not measurable" on the most liquid chain in the world; on a LEAP it
         # would sit far inside the money instead.
-        wing = max(implied_move_pct / 100.0, 0.01)
+        # With no priceable straddle there is no market-implied width to size
+        # the wings by, so fall back to the 1% floor this max() already applies
+        # rather than crashing on a None.
+        wing = max((implied_move_pct or 0.0) / 100.0, 0.01)
         put_vols = _wing_iv(puts, puts["strike"] < spot * (1 - wing), False)
         call_vols = _wing_iv(calls, calls["strike"] > spot * (1 + wing), True)
         if put_vols and call_vols:
@@ -2854,6 +3141,10 @@ def get_company_financials(symbol: str) -> str:
 
     Prefer this over get_company_profile when a number has to be right: this is the
     filing itself, not a third-party summary of it.
+
+    These are the tagged XBRL facts only. For the surrounding prose — MD&A, risk
+    factors, the text of a named item — use read_filing; to see which filings exist
+    at all, use get_edgar_filings.
 
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
@@ -3111,6 +3402,10 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
     Filings are far too large to hand over whole — a Micron 10-K is ~610,000 tokens
     raw and ~97,000 after stripping markup — so this locates what you asked for and
     returns it under a character budget.
+
+    This reads inside one filing. To find out which filings exist, or to search across
+    many companies' filing bodies, use get_edgar_filings; for the headline numbers as
+    XBRL facts rather than prose, use get_company_financials.
 
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
@@ -3817,6 +4112,9 @@ def get_edgar_filings(symbol: str = None, form_type: str = "8-K",
       * `symbol` set        → that company's recent filings (earnings 8-Ks, 10-Q, 10-K, Form 4).
       * `query` set         → full-text search across filing bodies, 2001-present.
       * neither             → the live firehose of `form_type` filings from every registrant.
+
+    This lists and finds filings; it does not open them. To read a section out of one,
+    use read_filing; for the headline numbers as XBRL facts, use get_company_financials.
 
     Args:
         symbol: Ticker to scope to (e.g. MU, AAPL).

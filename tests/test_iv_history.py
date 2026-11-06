@@ -7,7 +7,6 @@ that matter: the rank is only reported once there is enough history to support
 it, and the arithmetic is right when there is.
 """
 import datetime
-import json
 import os
 import sys
 

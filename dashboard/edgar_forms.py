@@ -13,12 +13,8 @@ rather than a document to read.
 For the genuinely unstructured parts (8-K narrative, risk factors) the approach
 is section extraction with a character budget, not a full dump.
 """
-import datetime
 import json
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 
 try:
     from dashboard import normalization as nz

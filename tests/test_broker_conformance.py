@@ -1281,7 +1281,6 @@ def test_a_draft_records_the_broker_it_was_raised_against(monkeypatch, tmp_path)
 
     import finance_mcp as srv
 
-    drafts = tmp_path / "order_drafts.json"
     monkeypatch.setattr(srv, "BASE_DIR", str(tmp_path))
     (tmp_path / "dashboard").mkdir()
     monkeypatch.setattr(srv.brokers, "get", lambda name=None: make_webull())

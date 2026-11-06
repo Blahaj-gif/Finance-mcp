@@ -32,7 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dashboard import edgar_forms, econ_calendar
+from dashboard import edgar_forms
 
 #: A spread rather than a favourite. Big and small, concentrated and diversified,
 #: single-manager and multi-manager -- Berkshire files 90 rows across 29 issuers

@@ -3,7 +3,6 @@ import sys
 import threading
 import datetime
 import pandas as pd
-import numpy as np
 
 try:
     from dashboard import market_calendar
