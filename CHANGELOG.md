@@ -3,6 +3,34 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
+## Unreleased
+
+- **`get_options_analytics` gave unvalidated trading advice by default, and
+  three different conditions could not stop it.** It printed "Options look
+  expensive — favours selling premium" on any IV rank above 65: the
+  strongest-sounding sentence the server emits, from a threshold that was
+  chosen rather than measured and that nothing here has ever backtested. The
+  same repository refuses to print a BUY/SELL score by default and says why —
+  "an unvalidated score anchors judgment even when it is labelled unvalidated,
+  so the default is to hand back the evidence and leave the call to the
+  reader." That rule now applies here too, behind `include_verdict=False`,
+  matching `get_market_analysis`.
+  Three guards hold even when the verdict is asked for. The event guard added
+  earlier stays. A **proxy rank** can no longer support the call at all: it
+  ranks implied volatility against *realised* volatility, which the basis line
+  already calls a different quantity, so it is not an IV rank. And an
+  **unreachable calendar** now withholds it, which was the live hole — "the
+  calendar did not answer" is not "nothing is scheduled", a distinction this
+  file already enforces for the disclosure line and did not enforce for the
+  verdict one behind it.
+  Found by capturing real data for a promotional video. AMD on 2026-11-05:
+  down 17.26% on the session, implied volatility 119.2%, one IV observation
+  recorded so a proxy rank of 100/100, and a same-day expiry with an
+  Employment Situation release inside it. A transient BLS failure emptied the
+  event list, the guard read that as a clear window, and the tool advised
+  selling premium into it. Every one of the three new guards would have
+  stopped that line independently.
+
 ## 0.5.0 — 2026-11-06
 
 Maintenance, prompted by a review that asked whether to move to Python 3.15.
