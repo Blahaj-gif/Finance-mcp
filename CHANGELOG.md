@@ -117,6 +117,28 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   which is there to fail — it turns an unreachable account into a SAFETY BLOCK
   rather than a draft raised blind. A test asserts the gate stays wired, so
   removing it now takes an argument rather than a quiet YAML deletion.
+- **Three tool descriptions were the weakest prompt the server hands a model.**
+  A description is the only thing read when choosing whether to call something,
+  so what the server knows and does not put there is knowledge the caller does
+  not have. `get_unusual_options` claimed to "detect smart money positioning"
+  from two threshold tests over a feed that carries no identity — the one
+  unearned inference in a codebase built to strip them. `get_multi_timeframe`
+  and `scan_watchlist` advertised a "Confluence Score" and a "ranked verdict
+  table" without saying either is the fixed-weight heuristic that
+  underperformed buy-and-hold in backtest; their *output* has always carried
+  that caveat, but a model reads the caveat only after deciding the number was
+  worth asking for, which is the anchoring effect `get_market_analysis`'s own
+  description gives as its reason for withholding a verdict. And routing was
+  one-directional across five tools of thirty-six: `get_options_chain` named
+  both siblings, neither named it back, and `get_edgar_filings` and
+  `read_filing` did not reference each other at all despite one listing filings
+  and the other reading inside them. All three families now route both ways.
+  Three tests assert it: mutual references per family, a banned list of claims
+  the data cannot support, and — derived from the source rather than listed, so
+  a fourth one cannot slip in — every tool that appends `HEURISTIC_NOTE` must
+  call the score a heuristic in its description. Cost: +553 tokens on
+  `tools/list`, against a single wrong call into the most expensive options
+  tool, which returns more than that.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

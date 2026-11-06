@@ -51,7 +51,7 @@ HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over fiv
 EQUITY_FALLBACK_NOTE = (
     " — this broker would not report equity for the account, so the risk budget"
     " is sized on buying power instead. The two are different quantities, so the"
-    " same risk percentage is a different trade")
+    " same risk percentage is a different trade.")
 
 # Said when either straddle leg was priced from a last trade rather than a live
 # market. Not a generic caveat: 31 days is the measured staleness from the
@@ -186,6 +186,8 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
 
     This is the usual starting point for a single symbol. For the full picture including
     fundamentals, filings and insider activity, call get_company_profile instead of chaining calls.
+    If you only need the bars, get_ohlcv is cheaper; to ask whether the daily, hourly and
+    15-minute pictures agree, use get_multi_timeframe.
 
     No BUY/SELL score is produced unless you ask for one. The composite verdict is a
     fixed-weight heuristic that underperformed buy-and-hold in backtest, and an
@@ -482,8 +484,12 @@ def get_ohlcv(symbol: str, interval: str = "D", count: int = 20) -> str:
     """
     Fetches raw OHLCV (Open, High, Low, Close, Volume) candlestick bars for a symbol.
     Use when you need the price series itself — to eyeball recent action or do your own
-    maths. For indicators and a reading of them use get_market_analysis.
-    
+    maths.
+
+    This is the cheapest of the three price tools and the only one that returns bars.
+    For indicators and a reading of them use get_market_analysis; for whether the
+    daily, hourly and 15-minute pictures agree use get_multi_timeframe.
+
     Args:
         symbol: The stock symbol (e.g. AAPL, KBANK).
         interval: Bar interval (D, M1, M5, M15, M30, H1, W).
@@ -649,7 +655,12 @@ def get_options_chain(symbol: str, expiration: str = None, strikes: int = 6) -> 
 @mcp.tool()
 def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
     """
-    Scans a list of stock tickers, calculates consensus score & regime, and returns a ranked verdict table.
+    Ranks a list of tickers by consensus score and market regime.
+
+    The ranking is the same fixed-weight heuristic get_market_analysis declines to
+    lead with — it underperformed buy-and-hold in backtest — so read the table as
+    the order in which to look at these names, not as a set of calls. Each row
+    carries the measurements the score came from.
 
     Args:
         symbols: Symbols as a comma-separated string ("AAPL, TSLA, NVDA") or a list (["AAPL", "TSLA"]).
@@ -740,8 +751,18 @@ def scan_watchlist(symbols: str | list[str], interval: str = "D") -> str:
 @mcp.tool()
 def get_multi_timeframe(symbol: str) -> str:
     """
-    Performs multi-timeframe analysis across Daily (D), 1-Hour (H1), and 15-Min (M15) for a symbol to compute a Confluence Score.
-    
+    Whether the daily, hourly and 15-minute pictures agree, for one symbol.
+
+    Runs the same indicator set on D, H1 and M15 and reports each timeframe's
+    consensus score beside a weighted Confluence Score. The score answers one
+    narrow question — do the timeframes point the same way — and is the same
+    fixed-weight heuristic get_market_analysis declines to lead with: it
+    underperformed buy-and-hold in backtest and is not a signal. Read it as a
+    measure of agreement, not of direction.
+
+    For the bars themselves use get_ohlcv; for one timeframe in full detail,
+    with every indicator's own reading, use get_market_analysis.
+
     Args:
         symbol: Stock ticker (e.g. AAPL, KBANK).
     """
@@ -1267,8 +1288,16 @@ def set_alert(symbol: str, condition: str, target_value: float, note: str = "") 
 @mcp.tool()
 def get_unusual_options(symbol: str) -> str:
     """
-    Scans for unusual options activity (Volume > Open Interest or high IV > 50%) to detect smart money positioning.
-    
+    Screens one symbol's option chain for contracts trading unusually heavily.
+
+    Two threshold tests: volume above open interest (more contracts changed hands
+    today than were outstanding) and implied volatility above 50%. Both describe
+    the tape, not who is on the other side of it — the feed carries no identity,
+    so nothing here establishes intent or direction.
+
+    For the chain itself with IV rank and the implied move use get_options_chain;
+    for greeks, skew and the ATM straddle use get_options_analytics.
+
     Args:
         symbol: Stock ticker (e.g. AAPL, NVDA, TSLA).
     """
@@ -2613,6 +2642,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
     against the past year of realised volatility, the ATM straddle's implied move,
     put/call skew, and Black-Scholes greeks for near-the-money strikes.
 
+    The most expensive of the three options tools. If a chain with IV rank and the
+    implied move is enough, get_options_chain returns that alone; to screen for
+    contracts trading unusually heavily use get_unusual_options.
+
     Args:
         symbol: Ticker symbol (e.g. MU, NVDA).
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest expiry.
@@ -2905,6 +2938,10 @@ def get_company_financials(symbol: str) -> str:
     Prefer this over get_company_profile when a number has to be right: this is the
     filing itself, not a third-party summary of it.
 
+    These are the tagged XBRL facts only. For the surrounding prose — MD&A, risk
+    factors, the text of a named item — use read_filing; to see which filings exist
+    at all, use get_edgar_filings.
+
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
     """
@@ -3161,6 +3198,10 @@ def read_filing(symbol: str, form: str = "10-K", section: str = None,
     Filings are far too large to hand over whole — a Micron 10-K is ~610,000 tokens
     raw and ~97,000 after stripping markup — so this locates what you asked for and
     returns it under a character budget.
+
+    This reads inside one filing. To find out which filings exist, or to search across
+    many companies' filing bodies, use get_edgar_filings; for the headline numbers as
+    XBRL facts rather than prose, use get_company_financials.
 
     Args:
         symbol: Ticker symbol (e.g. MU, AAPL).
@@ -3867,6 +3908,9 @@ def get_edgar_filings(symbol: str = None, form_type: str = "8-K",
       * `symbol` set        → that company's recent filings (earnings 8-Ks, 10-Q, 10-K, Form 4).
       * `query` set         → full-text search across filing bodies, 2001-present.
       * neither             → the live firehose of `form_type` filings from every registrant.
+
+    This lists and finds filings; it does not open them. To read a section out of one,
+    use read_filing; for the headline numbers as XBRL facts, use get_company_financials.
 
     Args:
         symbol: Ticker to scope to (e.g. MU, AAPL).

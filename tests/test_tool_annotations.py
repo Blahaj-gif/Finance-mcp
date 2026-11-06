@@ -260,3 +260,113 @@ def test_the_profile_presets_are_actually_cheaper_in_that_order():
     assert len(brief) < len(standard) < len(full)
     assert len(brief) * 2 <= len(standard),         "brief has to be worth choosing, not a rounding error"
     assert len(srv.profile_sections(sections="business")) == 1
+
+
+# =====================================================================
+# The description IS the prompt
+# =====================================================================
+# A tool's description and its parameter descriptions are the only things a
+# model reads when choosing whether to call it. Everything the server knows
+# that does not reach that text is knowledge the caller does not have.
+
+#: Families that do overlapping jobs. Every member must name every other, so a
+#: model landing anywhere in a family learns what the alternatives are for.
+OVERLAPPING_FAMILIES = (
+    ("get_ohlcv", "get_market_analysis", "get_multi_timeframe"),
+    ("get_options_chain", "get_options_analytics", "get_unusual_options"),
+    ("get_edgar_filings", "read_filing", "get_company_financials"),
+)
+
+
+@pytest.mark.parametrize("family", OVERLAPPING_FAMILIES, ids=lambda f: f[0])
+def test_overlapping_tools_route_to_each_other(family):
+    """
+    Routing was one-directional and covered five tools of thirty-six.
+    get_options_chain named both its siblings; neither named it back. So a
+    model that entered the family at the expensive end -- a full greeks and
+    skew report when it wanted a chain -- got no hint that a narrower tool
+    existed, and one that entered at the cheap end got no hint of the richer.
+
+    A dead end costs a wrong call and a second round trip. The fix is a
+    sentence; the point of asserting it is that a fourth tool added to a family
+    has to join the routing rather than sit outside it.
+    """
+    for name in family:
+        desc = _tool_description(name)
+        missing = [other for other in family if other != name and other not in desc]
+        assert not missing, (
+            f"{name} does not mention {missing}. A model reading only {name}'s "
+            "description cannot know those alternatives exist.")
+
+
+#: Claims no feed here carries. "smart money positioning" was the live one:
+#: volume above open interest and an implied vol above 50% are two threshold
+#: tests, and who is on the other side of the trade is not in the data.
+UNEARNED_CLAIMS = (
+    "smart money", "institutional positioning", "whale",
+    "guaranteed", "will rise", "will fall", "sure thing", "can't lose",
+)
+
+
+def test_no_tool_description_claims_to_know_what_it_cannot_see():
+    """
+    This server strips unearned inference everywhere else -- the consensus
+    score ships with its backtest, quotes carry their provenance, unverified
+    adapters say so in every line of output. A tool description that announces
+    it detects "smart money positioning" undoes that in the one place the model
+    is guaranteed to read.
+    """
+    offenders = []
+    for tool in _tools():
+        lowered = (tool.description or "").lower()
+        offenders += [f"{tool.name}: {phrase!r}"
+                      for phrase in UNEARNED_CLAIMS if phrase in lowered]
+    assert not offenders, (
+        "tool descriptions assert what the data does not support:\n  "
+        + "\n  ".join(offenders))
+
+
+def _tools_that_compute_the_consensus_score():
+    """
+    Derived from the source, not listed here: every tool that appends
+    HEURISTIC_NOTE is a tool that computes the fixed-weight score. A fourth one
+    must not be able to appear without this test seeing it.
+    """
+    import ast
+
+    source = open(srv.__file__, encoding="utf-8").read()
+    lines = source.splitlines()
+    registered = {t.name for t in _tools()}
+    found = []
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in registered:
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        if "HEURISTIC_NOTE" in body:
+            found.append(node.name)
+    return found
+
+
+def test_the_consensus_score_is_called_a_heuristic_where_it_is_advertised():
+    """
+    Three tools compute the fixed-weight consensus score and all three append
+    HEURISTIC_NOTE to their output, which is the right behaviour and was never
+    the problem. The problem was upstream of it: two of the three advertised
+    the score in their description -- a "ranked verdict table", a "Confluence
+    Score" -- with nothing to say it is a heuristic that underperformed
+    buy-and-hold in backtest.
+
+    A model picks the tool from the description and reads the caveat only after
+    it has already decided the number was worth asking for. By then the anchor
+    is set, which is the exact effect get_market_analysis's own description
+    gives as the reason it withholds a verdict by default.
+    """
+    scoring = _tools_that_compute_the_consensus_score()
+    assert len(scoring) >= 3, (
+        f"expected at least three consensus-score tools, found {scoring}")
+
+    silent = [name for name in scoring
+              if "heuristic" not in _tool_description(name).lower()]
+    assert not silent, (
+        f"these advertise the consensus score without calling it a heuristic: "
+        f"{silent}")
