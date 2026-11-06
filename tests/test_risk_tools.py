@@ -982,3 +982,130 @@ def test_position_size_names_the_event_and_does_not_resize_for_it(
     size = "**10.0000 shares**"
     assert size in quiet and size in noisy, (
         "the disclosure must not change the number it is disclosed beside")
+
+
+def test_the_event_lookup_is_memoised_per_symbol_horizon_and_anchor(
+        monkeypatch, real_scheduled_events):
+    """
+    get_company_profile runs its sections concurrently and "price" is one of
+    the defaults, so one profile request asks for the same symbol's calendar at
+    least once and up to three times. The BLS and Fed schedules are cached
+    inside econ_calendar for 24h; the Yahoo earnings date is not, and that was
+    the measured 0.44s of warm cost per repeat.
+    """
+    calls = []
+
+    def counted(sym):
+        calls.append(sym)
+        return {"symbol": sym, "date": datetime.date(2026, 11, 12),
+                "status": "confirmed"}
+
+    monkeypatch.setattr(srv.earnings, "next_report", counted)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    today = datetime.date(2026, 11, 6)
+    first, _ = real_scheduled_events("AAA", 30, today=today)
+    second, _ = real_scheduled_events("AAA", 30, today=today)
+
+    assert first == second
+    assert len(calls) == 1, f"the calendar was consulted {len(calls)} times, not once"
+
+    # A different anchor is a different question and must not collide.
+    real_scheduled_events("AAA", 30, today=datetime.date(2026, 12, 20))
+    assert len(calls) == 2, "a different anchor served a cached answer"
+
+    # So is a different horizon.
+    real_scheduled_events("AAA", 7, today=today)
+    assert len(calls) == 3, "a different horizon served a cached answer"
+
+
+def test_a_caller_mutating_its_result_cannot_poison_the_memo(
+        monkeypatch, real_scheduled_events):
+    """The cache hands out copies, so sorting or clearing a result is harmless."""
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym,
+                                     "date": datetime.date(2026, 11, 12),
+                                     "status": "confirmed"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    today = datetime.date(2026, 11, 6)
+    handed_out, _ = real_scheduled_events("AAA", 30, today=today)
+    assert len(handed_out) == 1
+    handed_out.clear()
+    handed_out_again, _ = real_scheduled_events("AAA", 30, today=today)
+    assert len(handed_out_again) == 1, "the caller's clear() reached the cache"
+
+
+def test_only_the_nearest_occurrence_of_a_repeated_release_is_named(
+        monkeypatch, real_scheduled_events):
+    """
+    A 30-day window catches two Employment Situation releases. The second tells
+    a reader nothing the first did not, and a disclosure listing four dates is
+    one nobody reads. Measured on AAPL: it turned a three-item line into four.
+    """
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": None,
+                                     "status": "unknown"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([
+        {"release": "Employment Situation", "date": datetime.date(2026, 12, 4)},
+        {"release": "Consumer Price Index", "date": datetime.date(2026, 11, 10)},
+        {"release": "Employment Situation", "date": datetime.date(2026, 11, 6)},
+    ], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    found, _ = real_scheduled_events("AAA", 30, today=datetime.date(2026, 11, 6))
+
+    assert [(e["what"], e["date"]) for e in found] == [
+        ("Employment Situation", datetime.date(2026, 11, 6)),
+        ("Consumer Price Index", datetime.date(2026, 11, 10)),
+    ], found
+
+
+def test_an_unreachable_source_is_remembered_for_a_minute_not_a_quarter_hour(
+        monkeypatch, real_scheduled_events):
+    """
+    Caching a failure as long as a success means one network blip keeps telling
+    the reader the calendar is down for fifteen minutes after it came back --
+    and "unreachable" is the answer this lookup exists to avoid overstating.
+    A clean result keeps its full term; a failed one is retried a minute later.
+    """
+    import time
+
+    monkeypatch.setattr(srv, "TTL_EVENTS_FAILED", 0.3)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", lambda **kw: ([], []))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+    today = datetime.date(2026, 11, 6)
+
+    attempts = []
+
+    def failing(sym):
+        attempts.append(sym)
+        raise OSError("calendar down")
+
+    monkeypatch.setattr(srv.earnings, "next_report", failing)
+    _, first = real_scheduled_events("AAA", 30, today=today)
+    real_scheduled_events("AAA", 30, today=today)
+    assert first, "the failure has to be reported"
+    assert len(attempts) == 1, "a failure is cached briefly rather than hammered"
+
+    time.sleep(0.4)
+    real_scheduled_events("AAA", 30, today=today)
+    assert len(attempts) == 2, (
+        "past the short window a failed source must be retried, or a blip "
+        "outlives the outage")
+
+    # And the other half: a clean answer is not thrown away after a minute.
+    srv.EVENT_CACHE.clear()
+    attempts.clear()
+
+    def clean(sym):
+        attempts.append(sym)
+        return {"symbol": sym, "date": None, "status": "unknown"}
+
+    monkeypatch.setattr(srv.earnings, "next_report", clean)
+    real_scheduled_events("AAA", 30, today=today)
+    time.sleep(0.4)
+    real_scheduled_events("AAA", 30, today=today)
+    assert len(attempts) == 1, "a complete result must keep its full TTL"

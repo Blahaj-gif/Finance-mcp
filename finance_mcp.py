@@ -68,6 +68,28 @@ STALE_STRADDLE_NOTE = (
 #: disclosure that lists eight BLS products is a disclosure nobody reads.
 MACRO_EVENT_SLUGS = ("cpi", "ppi", "empsit")
 
+#: Short-lived memo for the event lookup.
+#:
+#: get_company_profile runs its sections concurrently and "price" is one of the
+#: defaults, so a single profile request asks for the same symbol's calendar at
+#: least once and up to three times if "options" and "consensus" are added. The
+#: BLS and Fed schedules are already cached inside econ_calendar for 24h; the
+#: Yahoo earnings date is not, and that is the whole of the measured 0.44s warm
+#: cost. Memoising the composed answer removes the repeat entirely.
+#:
+#: Separate instance from econ_calendar.CACHE on purpose: clearing one must
+#: never clear the other, which is what a test isolating this would do.
+EVENT_CACHE = econ_calendar.TTLCache()
+TTL_EVENTS = 900          # 15 minutes. A scheduled date does not move inside one.
+
+#: A result with an unreachable source is held for a minute, not fifteen.
+#: Remembering a failure for as long as a success means one network blip keeps
+#: telling the reader the calendar is down for a quarter of an hour after it
+#: came back -- and "unreachable" is the answer this whole lookup exists to
+#: avoid overstating. A minute is still enough that a calendar which is
+#: genuinely down is not hammered once per tool call.
+TTL_EVENTS_FAILED = 60
+
 #: How far ahead the price and sizing tools look for a scheduled event. The
 #: options tool uses its own expiry instead, which is the horizon that actually
 #: applies to the contract being priced.
@@ -95,6 +117,21 @@ def scheduled_events(symbol, days_ahead, today=None):
     """
     found, unreachable = [], []
     anchor = market_calendar.eastern_now().date() if today is None else today
+
+    # Keyed on the anchor as well as the symbol, so a caller that passes an
+    # explicit date never receives an answer computed for a different one.
+    cache_key = (str(symbol).upper(), int(days_ahead), anchor.isoformat())
+    # Within the short window anything cached will do. Past it, only a result
+    # with every source reachable is still worth serving -- so a blip is retried
+    # a minute later while a clean answer keeps its full fifteen.
+    cached = EVENT_CACHE.get(cache_key, TTL_EVENTS_FAILED)
+    if cached is None:
+        complete = EVENT_CACHE.get(cache_key, TTL_EVENTS)
+        cached = complete if (complete and not complete[1]) else None
+    if cached is not None:
+        # Copies. A caller that sorts or mutates the list it was handed must
+        # not be able to rewrite what the next caller is given.
+        return [dict(e) for e in cached[0]], list(cached[1])
 
     def _inside(when):
         return when is not None and 0 <= (when - anchor).days <= days_ahead
@@ -129,7 +166,20 @@ def scheduled_events(symbol, days_ahead, today=None):
         unreachable.append("FOMC calendar")
 
     found.sort(key=lambda e: e["date"])
-    return found, unreachable
+
+    # One occurrence per event, nearest kept. A 30-day window catches two
+    # Employment Situation releases, and the second tells a reader nothing the
+    # first did not -- measured on AAPL, it turned a three-item line into four.
+    # Sorted first, so "first seen" is "soonest".
+    seen, nearest = set(), []
+    for event in found:
+        if event["what"] in seen:
+            continue
+        seen.add(event["what"])
+        nearest.append(event)
+
+    EVENT_CACHE.put(cache_key, (nearest, list(unreachable)))
+    return [dict(e) for e in nearest], list(unreachable)
 
 
 def event_disclosure(events_found, unreachable, window_text):

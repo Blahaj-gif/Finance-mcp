@@ -163,6 +163,11 @@ class _TTLCache:
             self._data.clear()
 
 
+#: Public alias. finance_mcp memoises its event lookup with the same class, and
+#: reaching for a private name across modules to avoid a second implementation
+#: of fifteen lines is the wrong trade in both directions.
+TTLCache = _TTLCache
+
 CACHE = _TTLCache()
 TTL_MACRO = 6 * 3600        # BLS revises monthly; 6h is generous and protects the quota
 TTL_SCHEDULE = 24 * 3600    # release calendars change rarely

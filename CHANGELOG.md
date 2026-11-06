@@ -181,8 +181,21 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   The lookup costs two live calendars, so `conftest` stubs it to "nothing
   scheduled" for every test — the suite is offline by contract and this added
   3.9s per call before that. The whole suite was then re-run with outbound HTTP
-  blocked at `urllib` and `requests`: 1569 passed, which is the first time that
+  blocked at `urllib` and `requests`: 1573 passed, which is the first time that
   claim has been tested rather than asserted in a CI comment.
+  Then reviewed again, which found three things the first pass missed. `"price"`
+  is a default section of `get_company_profile`, and its sections run
+  concurrently, so one profile request asked for the same symbol's calendar up
+  to three times — the lookup is now memoised on (symbol, horizon, anchor) and
+  a repeat went from 0.44s to 0.000s. A 30-day window returned two Employment
+  Situation releases; only the nearest occurrence of a repeated event is now
+  named, which took a measured four-item line back to three. And a failure was
+  being cached as long as a success, so one network blip would have kept
+  reporting the calendar as unreachable for a quarter of an hour after it came
+  back — failures now expire in a minute while complete answers keep their full
+  term. The memo also leaked between the three tests that share a symbol and an
+  anchor, which those tests caught; `conftest` clears it per test for the same
+  reason it clears the bar cache.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

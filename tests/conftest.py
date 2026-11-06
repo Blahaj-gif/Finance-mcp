@@ -87,7 +87,14 @@ def _no_calendar_lookups(monkeypatch):
     if _REAL_SCHEDULED_EVENTS is None:
         _REAL_SCHEDULED_EVENTS = srv.scheduled_events
     monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    # The real lookup memoises on (symbol, horizon, anchor) for 15 minutes, so
+    # the tests that exercise it -- all of which use the same symbol and the
+    # same explicit anchor -- would serve each other's stubbed calendars. Same
+    # reasoning as the bar cache above: a test must read only what it wrote.
+    srv.EVENT_CACHE.clear()
     yield
+    srv.EVENT_CACHE.clear()
 
 
 @pytest.fixture
