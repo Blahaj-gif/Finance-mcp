@@ -793,3 +793,192 @@ def test_an_unpriceable_straddle_does_not_report_a_zero_percent_move(monkeypatch
     assert "ATM straddle" in out, out
     assert "not priceable" in out or "unavailable" in out, (
         f"it has to say why there is no implied move: {out}")
+
+
+# =====================================================================
+# Scheduled events: dated facts, not advice
+# =====================================================================
+# An event is named in these outputs because it changes what the reader is
+# looking at, never because it explains a move that already happened. Three
+# tools carry it and none of them tells anyone what to do about it.
+
+def _raise_offline(*a, **k):
+    raise OSError("no dns")
+
+
+def _stub_calendars(monkeypatch, earnings_date=None, earnings_status="confirmed",
+                    releases=(), fomc=(), failures=()):
+    """Both calendars, offline. Dates are passed in, so nothing is time-dependent."""
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": earnings_date,
+                                     "status": earnings_status})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases",
+                        lambda **kw: (list(releases), list(failures)))
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings",
+                        lambda: list(fomc))
+
+
+def test_only_events_inside_the_window_are_named(monkeypatch, real_scheduled_events):
+    today = datetime.date(2026, 11, 6)
+    _stub_calendars(
+        monkeypatch,
+        earnings_date=datetime.date(2026, 11, 12),          # 6 days out: inside
+        releases=[{"release": "Consumer Price Index",
+                   "date": datetime.date(2026, 11, 10)}],
+        fomc=[{"date": datetime.date(2026, 12, 16)}])       # 40 days out: outside
+
+    found, unreachable = real_scheduled_events("AAA", 30, today=today)
+
+    assert [e["what"] for e in found] == ["Consumer Price Index", "earnings"], found
+    assert unreachable == []
+    assert [e["date"] for e in found] == sorted(e["date"] for e in found), \
+        "events must come back chronologically"
+
+
+def test_an_unreachable_calendar_is_never_reported_as_a_clear_window(
+        monkeypatch, real_scheduled_events):
+    """
+    "Nothing is scheduled" and "the calendar did not answer" lead to opposite
+    decisions. Collapsing them is the one thing this must not do.
+    """
+    monkeypatch.setattr(srv.earnings, "next_report",
+                        lambda sym: {"symbol": sym, "date": None,
+                                     "status": "unknown"})
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", lambda: [])
+
+    found, unreachable = real_scheduled_events(
+        "AAA", 30, today=datetime.date(2026, 11, 6))
+    assert found == []
+    assert unreachable, "a failed source has to be reported as a failed source"
+
+    line = srv.event_disclosure(found, unreachable, "in the next 30 days")
+    assert "unknown" in line, line
+    assert "not a statement that nothing is scheduled" in line, line
+
+
+def test_a_dead_calendar_does_not_take_the_price_tool_down(
+        monkeypatch, real_scheduled_events):
+    """Every source is a network read, and this is an addition to someone else's answer."""
+    monkeypatch.setattr(srv.earnings, "next_report", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "upcoming_releases", _raise_offline)
+    monkeypatch.setattr(srv.econ_calendar, "fetch_fomc_meetings", _raise_offline)
+
+    found, unreachable = real_scheduled_events(
+        "AAA", 30, today=datetime.date(2026, 11, 6))
+    assert found == []
+    assert len(unreachable) == 3, unreachable
+
+
+def test_the_event_line_never_tells_the_reader_what_to_do():
+    """
+    A disclosure, not a suggestion. What to make of a date is the reader's --
+    the same stance get_market_analysis takes in withholding a verdict.
+    """
+    line = srv.event_disclosure(
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "estimated"}], [], "in the next 30 days")
+
+    assert "earnings 2026-11-12 (estimated)" in line, line
+    advice = ("consider", "should", "recommend", "avoid", "favours", "suggest",
+              "advise", "better to", "you may want", "it is wise")
+    reads_as_advice = [w for w in advice if w in line.lower()]
+    assert not reads_as_advice, f"the event line reads as advice: {reads_as_advice} in {line!r}"
+
+
+def test_an_estimated_date_is_marked_and_a_firm_one_is_not():
+    """An estimated earnings date and a published CPI date are different facts."""
+    firm = srv.event_disclosure(
+        [{"what": "Consumer Price Index", "date": datetime.date(2026, 11, 10),
+          "confidence": "scheduled"}], [], "before this expiry")
+    assert "(scheduled)" not in firm, f"a firm schedule needs no qualifier: {firm}"
+
+    soft = srv.event_disclosure(
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "disputed"}], [], "before this expiry")
+    assert "(disputed)" in soft, soft
+
+
+def test_the_options_cheap_or_dear_reading_is_withheld_when_an_event_is_due(monkeypatch):
+    """
+    This was the only line in the server that told a reader what to do, and it
+    inverted on a date the tool already had in hand: implied volatility is
+    routinely elevated before a scheduled release, so a high rank there is the
+    event being priced rather than a mispricing.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    # A rank of 80 is what used to print "favours selling premium". Pinned
+    # rather than engineered out of a price series, so the branch under test is
+    # the one being exercised: flat_frame's realised vol is a single value, so
+    # the proxy correctly declines and there would be no reading either way.
+    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 80.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: (
+        [{"what": "earnings", "date": datetime.date(2026, 12, 1),
+          "confidence": "confirmed"}], []))
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "Scheduled before this expiry" in out, out
+    assert "earnings 2026-12-01" in out, out
+    assert "favours selling premium" not in out, out
+    assert "favours buying premium" not in out, out
+    assert "not evidence of a mispricing either way" in out, out
+
+
+def test_the_cheap_or_dear_reading_survives_when_the_window_is_clear(monkeypatch):
+    """
+    The withholding must be conditional on the date, not a quiet removal of the
+    behaviour. With nothing scheduled, an IV rank of 80 still reads as dear.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    monkeypatch.setattr(srv, "_rv_proxy_rank", lambda *a, **k: 80.0)
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA")
+    assert "favours selling premium" in out, out
+    assert "not evidence of a mispricing either way" not in out, out
+
+
+def test_a_clear_expiry_says_so_rather_than_staying_silent(monkeypatch):
+    """The empty window is what makes the rank below readable as a rank."""
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+
+    out = srv.get_options_analytics("AAA")
+    assert "Scheduled before this expiry**: nothing found" in out, out
+
+
+def test_position_size_names_the_event_and_does_not_resize_for_it(
+        monkeypatch, fake_account):
+    """
+    A stop is a price at which an order is sent, not one at which it fills, and
+    a scheduled event is the ordinary way a name opens through it. Saying so is
+    the tool's job. Quietly changing the share count is not.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0),
+                                                 "Webull OpenAPI"))
+
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: ([], []))
+    quiet = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                        risk_percent=1.0, entry_price=100.0)
+
+    monkeypatch.setattr(srv, "scheduled_events", lambda *a, **k: (
+        [{"what": "earnings", "date": datetime.date(2026, 11, 12),
+          "confidence": "confirmed"}], []))
+    noisy = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                        risk_percent=1.0, entry_price=100.0)
+
+    assert "earnings 2026-11-12" in noisy, noisy
+    assert "Stated, not sized for" in noisy, noisy
+    assert "earnings" not in quiet.lower(), quiet
+
+    size = "**10.0000 shares**"
+    assert size in quiet and size in noisy, (
+        "the disclosure must not change the number it is disclosed beside")

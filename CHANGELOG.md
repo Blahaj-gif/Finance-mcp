@@ -153,6 +153,36 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   dropped staleness label would leave stale prices looking live while the code
   appeared to handle it. Confirmed to fail both ways — a stamp removed from a
   single-symbol tool, and a sweep that computes the age and renders none of it.
+- **Three tools now name the scheduled events inside their own horizon, and
+  one of them stopped giving advice that inverted on a date it already had.**
+  `get_options_analytics` printed "Options look expensive — favours selling
+  premium" on any IV rank above 65, with no check for whether earnings or a
+  macro release fell inside the expiry. Implied volatility is routinely
+  elevated ahead of a scheduled release, so a high rank there is the event
+  being priced rather than a mispricing — and this was the only line in the
+  server that told a reader what to do. It is now withheld whenever an event
+  sits in the window, with the reason given, and kept unchanged when the window
+  is clear.
+  `calculate_position_size` and `get_market_analysis` gained the same dated
+  line. The data was already here and unused: `earnings.next_report` carries
+  its own confirmed/estimated/disputed confidence and never raises, and
+  `econ_calendar` already had the BLS, FOMC and BEA schedules. Twelve of
+  thirteen price-bearing tools used none of it.
+  Deliberately a disclosure and not a suggestion. An event is named because it
+  changes what the reader is looking at, never because it explains a move that
+  already happened — "up 3% on CPI optimism" is a claim no feed here supports,
+  and two true facts side by side are enough to invite it. A test asserts the
+  line contains no advice verb. Position sizing says "stated, not sized for"
+  and another test proves the share count is byte-identical with and without
+  the event, so the disclosure cannot quietly become a judgement.
+  An unreachable calendar is reported as unreachable, never as a clear window:
+  "nothing is scheduled" and "the calendar did not answer" lead to opposite
+  decisions. All three sources failing leaves the host tool's answer intact.
+  The lookup costs two live calendars, so `conftest` stubs it to "nothing
+  scheduled" for every test — the suite is offline by contract and this added
+  3.9s per call before that. The whole suite was then re-run with outbound HTTP
+  blocked at `urllib` and `requests`: 1569 passed, which is the first time that
+  claim has been tested rather than asserted in a CI comment.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

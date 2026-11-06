@@ -30,6 +30,7 @@ import dashboard.live_signals as live_signals
 import dashboard.macro_watch as macro_watch
 import dashboard.alert_manager as alert_manager
 import dashboard.events as events
+import dashboard.earnings as earnings
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
@@ -61,6 +62,108 @@ STALE_STRADDLE_NOTE = (
     " — at least one leg has no live market, so this uses a last trade, measured"
     " up to 31 days stale on illiquid strikes; a stale straddle understates the"
     " move")
+
+#: Macro releases worth naming beside one symbol's price or option chain.
+#: Deliberately three. The full calendar is get_economic_calendar's job, and a
+#: disclosure that lists eight BLS products is a disclosure nobody reads.
+MACRO_EVENT_SLUGS = ("cpi", "ppi", "empsit")
+
+#: How far ahead the price and sizing tools look for a scheduled event. The
+#: options tool uses its own expiry instead, which is the horizon that actually
+#: applies to the contract being priced.
+EVENT_HORIZON_DAYS = 30
+
+
+def scheduled_events(symbol, days_ahead, today=None):
+    """
+    Dated events inside a window. Facts, and deliberately nothing more.
+
+    An event is named here because it changes what the reader is looking at,
+    never because it explains a move that already happened. "Up 3% on CPI
+    optimism" is a claim no feed in this project supports, and two true facts
+    printed side by side are enough to invite it — so this returns dates and
+    nothing causal, and the callers print them under the word "scheduled".
+
+    Nothing here tells anyone what to do about a date. What to make of it is
+    the reader's, which is the same stance get_market_analysis takes when it
+    declines to hand back a verdict by default.
+
+    Never raises. Every source is a network read and this is an addition to
+    someone else's answer, so an unreachable calendar has to degrade into
+    saying it was unreachable rather than taking a price tool down with it.
+    Returns (events, unreachable).
+    """
+    found, unreachable = [], []
+    anchor = market_calendar.eastern_now().date() if today is None else today
+
+    def _inside(when):
+        return when is not None and 0 <= (when - anchor).days <= days_ahead
+
+    # The issuer's own date, carrying the confidence earnings.next_report
+    # derived for it: confirmed, estimated, or disputed between two feeds.
+    try:
+        report = earnings.next_report(symbol)
+        if _inside(report.get("date")):
+            found.append({"what": "earnings", "date": report["date"],
+                          "confidence": str(report.get("status") or "unknown")})
+    except Exception:
+        unreachable.append("issuer earnings calendar")
+
+    try:
+        releases, failures = econ_calendar.upcoming_releases(
+            days_ahead=days_ahead, days_back=0,
+            slugs=list(MACRO_EVENT_SLUGS), today=anchor)
+        for row in releases or []:
+            found.append({"what": row.get("release") or row.get("slug") or "release",
+                          "date": row["date"], "confidence": "scheduled"})
+        unreachable += [str(f) for f in (failures or [])]
+    except Exception:
+        unreachable.append("BLS release schedule")
+
+    try:
+        for meeting in econ_calendar.fetch_fomc_meetings() or []:
+            if _inside(meeting.get("date")):
+                found.append({"what": "FOMC decision", "date": meeting["date"],
+                              "confidence": "scheduled"})
+    except Exception:
+        unreachable.append("FOMC calendar")
+
+    found.sort(key=lambda e: e["date"])
+    return found, unreachable
+
+
+def event_disclosure(events_found, unreachable, window_text):
+    """
+    One line naming what is scheduled inside a window.
+
+    No imperative and no suggestion: an event here is a disclosure about the
+    horizon, not advice about it. A confidence other than a firm schedule is
+    shown in brackets, because an estimated earnings date and a published CPI
+    date are not the same kind of fact.
+
+    An empty result with a failed source is NOT reported as a clear window.
+    "Nothing scheduled" and "the calendar did not answer" lead to opposite
+    decisions, and collapsing them is the failure this whole file is careful
+    about everywhere else.
+    """
+    if not events_found:
+        if unreachable:
+            return (f"* **Scheduled {window_text}**: unknown — "
+                    f"{', '.join(sorted(set(unreachable)))} could not be reached. "
+                    "This is not a statement that nothing is scheduled.\n")
+        return ""
+
+    named = " · ".join(
+        f"{e['what']} {e['date']:%Y-%m-%d}"
+        + ("" if str(e["confidence"]).lower() in ("scheduled", "confirmed")
+           else f" ({e['confidence']})")
+        for e in events_found)
+    line = f"* **Scheduled {window_text}**: {named}\n"
+    if unreachable:
+        line += (f"  <br>*{', '.join(sorted(set(unreachable)))} could not be "
+                 "reached, so this list may be incomplete.*\n")
+    return line
+
 
 # Initialize FastMCP Server
 mcp = FastMCP("Finance MCP")
@@ -329,6 +432,15 @@ def get_market_analysis(symbol: str, interval: str = "D", count: int = 100,
 """
         out = (webull_client.freshness_line(df, source, interval)
                + fallback_warning(source) + summary)
+
+        # One line, and only when there is something to say. Indicators
+        # describe what price has already done; a scheduled date is the part
+        # that is not in the bars yet. It goes after the readings rather than
+        # beside them, so nothing here reads as a cause for a move above.
+        ahead, ahead_unreachable = scheduled_events(symbol, EVENT_HORIZON_DAYS)
+        out += event_disclosure(ahead, ahead_unreachable,
+                                f"in the next {EVENT_HORIZON_DAYS} days")
+
         if include_verdict:
             out += HEURISTIC_NOTE
         else:
@@ -2355,6 +2467,23 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             f"* **Suggested size**: **{shares:,.4f} shares** "
             f"(notional `{_money(shares * entry, price_ccy)}`)\n"
         )
+
+        # The size above is derived from a stop distance, and a stop is a price
+        # at which an order is sent, not a price at which it fills. A scheduled
+        # event is the ordinary way a name opens through one. Named, not sized
+        # for: adjusting the share count on a date would be this tool making a
+        # judgement the reader did not ask it to make.
+        sized_events, sized_unreachable = scheduled_events(
+            symbol, EVENT_HORIZON_DAYS)
+        event_text = event_disclosure(
+            sized_events, sized_unreachable,
+            f"in the next {EVENT_HORIZON_DAYS} days")
+        if event_text:
+            out += event_text
+            if sized_events:
+                out += ("  <br>*A gap through the stop is not filled at the "
+                        "stop. Stated, not sized for.*\n")
+
         if quote_ccy is None:
             out += (f"\n*The price feed would not say which currency {symbol.upper()} "
                     f"is quoted in, so this size assumes it matches the account's "
@@ -2765,6 +2894,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
                           f"{still_needed} more needed for a true IV rank")
             rank_is_proxy = True
 
+        # The horizon here is the contract's own, not a fixed lookahead: what
+        # matters to an option is whether the event lands before it expires.
+        window_events, window_unreachable = scheduled_events(symbol, days)
+
         out = (
             f"### Options Analytics — {symbol.upper()} @ {expiry} ({days}d)\n"
             # Spot comes from the validated price feed, so it carries the feed's
@@ -2774,16 +2907,37 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
             f"* **Spot**: `${spot:,.2f}` ({webull_client.base_source(source)})\n"
             f"* **ATM implied volatility**: `{atm_iv * 100:.1f}%`\n"
         )
+        # Stated either way here, unlike the other tools. An empty window is
+        # what makes the rank below readable as a rank, so silence would hide
+        # the one fact the next line depends on.
+        if window_events or window_unreachable:
+            out += event_disclosure(window_events, window_unreachable,
+                                    "before this expiry")
+        else:
+            out += "* **Scheduled before this expiry**: nothing found.\n"
         if iv_rank is not None:
             label = "IV rank (proxy)" if rank_is_proxy else "IV rank"
             out += (f"* **{label}**: `{iv_rank:.0f}/100`"
                     f"  |  **percentile**: `{iv_pct:.0f}%`\n"
                     f"  <br>*Basis: {rank_basis}.*\n")
-            verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
-                       else "Options look cheap — favours buying premium." if iv_rank < 35
-                       else "")
-            if verdict:
-                out += f"  *{verdict}*\n"
+            # Withheld when a dated event falls inside the expiry. Implied
+            # volatility is routinely elevated ahead of a scheduled release, so
+            # a high rank there is not evidence of a mispricing in either
+            # direction -- it is the event being priced. This was the only line
+            # in the server that told a reader what to do, and it inverted on a
+            # date the tool already had in hand. No reading is offered instead
+            # of one that is wrong exactly when it matters most.
+            if window_events:
+                out += ("  *No cheap/dear reading while a scheduled event falls "
+                        "inside this expiry: implied volatility is routinely "
+                        "elevated beforehand, so the rank is not evidence of a "
+                        "mispricing either way.*\n")
+            else:
+                verdict = ("Options look expensive — favours selling premium." if iv_rank > 65
+                           else "Options look cheap — favours buying premium." if iv_rank < 35
+                           else "")
+                if verdict:
+                    out += f"  *{verdict}*\n"
         else:
             out += f"* **IV rank**: not yet available — {rank_basis}.\n"
         # Which quotes this came from, every time. straddle_price refuses
