@@ -47,6 +47,15 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   before 3.12 and a `SyntaxWarning` after, so running the suite only on 3.10
   could never surface it. A guard now compiles every first-party file with
   `SyntaxWarning` promoted to an error.
+- **That guard could not fire, because the floor it assumed was enforced
+  nowhere.** Raising `requires-python` to 3.12 moved pyproject, the CI matrix
+  and the Dockerfile. It did not move the only virtualenv in the tree, still
+  3.10.11 carrying `fastmcp` 3.4.6 against a declared `fastmcp>=4`. The suite
+  passed there, all 1539 of it, and the escape scan reported a clean tree while
+  reading nothing — invalid escapes do not warn before 3.12. A test now asserts
+  the running interpreter satisfies `requires-python`, and the scan compiles a
+  planted escape first and fails loudly if the interpreter cannot see it. Both
+  were confirmed failing on 3.10 before the virtualenv was rebuilt on 3.12.13.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

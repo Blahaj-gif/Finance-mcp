@@ -353,8 +353,10 @@ def test_the_registry_listing_documents_the_broker_selector():
     for required in ("FINANCE_BROKER", "SAXO_ACCESS_TOKEN", "IBKR_BASE_URL"):
         assert required in names, f"server.json does not document {required}"
 
-    # Read by regex rather than tomllib: this project supports 3.10, where
-    # tomllib does not exist.
+    # Read by regex rather than tomllib. The original reason -- 3.10, which has
+    # no tomllib -- expired when the floor moved to 3.12; the regex stays because
+    # it is pulling two top-level scalars out of a file this suite also asserts
+    # the shape of elsewhere, and a TOML parse would not make that safer.
     pyproject = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
     version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     name = re.search(r'^name\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
@@ -764,6 +766,40 @@ def test_the_checked_out_config_also_pins_the_bind_address():
     assert re.search(r'^\s*address\s*=\s*"127\.0\.0\.1"', server, re.M)
 
 
+def test_the_running_interpreter_satisfies_the_declared_floor():
+    """
+    `requires-python` was a declaration nothing checked.
+
+    Raising the floor to 3.12 moved pyproject, the CI matrix and the Dockerfile.
+    It did not move the only virtualenv in the tree, which stayed on 3.10.11, and
+    the suite stayed green there -- 1539 passed -- because nothing in it looked at
+    the interpreter. An unasserted floor is not a floor.
+
+    The damage is not that 3.10 fails. It is that it passes: the escape-sequence
+    scan below cannot fire before 3.12, so it reported a clean tree for months
+    while reading nothing, and the next check written to need a specific version
+    would have gone the same way.
+    """
+    toml = open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+    declared = re.search(r'^requires-python\s*=\s*"([^"]+)"', toml, re.M)
+    assert declared, "pyproject must declare requires-python"
+
+    spec = declared.group(1).strip()
+    floor = re.fullmatch(r">=\s*(\d+)\.(\d+)", spec)
+    # Deliberately narrow. If the specifier grows a form this cannot read, the
+    # test must fail and be taught it -- a parser that shrugs and returns None
+    # here is the hollow check this whole test exists to stop.
+    assert floor, (f"requires-python is {spec!r}; this test only reads '>=X.Y'. "
+                   "Teach it the new form rather than deleting it.")
+
+    want = (int(floor.group(1)), int(floor.group(2)))
+    have = sys.version_info[:3]
+    assert have[:2] >= want, (
+        f"running {'.'.join(map(str, have))}, but pyproject requires "
+        f">={want[0]}.{want[1]}. Rebuild the virtualenv on a supported "
+        "interpreter; a green suite under this one is not evidence.")
+
+
 def test_no_source_file_carries_an_invalid_escape_sequence():
     r"""
     A stray backslash in a string literal used to be a DeprecationWarning, became
@@ -774,9 +810,28 @@ def test_no_source_file_carries_an_invalid_escape_sequence():
     DeprecationWarning that pytest does not surface. A check that cannot fire on
     the interpreter it runs under is not a check, so this one promotes the warning
     to an error and the floor is now 3.12.
+
+    Raising the floor was not enough on its own. The floor is a number in a file;
+    what decides whether this check reads anything is the interpreter actually
+    invoking it, and for months that was still 3.10. So it now proves it can see
+    a planted escape before it trusts a clean scan of the tree.
     """
     import pathlib
     import warnings
+
+    # The canary. On 3.10 and 3.11 compile() stays silent here, every file below
+    # "passes" unexamined, and the test is decoration.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        try:
+            compile('x = "C:\\ "\n', "<canary>", "exec")
+        except (SyntaxWarning, SyntaxError):
+            pass
+        else:
+            raise AssertionError(
+                "this interpreter does not report invalid escape sequences, so "
+                "the scan below would pass without reading a single file. "
+                f"Running {'.'.join(map(str, sys.version_info[:3]))}; needs 3.12+.")
 
     skip = {".venv", "build", "__pycache__", "hindsight", "reliquary", "snare",
             "vouch", "chartlag", "pgplan", "pgsow", "masher", "crossfoot",
