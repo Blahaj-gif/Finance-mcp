@@ -652,7 +652,6 @@ def test_both_interval_maps_agree_on_what_exists():
 def test_a_stored_frame_comes_back_intact(tmp_path, monkeypatch):
     from dashboard import barcache
     monkeypatch.setattr(barcache, "CACHE_DIR", str(tmp_path))
-    frame = rising_frame(20) if "rising_frame" in dir() else None
     frame = pd.DataFrame({
         "time": ["2026-08-06 04:00:00", "2026-08-07 04:00:00"],
         "open": [1.0, 2.0], "high": [2.0, 3.0], "low": [0.5, 1.5],

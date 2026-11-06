@@ -18,7 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "hypothesis"]
+# ruff is pinned to a minor floor rather than left open: a new rule arriving in
+# a patch release should not turn a green branch red without anyone choosing it.
+dev = ["pytest", "hypothesis", "ruff>=0.14,<0.15"]
 # The floor is the release that introduced `width=`. The dashboard used
 # `use_container_width=`, which Streamlit documented for removal after
 # 2025-12-31 -- a date already past -- against an unpinned dependency, so a
@@ -81,3 +83,24 @@ include-package-data = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+# Linting. Deliberately narrow: `F` is pyflakes, the rules that find defects
+# rather than opinions -- an undefined name, a shadowed definition, a value
+# computed and then dropped.
+#
+# That last category is here because of what it caught. Two of this server's
+# outputs were lying: a position size sized on buying power but printed under
+# the label "equity", and an ATM straddle priced off last trades the project's
+# own audit measured at up to 31 days stale. In both cases the code recorded
+# the real basis in a local variable and never read it, so both read to
+# pyflakes as an unused assignment -- and to a user as a fact.
+#
+# The style rules (`E`) are off on purpose. Forty-five of this codebase's E402
+# hits are deliberate late imports with reasons written beside them, and a
+# reformat is not a review. Turning one on is a decision to make with a diff
+# in hand, not a default to inherit.
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["F"]

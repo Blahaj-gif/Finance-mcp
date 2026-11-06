@@ -23,27 +23,44 @@ import dashboard.edgar_forms as edgar_forms
 import dashboard.central_banks as central_banks
 import dashboard.market_calendar as market_calendar
 import dashboard.order_queue as order_queue
-import dashboard.broker as broker
 import dashboard.brokers as brokers
 import dashboard.broker_protocol as broker_protocol
 import dashboard.capabilities as capabilities
 import dashboard.live_signals as live_signals
 import dashboard.macro_watch as macro_watch
-import dashboard.earnings as earnings
 import dashboard.alert_manager as alert_manager
 import dashboard.events as events
-import dashboard.watchers as watchers
 
 # Data-integrity failures (bad ordering, stale bars) deliberately propagate out
 # of the tools as real MCP errors instead of being flattened into a returned
 # string. A tool that returns "Error: ..." as ordinary text is indistinguishable
 # from content, which is how untrustworthy prices get read as authoritative.
-from dashboard.webull_client import DataIntegrityError, StaleDataError, fallback_warning
+from dashboard.webull_client import DataIntegrityError, fallback_warning
 
 # Every tool that prints a consensus verdict carries this. The score is a
 # hand-tuned weighting, and presenting a number between -5 and +5 without that
 # context invites it to be read as a measured probability.
 HEURISTIC_NOTE = ('\n\n*The consensus score is a fixed-weight heuristic over five indicators, not a validated edge — backtested over 250 daily bars it underperformed buy & hold on MU, SPY and NVDA. Read it as a summary of what the indicators currently say.*')
+
+# Said when the risk budget had to be sized on buying power because the broker
+# would not report equity. The two are different quantities -- buying power
+# reflects what can be deployed, equity what is owned -- so the same risk
+# percentage against one is not the same trade as against the other. Naming the
+# substitution matters more than naming which is larger, which depends on the
+# account.
+EQUITY_FALLBACK_NOTE = (
+    " — this broker would not report equity for the account, so the risk budget"
+    " is sized on buying power instead. The two are different quantities, so the"
+    " same risk percentage is a different trade")
+
+# Said when either straddle leg was priced from a last trade rather than a live
+# market. Not a generic caveat: 31 days is the measured staleness from the
+# AAPL/SPY/NVDA/MU chain audit, and a stale straddle understates the move,
+# which is the direction that matters to someone selling premium against it.
+STALE_STRADDLE_NOTE = (
+    " — at least one leg has no live market, so this uses a last trade, measured"
+    " up to 31 days stale on illiquid strikes; a stale straddle understates the"
+    " move")
 
 # Initialize FastMCP Server
 mcp = FastMCP("Finance MCP")
@@ -1462,7 +1479,6 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         order_type: LMT (Limit) or MKT (Market).
         limit_price: The limit price if order_type is LMT.
     """
-    import json
     import datetime
     import hashlib
     
@@ -1520,7 +1536,14 @@ def draft_order(symbol: str, action: str, quantity: float, order_type: str = "LM
         # re-pricing everything already in it.
         est_notional = None
         try:
-            account_id = adapter.primary_account_id()
+            # Resolved and deliberately not kept: nothing below needs the id,
+            # and this call is here to fail. If the account cannot be resolved
+            # -- bad credentials, wrong regional entity, an entitlement problem
+            # -- the `except` at the end of this block turns that into a SAFETY
+            # BLOCK instead of letting a draft be raised against an account
+            # this process cannot actually see. Removing the call because the
+            # name was unused would delete the check.
+            adapter.primary_account_id()
 
             # What the queue has already promised. Checking this order against
             # the account alone is only correct when it is the only draft.
@@ -2208,7 +2231,6 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
         entry_price: Planned entry. Defaults to the latest close.
         account_currency: Currency line to size against (default USD).
     """
-    from webull.trade.trade_client import TradeClient
     try:
         if risk_percent <= 0 or risk_percent > 100:
             raise ToolError(f"risk_percent must be between 0 and 100, got {risk_percent}")
@@ -2264,7 +2286,10 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
                               + float(asset.get("cash_balance", 0) or 0))
                     break
         if equity <= 0:
-            equity, equity_basis = buying_power, "buying power (equity unavailable)"
+            # Short enough to be a label. The explanation rides on
+            # EQUITY_FALLBACK_NOTE beside it, because the number needs a name
+            # and the substitution needs a sentence.
+            equity, equity_basis = buying_power, "buying power"
 
         risk_budget = equity * (risk_percent / 100.0)
         raw_shares = risk_budget / risk_per_share
@@ -2291,7 +2316,12 @@ def calculate_position_size(symbol: str, stop_loss_price: float, risk_percent: f
             f"`{_money(risk_per_share, price_ccy)}` ({stop_pct:.2f}%)\n"
             f"* **Stop distance in ATR(14)**: `{atr_multiple:.2f}×` "
             f"(ATR = {_money(atr, price_ccy)})\n\n"
-            f"* **{acct_ccy} equity**: `{_money(equity, acct_ccy)}`\n"
+            # The base, under its own name. This used to say "equity"
+            # unconditionally, so a budget sized on buying power was presented
+            # as a budget sized on equity -- the one thing the comment above
+            # the fallback promised it would not do.
+            f"* **{acct_ccy} {equity_basis}**: `{_money(equity, acct_ccy)}`"
+            f"{'' if equity_basis == 'equity' else EQUITY_FALLBACK_NOTE}\n"
             f"* **Risk budget @ {risk_percent:g}%**: `{_money(risk_budget, acct_ccy)}`\n"
             f"* **Suggested size**: **{shares:,.4f} shares** "
             f"(notional `{_money(shares * entry, price_ccy)}`)\n"
@@ -2408,7 +2438,6 @@ def get_portfolio_risk() -> str:
     Analyses the live account: position-level P&L, concentration, and portfolio
     volatility/beta versus SPY. Highlights over-concentration and correlated clusters.
     """
-    from webull.trade.trade_client import TradeClient
     import numpy as np
     try:
         adapter = brokers.get()
@@ -2588,7 +2617,6 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         symbol: Ticker symbol (e.g. MU, NVDA).
         expiration: Expiry as YYYY-MM-DD. Defaults to the nearest expiry.
     """
-    import numpy as np
     import datetime as _dt
     from math import log, sqrt, exp, erf, pi
 
@@ -2651,9 +2679,15 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         if sd:
             straddle, straddle_quality = sd["straddle"], sd["quality"]
         else:
+            # straddle_price declines when a leg has no bid, no ask and no last
+            # trade. This used to sum the two lastPrice columns anyway, which
+            # in that situation are both zero -- and then announce a +/-0.00%
+            # implied move, the most confident-sounding line in the output and
+            # a fabricated one. A straddle of zero is the absence of a price,
+            # not a forecast of no movement.
             straddle = float(atm_call["lastPrice"]) + float(atm_put["lastPrice"])
             straddle_quality = "last"
-        implied_move_pct = straddle / spot * 100
+        implied_move_pct = straddle / spot * 100 if straddle > 0 else None
 
         iv_info = options_math.atm_iv(calls, puts, spot, t)
         atm_iv = iv_info["iv"]
@@ -2719,9 +2753,22 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
                 out += f"  *{verdict}*\n"
         else:
             out += f"* **IV rank**: not yet available — {rank_basis}.\n"
-        out += (f"* **ATM straddle**: `${straddle:,.2f}`  →  market implies a "
-                f"**±{implied_move_pct:.2f}%** move by expiry "
-                f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)\n")
+        # Which quotes this came from, every time. straddle_price refuses
+        # `lastPrice` deliberately, and the branch above reinstates it when
+        # there is no live market -- so an implied move derived from month-old
+        # trades used to read exactly like one derived from a two-sided market.
+        # The greeks table below already prints a per-row `Quote` column; this
+        # is the same disclosure for the headline number.
+        if implied_move_pct is None:
+            out += ("* **ATM straddle**: not priceable — neither ATM leg has a "
+                    "bid, an ask or a last trade, so there is no implied move "
+                    "to report.\n")
+        else:
+            out += (f"* **ATM straddle**: `${straddle:,.2f}`  →  market implies a "
+                    f"**±{implied_move_pct:.2f}%** move by expiry "
+                    f"(`${spot * (1 - implied_move_pct / 100):,.2f}` – `${spot * (1 + implied_move_pct / 100):,.2f}`)"
+                    f"  <br>*Basis: {straddle_quality} quotes"
+                    f"{STALE_STRADDLE_NOTE if 'last' in straddle_quality else ''}.*\n")
 
         # Put/call skew: are downside strikes bid up relative to upside?
         # Illiquid rows are dropped first. 30% of AAPL strikes had a zero bid
@@ -2743,7 +2790,10 @@ def get_options_analytics(symbol: str, expiration: str = None) -> str:
         # On a 1-day expiry nothing trades 5% out, so a fixed band reported
         # "not measurable" on the most liquid chain in the world; on a LEAP it
         # would sit far inside the money instead.
-        wing = max(implied_move_pct / 100.0, 0.01)
+        # With no priceable straddle there is no market-implied width to size
+        # the wings by, so fall back to the 1% floor this max() already applies
+        # rather than crashing on a None.
+        wing = max((implied_move_pct or 0.0) / 100.0, 0.01)
         put_vols = _wing_iv(puts, puts["strike"] < spot * (1 - wing), False)
         call_vols = _wing_iv(calls, calls["strike"] > spot * (1 + wing), True)
         if put_vols and call_vols:

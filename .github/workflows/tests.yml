@@ -27,6 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # Pyflakes rules only -- see the [tool.ruff] comment in pyproject for why
+      # the style rules are off. Paths are named rather than left to a bare `.`
+      # so the set linted here cannot quietly change with .gitignore.
+      #
+      # Runs before the suite: an undefined name or a dropped value is cheaper
+      # to read about in two seconds than to find in a three-minute test run,
+      # and it has already caught two defects a passing suite did not.
+      - name: Lint
+        run: ruff check finance_mcp.py dashboard tests
+
       # The suite is deliberately offline: every test runs against recorded
       # payloads or stubs, so CI never needs Webull credentials and never
       # places an order. If a test starts needing the network, that is a bug

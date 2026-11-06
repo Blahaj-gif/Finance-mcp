@@ -72,11 +72,11 @@ def test_previewing_an_order_is_read_only():
 
 def test_the_writing_tools_are_the_ones_that_write():
     """
-    Derived from the source rather than trusted: a fortieth tool that opens a
-    file or posts to a broker without being declared would be advertised as
-    read-only, which is the one lie these annotations must not tell.
+    Derived from the registered server rather than trusted: a fortieth tool
+    that opens a file or posts to a broker without being declared would be
+    advertised as read-only, which is the one lie these annotations must not
+    tell.
     """
-    source = open(srv.__file__, encoding="utf-8").read()
     declared = set(srv.WRITING_TOOLS)
 
     registered = {t.name for t in _tools()}
@@ -209,8 +209,6 @@ def test_the_readme_states_the_real_read_only_count():
     "35 of 39" for a day after three tools were removed. A number in prose
     drifts silently; deriving it from the server is the only way it stays true.
     """
-    import re
-
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
     match = re.search(r"\*\*(\d+) of\s*\n?(\d+) are annotated read-only", readme)

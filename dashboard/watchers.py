@@ -21,7 +21,6 @@ So they are covered by the first watcher rather than the second.
 Nothing here decides anything. Each poll turns a feed into candidate events and
 hands them to `events.record`, which owns deduplication and notification.
 """
-import datetime
 import json
 import os
 import re

@@ -81,6 +81,42 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   The headline test simulates 120,000 paths from the fitted parameters and
   compares the band against where they land, so an error copied into both the
   code and the test cannot pass.
+- **`calculate_position_size` printed a budget sized on buying power under the
+  label "equity".** The comment above the fallback promised the opposite — that
+  where equity is unavailable "the output says so rather than presenting a
+  different number under the same name" — and the variable holding the real
+  basis was written twice and read nowhere. Equity and buying power are
+  different quantities, so the same risk percentage against one is a different
+  trade from the same percentage against the other. The label now names the
+  base it actually used and says why when it is not equity.
+- **`get_options_analytics` reported an implied move off quotes it declined to
+  trust, and invented one when it had none.** `options_math.straddle_price`
+  refuses `lastPrice` on purpose: the chain audit measured it up to 31 days
+  stale on illiquid strikes. The caller recorded the basis in
+  `straddle_quality` and printed none of it, so a move derived from month-old
+  trades read exactly like one derived from a two-sided market — while the
+  greeks table two lines below already printed a per-row `Quote` column. Worse,
+  when neither ATM leg had a bid, an ask *or* a last trade, the fallback summed
+  two zero columns and announced `market implies a ±0.00% move by expiry`: a
+  fabricated certainty, and the most confident-sounding line in the output. The
+  basis is now stated every time, a stale leg carries the measured caveat, and
+  an unpriceable straddle says so instead of forecasting stillness.
+- **There was no linter, anywhere.** No ruff, black, flake8 or pre-commit, and
+  nothing in CI, which is how a module with no docstring and the two defects
+  above went unremarked. `ruff check` is now a CI step and a dev dependency,
+  selecting the pyflakes (`F`) rules only — the ones that find defects rather
+  than opinions. Both bugs above were sitting in it as unused assignments. The
+  style rules stay off deliberately: 45 of this codebase's E402 hits are
+  deliberate late imports with reasons written beside them, and a reformat is
+  not a review. Clearing the 36 findings removed 25 dead imports, a duplicate
+  `re`, four f-strings with nothing to interpolate, and a line in
+  `test_data_integrity.py` that called a function which does not exist —
+  overwritten by the next statement, so it had never once run. Two kept their
+  calls and lost only the dead name, with a comment saying why: the CSV header
+  consumed by `central_banks`, and `primary_account_id()` in `draft_order`,
+  which is there to fail — it turns an unreachable account into a SAFETY BLOCK
+  rather than a draft raised blind. A test asserts the gate stays wired, so
+  removing it now takes an argument rather than a quiet YAML deletion.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

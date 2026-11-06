@@ -851,3 +851,40 @@ def test_no_source_file_carries_an_invalid_escape_sequence():
 
     assert scanned > 40, f"only scanned {scanned} files; the walk is not finding them"
     assert not offenders, "invalid escape sequences:\n" + "\n".join(offenders)
+
+
+def test_the_lint_gate_is_selected_and_wired_into_ci():
+    """
+    A linter nothing runs is a linter nobody notices removing.
+
+    The pyflakes ruleset earned its place rather than arriving as boilerplate:
+    two of this server's outputs were lying, and in both cases the code had
+    recorded the truth in a local variable and never read it -- a position size
+    sized on buying power and printed as "equity", and an ATM straddle priced
+    off last trades the project's own audit measured at up to 31 days stale.
+    Both read to pyflakes as an unused assignment. Both passed the suite.
+
+    So this asserts the ruleset is still selected, ruff is still a declared dev
+    dependency, and the workflow still calls it over the same paths. Dropping
+    the gate now takes a deliberate edit to a test instead of a quiet deletion
+    from a YAML file.
+    """
+    toml = open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+    assert re.search(r'^\s*select\s*=\s*\[[^\]]*"F"', toml, re.M), (
+        "pyproject must select the pyflakes (F) rules for ruff")
+    assert re.search(r'^\s*dev\s*=.*ruff>=', toml, re.M), (
+        "ruff must be a declared dev dependency, or CI cannot run it")
+
+    workflow = open(os.path.join(ROOT, ".github", "workflows", "tests.yml"),
+                    encoding="utf-8").read()
+    lint_lines = [ln for ln in workflow.splitlines() if "ruff check" in ln]
+    assert lint_lines, (
+        "the tests workflow must run ruff, or the pyproject configuration is "
+        "decoration")
+
+    # The paths are named in CI rather than left to a bare `.`, so the set
+    # being linted cannot change with .gitignore. If that list shrinks, this
+    # is where it has to be argued for.
+    lint = lint_lines[0]
+    for path in ("finance_mcp.py", "dashboard", "tests"):
+        assert path in lint, f"ruff must lint {path}; the CI line is: {lint.strip()}"

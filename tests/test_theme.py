@@ -240,9 +240,6 @@ def test_no_emoji_on_a_user_visible_surface(relpath):
 
 def test_provenance_markers_are_words_not_pictures():
     """They carry how much a number can be trusted; that must always render."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "_fm", os.path.join(ROOT, "finance_mcp.py"))
     src = open(os.path.join(ROOT, "finance_mcp.py"), encoding="utf-8").read()
     block = src.split("PROVENANCE = {", 1)[1].split("}", 1)[0]
     for tag in ("[FILED]", "[EXACT]", "[MARKET]", "[OFFICIAL]",

@@ -115,7 +115,7 @@ def main() -> int:
         # A limit far below the market so that even a mistake could not fill.
         order = broker.build_order(args.symbol, "BUY", 1, "LMT", 0.01,
                                    client_order_id="VERIFY_probe", uic=uic)
-        print(f"\n[5] Q5 order payload this adapter would send (NOT sent):")
+        print("\n[5] Q5 order payload this adapter would send (NOT sent):")
         print("    " + json.dumps(order, default=str)[:400])
         report[5] = {"status": "constructed", "payload": redact(order, keep)}
 

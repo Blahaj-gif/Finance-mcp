@@ -6,6 +6,7 @@ is pinned down rather than smoke-tested.
 """
 import datetime
 import os
+import re
 import sys
 
 import pandas as pd
@@ -641,3 +642,154 @@ def test_alignment_keeps_a_clean_book_whole():
 
     rets, bench_ret = srv._align_on_sessions({"A": a, "B": b}, bench)
     assert len(rets) == 3, "three returns from four clean sessions"
+
+
+# =====================================================================
+# Which base the risk budget was sized on
+# =====================================================================
+# The comment in calculate_position_size promises that where equity is
+# unavailable "the output says so rather than presenting a different number
+# under the same name". It did not: the fallback value was printed under the
+# label "equity", and the variable holding the real basis was never read.
+
+def _account_with(monkeypatch, balance):
+    """Re-point the fake broker at a specific balance payload."""
+    class Acct:
+        def get_account_list(self):
+            return [{"account_id": "ACC1", "account_label": "Individual Cash"}]
+
+        def get_account_balance(self, account_id):
+            return balance
+
+        def get_account_position(self, account_id):
+            return []
+
+    import webull.trade.trade_client as tc
+    monkeypatch.setattr(tc, "TradeClient",
+                        lambda api: type("T", (), {"account_v2": Acct()})())
+
+
+def test_position_size_names_equity_as_the_base_when_the_broker_reports_it(
+        monkeypatch, fake_account):
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                      risk_percent=1.0, entry_price=100.0)
+
+    assert "USD equity**: `$10,000.00`" in out, out
+    assert "buying power" not in out.split("Suggested size")[0], (
+        "equity was available; nothing should mention sizing on buying power")
+
+
+def test_position_size_says_when_it_sized_on_buying_power_instead(
+        monkeypatch, fake_account):
+    """
+    Equity unavailable -- the balance carries no line for the account currency,
+    which is what a non-Webull broker looks like here. The number is the same
+    either way; the label was the lie.
+    """
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=200: (flat_frame(price=100.0), "Webull OpenAPI"))
+    _account_with(monkeypatch, {
+        "total_asset_currency": "THB",
+        "account_currency_assets": [
+            {"currency": "USD", "cash_balance": "0.00",
+             "buying_power": "10000.00", "market_value": "0.00"},
+        ],
+    })
+
+    out = srv.calculate_position_size("AAA", stop_loss_price=90.0,
+                                      risk_percent=1.0, entry_price=100.0)
+
+    assert "USD buying power**: `$10,000.00`" in out, out
+    assert "USD equity**" not in out, "buying power must not be labelled equity"
+    assert "would not report equity" in out, (
+        "the substitution has to be stated, not inferred from the label")
+
+
+# =====================================================================
+# Which quotes the straddle was priced from
+# =====================================================================
+# options_math.straddle_price refuses lastPrice on purpose: the audit found it
+# up to 31 days stale on illiquid strikes. get_options_analytics recorded the
+# basis in `straddle_quality` and printed none of it, so an implied move
+# derived from month-old trades read exactly like one derived from live quotes.
+
+def _chain_row(strike, bid, ask, last):
+    return {"strike": strike, "bid": bid, "ask": ask, "lastPrice": last,
+            "impliedVolatility": 0.30, "volume": 100, "openInterest": 500}
+
+
+def _stub_chain(monkeypatch, calls, puts, expiry="2026-12-18"):
+    class Chain:
+        def __init__(self):
+            self.calls = pd.DataFrame(calls)
+            self.puts = pd.DataFrame(puts)
+
+    class Ticker:
+        options = (expiry,)
+
+        def option_chain(self, which):
+            return Chain()
+
+    monkeypatch.setattr(srv.webull_client, "yahoo_ticker", lambda s: Ticker())
+    monkeypatch.setattr(srv.webull_client, "fetch_data",
+                        lambda s, i="D", c=260: (flat_frame(n=260, price=100.0),
+                                                 "Webull OpenAPI"))
+
+
+def test_the_straddle_states_the_quotes_it_was_priced_from(monkeypatch):
+    """A two-sided market on both legs. Good case, still labelled."""
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 4.9, 5.1, 5.0)],
+                puts=[_chain_row(100.0, 3.9, 4.1, 4.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "ATM straddle" in out, out
+    assert "Basis: mid" in out, out
+    assert "stale" not in out.lower().split("put/call")[0], (
+        "a clean two-sided market must not carry the staleness caveat")
+
+
+def test_a_straddle_priced_off_last_trades_is_labelled_as_such(monkeypatch):
+    """
+    No bid and no ask on either leg, so quote_mid falls to the last trade and
+    straddle_price reports quality "last/last". The straddle is still returned
+    and the move is still computed -- it is the provenance that was missing.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 0.0, 0.0, 5.0)],
+                puts=[_chain_row(100.0, 0.0, 0.0, 4.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    # The straddle is still priced and still reported -- 5.00 + 4.00 off the
+    # last trades. Only the provenance was missing.
+    assert "`$9.00`" in out, out
+    assert re.search(r"±\d+\.\d\d%\*\* move by expiry", out), out
+    assert "±0.00%" not in out, out
+    assert "Basis: last/last" in out, out
+    assert "31 days" in out, (
+        "the measured staleness is the reason this matters and belongs in the "
+        "output, not only in a source comment")
+
+
+def test_an_unpriceable_straddle_does_not_report_a_zero_percent_move(monkeypatch):
+    """
+    No bid, no ask and no last trade. straddle_price declines, and the old
+    fallback summed two lastPrice columns of 0.0 and announced "market implies
+    a +/-0.00% move by expiry" -- a fabricated certainty, and the most
+    confident-sounding line in the whole output.
+    """
+    _stub_chain(monkeypatch,
+                calls=[_chain_row(100.0, 0.0, 0.0, 0.0)],
+                puts=[_chain_row(100.0, 0.0, 0.0, 0.0)])
+
+    out = srv.get_options_analytics("AAA")
+
+    assert "0.00%" not in out, f"a move of zero must never be asserted: {out}"
+    assert "ATM straddle" in out, out
+    assert "not priceable" in out or "unavailable" in out, (
+        f"it has to say why there is no implied move: {out}")

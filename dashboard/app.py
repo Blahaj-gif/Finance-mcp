@@ -428,7 +428,6 @@ render_html(f"""
 
 
 # Initialize Background Alert Manager Thread in Streamlit if not running
-import threading
 import alert_manager
 
 # Guarded inside alert_manager, not by st.session_state: session state is per
@@ -1392,7 +1391,6 @@ with tab_portfolio:
         if _broker_unconfigured:
             raise _NoBrokerConfigured(_broker_unconfigured)
 
-        from webull.core.client import ApiClient
         from webull.trade.trade_client import TradeClient
         import webull_client
         import sys

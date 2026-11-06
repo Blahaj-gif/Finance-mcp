@@ -218,7 +218,9 @@ def _boe_series(series_code: str, observations: int = 260):
     text = ec._http(url, headers={"User-Agent": ec.SEC_USER_AGENT or "Finance MCP"})
 
     reader = csv.reader(io.StringIO(text))
-    header = next(reader, None)
+    # Consumed, not inspected: this advances past the header so the loop below
+    # sees data rows only. The call is the point, not the value.
+    next(reader, None)
     rows = []
     for row in reader:
         if len(row) < 2:
