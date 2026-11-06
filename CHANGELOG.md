@@ -139,6 +139,20 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   call the score a heuristic in its description. Cost: +553 tokens on
   `tools/list`, against a single wrong call into the most expensive options
   tool, which returns more than that.
+- **Nothing asserted the freshness rule, so an audit for it read six false
+  gaps.** `freshness_line`'s docstring states that every price-bearing answer
+  says which bar it is quoting and how old it is. Thirteen tools fetch bars and
+  only seven call it — which looks like a gap and is not one. The rule is met
+  two ways by design: a single-symbol answer gets one stamp under the heading,
+  and a sweep gets `bar_age` per row, for the reason that function's own
+  docstring gives — one stale name among twenty fresh ones is invisible in a
+  summary line, and a watchlist scan or sector heatmap is where that hides. All
+  six sweeps were checked and all six render it, as an `As of`, `Age` or `Vol
+  as of` column. A test now asserts the rule as it stands: disclosure by either
+  mechanism, and that `bar_age` callers render what they computed, since a
+  dropped staleness label would leave stale prices looking live while the code
+  appeared to handle it. Confirmed to fail both ways — a stamp removed from a
+  single-symbol tool, and a sweep that computes the age and renders none of it.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked

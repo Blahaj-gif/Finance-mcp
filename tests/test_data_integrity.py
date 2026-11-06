@@ -1109,3 +1109,66 @@ def test_displaying_a_frame_does_not_mutate_the_stored_one():
     wc.display_frame(frame, "D")
 
     assert frame["time"].iloc[0] == "2026-09-11 04:00:00"
+
+
+def test_every_price_bearing_tool_discloses_how_old_its_bars_are():
+    """
+    `freshness_line`'s docstring states the rule: "every price-bearing answer
+    states which bar it is quoting and how old that bar is." Nothing asserted
+    it, and the rule is satisfied two different ways depending on the shape of
+    the answer, which is easy to misread as a gap.
+
+    A single-symbol answer takes `freshness_line` — one stamp under the
+    heading. A sweep takes `bar_age` per row, for the reason that function's
+    own docstring gives: one stale name among twenty fresh ones is invisible in
+    a summary line, and a watchlist scan or a sector heatmap is exactly where
+    that hides. Auditing for only the first one reports six false gaps.
+
+    So this asserts the rule as it actually stands -- disclosure by either
+    mechanism -- and that `bar_age` callers render what they computed. The two
+    bugs fixed earlier in this branch were both a value computed and dropped,
+    and a staleness label dropped the same way would leave stale prices looking
+    live while the code appeared to handle it.
+    """
+    import ast
+    import asyncio
+
+    import finance_mcp as srv
+
+    source = open(srv.__file__, encoding="utf-8").read()
+    lines = source.splitlines()
+    registered = {t.name for t in asyncio.run(srv.mcp._list_tools())}
+
+    silent, computed_but_unrendered = [], []
+    checked = 0
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in registered:
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        if "fetch_data" not in body and "get_webull_data" not in body:
+            continue
+        checked += 1
+
+        stamps = "freshness_line" in body
+        per_row = "bar_age" in body
+        if not (stamps or per_row):
+            silent.append(node.name)
+            continue
+
+        # Computed is not disclosed. A bar_age result has to reach the text:
+        # either a key of it is interpolated, or it feeds a rendered label.
+        if per_row and not stamps:
+            rendered = any(k in body for k in ('["as_of"]', "['as_of']",
+                                               '["age"]', "['age']",
+                                               '["current"]', "['current']"))
+            if not rendered:
+                computed_but_unrendered.append(node.name)
+
+    assert checked >= 13, (
+        f"only found {checked} price-bearing tools; the walk is not finding them")
+    assert not silent, (
+        "these fetch price bars and disclose nothing about their age:\n  "
+        + "\n  ".join(silent))
+    assert not computed_but_unrendered, (
+        "these call bar_age and never render it, so the staleness is computed "
+        "and dropped:\n  " + "\n  ".join(computed_but_unrendered))
