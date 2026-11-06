@@ -56,6 +56,31 @@ it surfaced an end-of-life interpreter and a dependency set two months stale.
   the running interpreter satisfies `requires-python`, and the scan compiles a
   planted escape first and fails loudly if the interpreter cannot see it. Both
   were confirmed failing on 3.10 before the virtualenv was rebuilt on 3.12.13.
+- **The chart's "95% CI" was the spread of a random walk.**
+  `forecaster.run_ar_forecast` fits an AR(p) on log returns and then drew its
+  bands at `sqrt(k) * sigma`, a formula that ignores the coefficients it had
+  just estimated. A shock at step one is still propagating at step fifteen, so
+  the cumulative spread grows faster than `sqrt(k)` whenever those coefficients
+  are not zero: measured 2.81x too narrow on an AR(1) with phi 0.69 at fifteen
+  steps — a 95% band of 6.07–6.98 where it should have been 5.35–7.93. It was
+  right only in the limit where the model is pointless, and wrong in the
+  direction that makes a position look safer than it is. Shocks are now
+  propagated through the fitted recursion, and the docstring states that
+  coefficient uncertainty remains excluded, so the band is a floor on the true
+  interval rather than an estimate of it.
+- **The same module drew forecast bars on days the exchange is shut**, and was
+  the only logic module here with no tests. It stepped over Saturdays by hand —
+  only Saturdays, so a Sunday reachable from a Saturday bar survived, and no
+  market holiday was handled at all — which put a bar on Thanksgiving in any
+  fifteen-session projection from 21 November 2025. It now asks
+  `market_calendar.is_trading_day`, the calendar the rest of the project
+  already uses, and leaves intraday spacing alone because a trading-day walk
+  would spread fifteen hourly bars over fifteen days. The residual scale also
+  divides by the degrees of freedom left after fitting rather than using
+  numpy's population deviation, which had drawn every band slightly too tight.
+  The headline test simulates 120,000 paths from the fitted parameters and
+  compares the band against where they land, so an error copied into both the
+  code and the test cannot pass.
 - **Eight paths were untracked but not ignored**, including five sibling
   repositories, and `git status` had been noisy for months. That is the same
   shape as the `iv_history.json` incident this file already records: untracked
