@@ -3,7 +3,7 @@
 Dates are the release dates. Entries name what changed and, where it matters,
 the bug that caused it — the commit log is the fuller record.
 
-## Unreleased
+## 0.5.0 — 2026-11-06
 
 Maintenance, prompted by a review that asked whether to move to Python 3.15.
 The answer is no, and the reason the question was worth asking anyway is that
